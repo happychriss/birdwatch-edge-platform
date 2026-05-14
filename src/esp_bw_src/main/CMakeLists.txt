@@ -1,0 +1,33 @@
+idf_component_register(
+    SRCS
+        "main.c"
+        "debug.c"
+        "power.c"
+        "adc_sense.c"
+        "wifi_sta.c"
+        "camera.c"
+        "light_check.c"
+        "http_client.c"
+        "camera_server.c"
+        "remote_log.c"
+    INCLUDE_DIRS
+        "."
+    PRIV_REQUIRES
+        nvs_flash
+        esp_wifi
+        esp_event
+        esp_netif
+        esp_http_client
+        esp_http_server
+        esp_adc
+        esp_timer
+        esp_driver_gpio
+        espressif__cjson
+        spi_flash
+        esp_psram
+        esp_hw_support
+        esp_pm
+        log
+        app_update
+        esp_app_format
+)

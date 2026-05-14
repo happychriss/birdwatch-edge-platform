@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Index Page</title>
+    <style>
+        .image-container {
+            display: flex;
+            justify-content: flex-end;
+            margin-top: 30px;
+            margin-right: 50px;
+        }
+
+        .image-container img {
+            max-width: 300px;
+            max-height: 300px;
+        }
+        
+        .preview-image {
+            max-width: 50px;
+            max-height: 50px;
+            object-fit: cover;
+            border-radius: 3px;
+            border: 1px solid #ddd;
+        }
+
+        .content-div {
+            margin: 30px 20px 20px 20px;
+            padding: 20px;
+            position: static;
+            /* No longer relative, so it will flow below the image */
+        }
+
+        .button {
+            margin-bottom: 20px;
+        }
+
+        .link {
+            display: block;
+            margin-top: 20px;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 20px;
+        }
+
+        th, td {
+            border: 1px solid #ddd;
+            padding: 8px;
+            text-align: left;
+        }
+
+        tr:nth-child(even) {
+            background-color: #f2f2f2;
+        }
+
+        th {
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            cursor: pointer;
+        }
+
+        .modal-buttons button:hover {
+            background-color: #45a049;
+        }
+    </style>
+</head>
+<body>
+
+<h1>Global Status: {{ status }}</h1>
+<div class="image-container">
+    {% if image_path %}
+        <a href="/browse_results">
+            <img src="{{ url_for('static', filename=image_path) }}" alt="Latest Image">
+        </a>
+    {% endif %}
+</div>
+
+<div class="content-div">
+
+    <button class="button" onclick="window.location.href='/set_status?status=PIR_Sensor'">Start PIR Sensor</button>
+    <button class="button" onclick="window.location.href='/set_status?status=Camera_Server'">Start Camera Server </button>
+
+    <a class="link" href="http://192.168.1.63/">Settings</a>
+    <a class="link" href="http://192.168.1.63/stream">Stream</a>
+
+    <table>
+        <tr>
+            <th>ID</th>
+            <th>Preview</th>
+            <th>Source</th>
+            <th>Date</th>
+            <th>Voltage</th>
+            <th>Bright-Diff</th>
+            <th>LDR Power</th>
+            <th>Trigger</th>
+            <th>Filename</th>
+        </tr>
+        {% for entry in entries %}
+            <tr>
+                <td><a href="/browse_results?id={{ entry.id }}">{{ entry.id }}</a></td>
+                <td>
+                    {% if entry.filename %}
+                        <a href="/browse_results?id={{ entry.id }}">
+                            <img src="{{ url_for('static', filename=entry.filename) }}" alt="Preview" class="preview-image">
+                        </a>
+                    {% endif %}
+                </td>
+                <td>{{ entry.source }}</td>
+                <td>{{ entry.date.strftime("%H:%M:%S %d.%m.%y") }}</td>
+                <td>{{ entry.voltage }}</td>
+                <td>{{ entry.brightdiff }}</td>
+                <td>{{ entry.ldr_power }}</td>
+                <td>{{ entry.trigger }}</td>
+                <td>{{ entry.filename }}</td>
+            </tr>
+        {% endfor %}
+    </table>
+    
+    <!-- Pagination controls -->
+    <div class="pagination" style="margin-top: 20px; text-align: center;">
+        {% if page > 1 %}
+            <a href="/?page={{ page - 1 }}" style="margin: 0 10px; padding: 5px 10px; background-color: #4CAF50; color: white; text-decoration: none; border-radius: 3px;">Previous</a>
+        {% endif %}
+        
+        <span style="margin: 0 10px;">Page {{ page }} of {{ total_pages }}</span>
+        
+        {% if page < total_pages %}
+            <a href="/?page={{ page + 1 }}" style="margin: 0 10px; padding: 5px 10px; background-color: #4CAF50; color: white; text-decoration: none; border-radius: 3px;">Next</a>
+        {% endif %}
+    </div>
+</div>
+</body>
+</html>

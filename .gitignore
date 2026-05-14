@@ -1,0 +1,47 @@
+# ─── Claude AI session files ────────────────────────────────────────────────
+memory.md
+.claude/
+
+# ─── IDE / editor ───────────────────────────────────────────────────────────
+.idea/
+*.iml
+.vscode/
+
+# ─── Training images and captured photos (keep folder structure only) ────────
+training-data/**/*.jpg
+training-data/**/*.jpeg
+training-data/**/*.png
+
+# ─── External reference docs (large PDFs — keep README) ──────────────────────
+external-docs/*.pdf
+external-docs/*.odt
+external-docs/*.odf
+external-docs/*.ppk2
+
+# ─── Power profiler measurement files ───────────────────────────────────────
+*.ppk2
+
+# ─── Python project: captured images and training datasets ──────────────────
+src/python_bw_src/jpg_folder/*.jpg
+src/python_bw_src/jpg_folder/*.jpeg
+src/python_bw_src/jpg_folder/*.png
+src/python_bw_src/datasets/**/*.jpg
+src/python_bw_src/datasets/**/*.jpeg
+src/python_bw_src/datasets/**/*.png
+src/python_bw_src/datasets/**/*.zip
+src/python_bw_src/datasets/*.zip
+
+# ─── ESP-IDF firmware: build outputs and downloaded components ───────────────
+src/esp_bw_src/build/
+src/esp_bw_src/managed_components/
+src/esp_bw_src/sdkconfig.old
+src/esp_bw_src/dependencies.lock
+
+# ─── WiFi / DB credentials ───────────────────────────────────────────────────
+src/esp_bw_src/main/credentials.h
+src/python_bw_src/.env
+
+# ─── Python virtual environment and cache ───────────────────────────────────
+src/python_bw_src/.venv/
+src/python_bw_src/__pycache__/
+src/python_bw_src/*.pyc

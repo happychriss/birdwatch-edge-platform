@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>BirdWatch — Device Log</title>
+    <style>
+        body  { background:#1e1e1e; color:#d4d4d4; font-family:monospace; font-size:13px; margin:0; }
+        h1    { background:#2d2d2d; margin:0; padding:10px 16px; font-size:15px; color:#9cdcfe; }
+        #toolbar { background:#2d2d2d; padding:6px 16px; display:flex; gap:12px; align-items:center; border-bottom:1px solid #444; }
+        button { background:#3a3a3a; color:#ccc; border:1px solid #555; padding:4px 12px; cursor:pointer; border-radius:3px; }
+        button:hover { background:#505050; }
+        #log  { padding:8px 16px; overflow-y:auto; height:calc(100vh - 80px); }
+        .line { white-space:pre-wrap; word-break:break-all; padding:1px 0; border-bottom:1px solid #2a2a2a; }
+        .line:hover { background:#2a2a2a; }
+        .E { color:#f48771; }
+        .W { color:#dcdcaa; }
+        .I { color:#d4d4d4; }
+        #status { margin-left:auto; font-size:12px; color:#888; }
+    </style>
+</head>
+<body>
+<h1>BirdWatch — Device Log</h1>
+<div id="toolbar">
+    <button onclick="togglePause()">⏸ Pause</button>
+    <button onclick="clearLog()">🗑 Clear</button>
+    <label><input type="checkbox" id="autoscroll" checked> Auto-scroll</label>
+    <span id="status">● live</span>
+</div>
+<div id="log">
+{% for line in lines %}
+<div class="line {{ 'E' if ' E (' in line else 'W' if ' W (' in line else 'I' }}">{{ line }}</div>
+{% endfor %}
+</div>
+<script>
+let paused = false;
+let lastCount = {{ lines|length }};
+
+function togglePause() {
+    paused = !paused;
+    document.querySelector('button').textContent = paused ? '▶ Resume' : '⏸ Pause';
+    document.getElementById('status').textContent = paused ? '⏸ paused' : '● live';
+}
+
+function clearLog() {
+    fetch('/logs/clear', {method: 'POST'}).then(() => {
+        document.getElementById('log').innerHTML = '';
+        lastCount = 0;
+    });
+}
+
+function colorClass(line) {
+    if (line.includes(' E (')) return 'E';
+    if (line.includes(' W (')) return 'W';
+    return 'I';
+}
+
+function poll() {
+    if (paused) return;
+    fetch('/logs/data')
+        .then(r => r.json())
+        .then(lines => {
+            if (lines.length === lastCount) return;
+            const box = document.getElementById('log');
+            const newLines = lines.slice(lastCount);
+            newLines.forEach(l => {
+                const d = document.createElement('div');
+                d.className = 'line ' + colorClass(l);
+                d.textContent = l;
+                box.appendChild(d);
+            });
+            lastCount = lines.length;
+            if (document.getElementById('autoscroll').checked)
+                box.scrollTop = box.scrollHeight;
+        })
+        .catch(() => {});
+}
+
+setInterval(poll, 1000);
+</script>
+</body>
+</html>
