@@ -7,6 +7,7 @@
 #include <stdlib.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
+#include "freertos/task.h"
 #include "esp_wifi.h"
 #include "esp_event.h"
 #include "esp_netif.h"
@@ -133,6 +134,16 @@ static void nvs_save_bssid(const uint8_t bssid[6])
     nvs_close(h);
 }
 
+static void nvs_clear_bssid(void)
+{
+    nvs_handle_t h;
+    if (nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h) != ESP_OK) return;
+    nvs_erase_key(h, NVS_KEY_BSSID);
+    nvs_commit(h);
+    nvs_close(h);
+    ESP_LOGI(TAG, "NVS BSSID cache cleared");
+}
+
 esp_err_t bw_wifi_init(void)
 {
     if (s_inited) return ESP_OK;
@@ -224,20 +235,34 @@ static esp_err_t try_connect(const uint8_t *bssid)
     return ESP_FAIL;
 }
 
+static bool bssid_is_zero(const uint8_t b[6])
+{
+    return (b[0] | b[1] | b[2] | b[3] | b[4] | b[5]) == 0;
+}
+
 esp_err_t bw_wifi_connect_blocking(void)
 {
     if (!s_inited) bw_wifi_init();
 
-    // Try cached BSSID first — avoids scan, connects in one shot.
+    static const uint8_t pinned[6] = BW_WIFI_BSSID;
+    if (!bssid_is_zero(pinned)) {
+        // Pinned mode — strict: only this BSSID, no scan fallback.
+        // Recovery is handled by the reboot-once policy in main.c, not by
+        // scanning (which could land us on a mesh extender).
+        ESP_LOGI(TAG, "pinned BSSID — strict mode, no scan fallback");
+        return try_connect(pinned);
+    }
+
+    // Scan mode (BW_WIFI_BSSID = zeros) — cached BSSID first, fall back to scan.
     uint8_t cached_bssid[6];
     if (nvs_load_bssid(cached_bssid)) {
         ESP_LOGI(TAG, "NVS BSSID cached — skipping scan");
         if (try_connect(cached_bssid) == ESP_OK) return ESP_OK;
-        // Cached BSSID failed (AP rebooted, MAC changed) — fall through.
-        ESP_LOGW(TAG, "cached BSSID failed — retrying without hint");
-        esp_wifi_stop();
+        ESP_LOGW(TAG, "cached BSSID failed — clearing cache, backing off %d ms",
+                 BW_WIFI_BACKOFF_MS);
+        nvs_clear_bssid();
+        vTaskDelay(pdMS_TO_TICKS(BW_WIFI_BACKOFF_MS));
     }
-
     return try_connect(NULL);
 }
 

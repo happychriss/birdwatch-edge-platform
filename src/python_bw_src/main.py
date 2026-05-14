@@ -4,17 +4,13 @@
 # Press Double Shift to search everywhere for classes, files, tool windows, actions, and settings.
 from flask import Flask, request, jsonify, render_template, redirect
 from datetime import datetime
-from dotenv import load_dotenv
-from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime
-from sqlalchemy.orm import sessionmaker
-from sqlalchemy.ext.declarative import declarative_base
 import os
 import re
 import requests
 import time
 import threading
 from collections import deque
-load_dotenv()
+from db import BwPhoto, Session
 
 _ansi_re = re.compile(r'\x1b\[[0-9;]*m')
 
@@ -25,29 +21,8 @@ _log_lock  = threading.Lock()
 # Set maximum allowed payload to 16MB (adjust as needed)
 
 
-# get username and password from environment variables
-username = os.getenv('DB_USERNAME')
-password = os.getenv('DB_PASSWORD')
-birdwatch_http="http://192.168.1.43"
+birdwatch_http = "http://192.168.1.43"
 global_status = "PIR_Sensor"
-engine = create_engine(f'postgresql://{username}:{password}@192.168.1.110:5432/goodwatch')
-# Step 4: Define the Battery class
-Base = declarative_base()
-
-class Battery(Base):
-    __tablename__ = 'birdwatch_battery'
-
-    id = Column(Integer, primary_key=True)
-    source = Column(String)
-    date = Column(DateTime)
-    voltage = Column(Float)
-    pinstatus = Column(String)
-    trigger = Column(String)
-    filename = Column(String)
-    brightdiff = Column(Float)
-    ldr_power = Column(Float)
-# Step 5: Create a session
-Session = sessionmaker(bind=engine)
 session = Session()
 
 app = Flask(__name__, static_folder=os.getenv('JPG_FOLDER_PATH'), static_url_path='/static')
@@ -64,13 +39,13 @@ def index():
     offset = (page - 1) * per_page
     
     # Get total count of entries
-    total_entries = session.query(Battery).count()
+    total_entries = session.query(BwPhoto).count()
     total_pages = (total_entries + per_page - 1) // per_page  # Ceiling division
     
     # Get entries for current page
-    entries = session.query(Battery).order_by(Battery.date.desc()).offset(offset).limit(per_page).all()
+    entries = session.query(BwPhoto).order_by(BwPhoto.date.desc()).offset(offset).limit(per_page).all()
     
-    latest_image_entry = session.query(Battery).filter(Battery.filename.isnot(None)).order_by(Battery.id.desc()).first()
+    latest_image_entry = session.query(BwPhoto).filter(BwPhoto.filename.isnot(None)).order_by(BwPhoto.id.desc()).first()
     image_path = None
     if latest_image_entry:
         image_path = latest_image_entry.filename
@@ -104,20 +79,18 @@ def status():
     battery = request.json.get('battery')
     source = request.json.get('source')
     trigger = request.json.get('trigger')
-    brightdiff = request.json.get('brightdiff')  # Read brightdiff
-    ldr_power = request.json.get('ldr_power')  # Read ldr_power
+    brightdiff = request.json.get('brightdiff')
     date = datetime.now()
 
     try:
         battery = float(battery)
-        brightdiff = float(brightdiff)  # Convert brightdiff to float
-        ldr_power = float(ldr_power) if ldr_power is not None else None  # Convert ldr_power to float if it exists
+        brightdiff = float(brightdiff)
     except (TypeError, ValueError):
-        print("Invalid battery, brightdiff, or ldr_power value")
-        return jsonify({'message': 'Invalid battery, brightdiff, or ldr_power value'}), 400
+        print("Invalid battery or brightdiff value")
+        return jsonify({'message': 'Invalid battery or brightdiff value'}), 400
 
-    new_battery = Battery(source=source, date=date, voltage=battery, trigger=trigger, brightdiff=brightdiff, ldr_power=ldr_power)
-    session.add(new_battery)
+    new_photo = BwPhoto(source=source, date=date, voltage=battery, debug=trigger, brightdiff=brightdiff)
+    session.add(new_photo)
     session.commit()
 
     return jsonify({'status': 'OK'}), 200
@@ -180,22 +153,20 @@ def process_request_upload_file():
         battery = request.form.get('battery')
         source = request.form.get('source')
         trigger = request.form.get('trigger')
-        brightdiff = request.form.get('brightdiff')  # Read brightdiff
-        ldr_power = request.form.get('ldr_power')  # Read ldr_power
+        brightdiff = request.form.get('brightdiff')
 
-        print(f"Form data - battery: {battery}, source: {source}, trigger: {trigger}, brightdiff: {brightdiff}, ldr_power: {ldr_power}")
+        print(f"Form data - battery: {battery}, source: {source}, trigger: {trigger}, brightdiff: {brightdiff}")
 
         date = datetime.now()
         try:
             battery = float(battery)
-            brightdiff = float(brightdiff)  # Convert brightdiff to float
-            ldr_power = float(ldr_power) if ldr_power is not None else None  # Convert ldr_power to float if it exists
+            brightdiff = float(brightdiff)
         except (TypeError, ValueError):
-            print("Invalid battery, brightdiff, or ldr_power value")
-            return jsonify({'message': 'Invalid battery, brightdiff, or ldr_power value'}), 400
+            print("Invalid battery or brightdiff value")
+            return jsonify({'message': 'Invalid battery or brightdiff value'}), 400
 
-        new_battery = Battery(source=source, date=date, voltage=battery, trigger=trigger, filename=filename, brightdiff=brightdiff, ldr_power=ldr_power)
-        session.add(new_battery)
+        new_photo = BwPhoto(source=source, date=date, voltage=battery, debug=trigger, filename=filename, brightdiff=brightdiff)
+        session.add(new_photo)
         session.commit()
 
         print('Global status:', global_status)
@@ -224,7 +195,7 @@ def browse_results():
     entry_id = request.args.get('id')
     if entry_id:
         # Find the entry with the given ID
-        entry = session.query(Battery).filter(Battery.id == entry_id).first()
+        entry = session.query(BwPhoto).filter(BwPhoto.id == entry_id).first()
         if entry and entry.filename:
             # Find the index of this image in our sorted list
             try:
@@ -249,34 +220,22 @@ def browse_results():
     next_index = (current_index + 1) % len(images)
     prev_index = (current_index - 1 + len(images)) % len(images)
 
-    # Get the entry from the database for the current image
-    current_entry = session.query(Battery).filter(Battery.filename == current_image).first()
-    
-    # Initialize variables
-    ldr_power = None
+    current_entry = session.query(BwPhoto).filter(BwPhoto.filename == current_image).first()
+
     time_diff = None
-    
-    if current_entry:
-        ldr_power = current_entry.ldr_power
-        
-        # If there's a previous image, calculate the time difference
-        if current_index < len(images) - 1:
-            prev_image = images[current_index + 1]  # Since images are sorted in reverse order
-            prev_entry = session.query(Battery).filter(Battery.filename == prev_image).first()
-            
-            if prev_entry and current_entry.date and prev_entry.date:
-                # Calculate time difference in seconds
-                time_diff_seconds = (current_entry.date - prev_entry.date).total_seconds()
-                
-                # Format time difference
-                if time_diff_seconds < 60:
-                    time_diff = f"{int(time_diff_seconds)} seconds"
-                elif time_diff_seconds < 3600:
-                    time_diff = f"{int(time_diff_seconds / 60)} minutes {int(time_diff_seconds % 60)} seconds"
-                else:
-                    hours = int(time_diff_seconds / 3600)
-                    minutes = int((time_diff_seconds % 3600) / 60)
-                    time_diff = f"{hours} hours {minutes} minutes"
+    if current_entry and current_index < len(images) - 1:
+        prev_image = images[current_index + 1]  # images are sorted newest-first
+        prev_entry = session.query(BwPhoto).filter(BwPhoto.filename == prev_image).first()
+        if prev_entry and current_entry.date and prev_entry.date:
+            time_diff_seconds = (current_entry.date - prev_entry.date).total_seconds()
+            if time_diff_seconds < 60:
+                time_diff = f"{int(time_diff_seconds)} seconds"
+            elif time_diff_seconds < 3600:
+                time_diff = f"{int(time_diff_seconds / 60)} minutes {int(time_diff_seconds % 60)} seconds"
+            else:
+                hours = int(time_diff_seconds / 3600)
+                minutes = int((time_diff_seconds % 3600) / 60)
+                time_diff = f"{hours} hours {minutes} minutes"
 
     return render_template(
         'browse_results.html',
@@ -284,7 +243,6 @@ def browse_results():
         image_path=current_image,
         next_index=next_index,
         prev_index=prev_index,
-        ldr_power=ldr_power,
         time_diff=time_diff
     )
 

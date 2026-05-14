@@ -46,8 +46,16 @@
 #define BW_HTTP_SOURCE        "BW_DEV"
 
 // ─── WiFi connection ───────────────────────────────────────────────────────
-#define BW_WIFI_MAX_RETRY     5
-#define BW_WIFI_TIMEOUT_MS    40000   // 40s: allows 5 retries × ~4s each + margin
+#define BW_WIFI_MAX_RETRY     4       // 5 total attempts × ~1.7s ≈ 8.5s — covers transient
+                                      // 4-way handshake / auth glitches on the pinned AP
+#define BW_WIFI_TIMEOUT_MS    10000   // 10s hard deadline per try_connect() call
+#define BW_WIFI_BACKOFF_MS    500     // pause between scan-mode stages (unused in pinned mode)
+
+// Pin to a specific BSSID — connection skips scan/NVS-cache and never
+// roams to mesh extenders.  Set all bytes to 0 to disable pinning and
+// use scan-based connect instead.  MAC from Fritzbox UI: Home Network →
+// Network → Network Connections (or sticker on the bottom of the Fritzbox).
+#define BW_WIFI_BSSID         { 0xb4, 0xfc, 0x7d, 0x92, 0xd4, 0x90 }
 #define BW_WIFI_CHANNEL       1       // Fritz!Box 2.4 GHz fixed channel
 #define BW_WIFI_COUNTRY_CC    "DE"    // regdomain: ch1–13, manual policy
 
@@ -62,7 +70,7 @@
 #define BW_TEST_PWR_HOLD_BLINK 0
 
 // ─── Cycle deadline watchdog ────────────────────────────────────────────────
-// Worst-case legitimate cycle: WiFi 40s + 3 HTTP retries×20s + delays ≈ 118s.
+// Worst-case legitimate cycle: WiFi 20s (2×10s) + 3 HTTP retries×20s + delays ≈ 82s.
 // Set deadline above that so only a truly stuck cycle triggers the watchdog.
 #define BW_CYCLE_TIMEOUT_MS     150000  // 150 s
 

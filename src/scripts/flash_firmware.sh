@@ -22,4 +22,6 @@ echo "=== building + flashing → $PORT ==="
 source /home/ubuntu/esp-idf/export.sh > /dev/null 2>&1
 cd "$PROJECT_DIR"
 idf.py -p "$PORT" build flash
-echo "=== done — run monitor.sh to see serial output ==="
+
+echo "=== flashed — starting serial monitor (Ctrl+C to stop) ==="
+exec "$SCRIPT_DIR/monitor.sh" "$PORT"

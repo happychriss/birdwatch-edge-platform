@@ -94,8 +94,7 @@
             <th>Date</th>
             <th>Voltage</th>
             <th>Bright-Diff</th>
-            <th>LDR Power</th>
-            <th>Trigger</th>
+            <th>Debug</th>
             <th>Filename</th>
         </tr>
         {% for entry in entries %}
@@ -112,8 +111,7 @@
                 <td>{{ entry.date.strftime("%H:%M:%S %d.%m.%y") }}</td>
                 <td>{{ entry.voltage }}</td>
                 <td>{{ entry.brightdiff }}</td>
-                <td>{{ entry.ldr_power }}</td>
-                <td>{{ entry.trigger }}</td>
+                <td>{{ entry.debug }}</td>
                 <td>{{ entry.filename }}</td>
             </tr>
         {% endfor %}

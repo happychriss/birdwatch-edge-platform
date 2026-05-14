@@ -3,7 +3,9 @@
 #include "debug.h"
 
 #include "driver/gpio.h"
+#include "driver/rtc_io.h"
 #include "esp_sleep.h"
+#include "esp_system.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/timers.h"
@@ -74,4 +76,18 @@ void bw_power_deep_sleep(void)
     // this call only matters on USB (sleeps indefinitely; use BW_DEV_NO_SLEEP).
     ESP_LOGI(TAG, "entering deep sleep");
     esp_deep_sleep_start();
+}
+
+void bw_power_reboot_safe(void)
+{
+    // Switch GPIO5 to RTC-domain control before the software reset.
+    // The RTC domain is not reset by esp_restart(), so GPIO5 stays HIGH
+    // through the reboot — TPS22918 keeps power on.
+    // bw_power_init() re-configures GPIO5 as a regular GPIO output on the
+    // next boot, cleanly taking over from the RTC driver.
+    rtc_gpio_init(BW_PWR_HOLD_GPIO);
+    rtc_gpio_set_direction(BW_PWR_HOLD_GPIO, RTC_GPIO_MODE_OUTPUT_ONLY);
+    rtc_gpio_set_level(BW_PWR_HOLD_GPIO, 1);
+    ESP_LOGI(TAG, "safe reboot — GPIO5 held HIGH via RTC domain");
+    esp_restart();
 }

@@ -44,6 +44,13 @@ void bw_power_release(void);
 // On USB: sleeps indefinitely; use BW_DEV_NO_SLEEP for bench work instead.
 void bw_power_deep_sleep(void);
 
+// Software reset while keeping GPIO5 HIGH via the RTC domain so TPS22918 does
+// not cut power during the reboot.  Use when a clean retry is wanted without
+// risk of losing power.  bw_power_init() re-takes GPIO5 on the next boot.
+// Only call this once per PIR event — use esp_reset_reason() == ESP_RST_SW
+// to detect a reboot cycle and avoid looping indefinitely.
+void bw_power_reboot_safe(void);
+
 // Cycle deadline watchdog.  Start once per cycle right after bw_power_init();
 // disarm with bw_watchdog_stop() on normal completion.  If the cycle has not
 // finished within deadline_ms the watchdog fires bw_power_release() and deep

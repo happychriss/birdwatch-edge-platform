@@ -146,6 +146,13 @@ static void run_normal_cycle(void)
         bw_blink(wifi_fail_blink());
         free(img);
         bw_adc_deinit();
+        // Reboot once to retry — a fresh stack resolves transient driver hangs
+        // better than retrying within the same boot.  Only on a clean cold
+        // boot (POWERON) so a software-reboot / panic / watchdog recovery
+        // boot does not chain another reboot on top — bounding the chain to
+        // exactly: cold boot → soft reboot → power off.
+        if (esp_reset_reason() == ESP_RST_POWERON)
+            bw_power_reboot_safe();
         return;
     }
     bw_blink(BW_BLINK_WIFI_OK);

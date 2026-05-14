@@ -1,9 +1,9 @@
 ---
 name: wifi-esp32s3
-description: ESP-IDF WiFi STA setup for XIAO ESP32-S3 — antenna selection, robustness config, retry logic
+description: ESP-IDF WiFi STA setup for XIAO ESP32-S3 — antenna selection, BSSID pinning, retry logic, reboot-once recovery
 ---
 
-# WiFi STA — ESP32-S3 (ESP-IDF v5)
+# WiFi STA — ESP32-S3 (ESP-IDF v6)
 
 ## Antenna selection (XIAO ESP32-S3 Sense)
 
@@ -17,25 +17,18 @@ gpio_config(&io);
 gpio_set_level(GPIO_NUM_3, 1);  // 1 = external U.FL, 0 = built-in
 ```
 
-**Conflict note (BirdWatch):** GPIO3 = ADC_CHANNEL_2 (LDR tap). ADC reads must happen
-before `bw_wifi_init()` — the main cycle guarantees this (step 6 ADC, step 8 WiFi).
-
 ## Init sequence
 
 ```c
 esp_wifi_init(&cfg);
-esp_wifi_restore();          // clears stale NVS credentials / PMF state
+// Do NOT call esp_wifi_restore() — preserves NVS PMK cache for faster WPA2 handshake.
 esp_wifi_set_mode(WIFI_MODE_STA);
 
 wifi_country_t country = { .cc = "DE", .schan = 1, .nchan = 13, .policy = WIFI_COUNTRY_POLICY_MANUAL };
 esp_wifi_set_country(&country);  // must be called after init, before start
 ```
 
-`esp_wifi_restore()` is essential after firmware updates or credential changes — without it the
-chip can reuse stale PMF or auth state and fail with reason=2 indefinitely.
-
-`esp_wifi_set_country()` with `MANUAL` policy prevents the AP's country IE from overriding
-the channel plan; keeps TX behaviour predictable on a German Fritz!Box network.
+`WIFI_COUNTRY_POLICY_MANUAL` prevents the AP's country IE from overriding the channel plan.
 
 ## Connection config
 
@@ -47,43 +40,66 @@ wc.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;   // reject WEP/open APs
 wc.sta.sae_pwe_h2e        = WPA3_SAE_PWE_BOTH;    // required for WPA2/WPA3 mixed APs
 wc.sta.pmf_cfg.capable    = true;
 wc.sta.pmf_cfg.required   = false;
-wc.sta.scan_method        = WIFI_FAST_SCAN;        // stops at first BSSID match
+wc.sta.scan_method        = WIFI_FAST_SCAN;
 wc.sta.channel            = 1;                     // Fritz!Box 2.4 GHz fixed channel
-// BSSID lock (use scan-collected or hardcoded):
-memcpy(wc.sta.bssid, target_bssid, 6);
-wc.sta.bssid_set = 1;
 ```
 
-**`WPA3_SAE_PWE_BOTH` is mandatory** for Android hotspots and any AP in WPA2/WPA3
-transition mode. `HUNT_AND_PECK` will fail with reason=2 on those APs.
-
-**BSSID lock** prevents roaming between two APs with the same SSID (e.g. Fritz!Box +
-repeater). The repeater may have different auth behaviour or be on a different channel.
+**`WPA3_SAE_PWE_BOTH` is mandatory** for any AP in WPA2/WPA3 transition mode.
+`HUNT_AND_PECK` alone will fail with reason=2 on those APs.
 
 ## Power save
 
-Disable PS before connect; re-enable after `GOT_IP` if needed:
+Disable PS before connect — power save during association causes `AUTH_EXPIRE` / `ASSOC_EXPIRE`
+because handshake frames are missed during sleep windows:
 
 ```c
 esp_wifi_set_ps(WIFI_PS_NONE);   // before esp_wifi_start()
-// after stable link:
-// esp_wifi_set_ps(WIFI_PS_MIN_MODEM);
 ```
 
-PS during association causes `AUTH_EXPIRE` / `ASSOC_EXPIRE` because the handshake
-frames are missed during sleep windows.
+## BSSID pinning — eliminate mesh roaming (CRITICAL)
+
+**Root cause of persistent WiFi failures in mesh networks:** A Fritz!Box + mesh repeater share
+the same SSID. The ESP32 may connect to either BSSID. Repeaters can have different auth
+behaviour, different channels, or more fragile 4-way handshake timing. Result: `AUTH_FAIL`
+(reason=202) or `4WAY_HANDSHAKE_TIMEOUT` (reason=15) on every attempt.
+
+**Solution: pin to the primary router BSSID.** No scan, no roaming, no surprises.
+
+In `config.h`:
+```c
+// MAC from Fritzbox UI: Home Network → Network → Network Connections
+// Set all bytes to 0 to disable pinning and use scan-based connect instead.
+#define BW_WIFI_BSSID  { 0xb4, 0xfc, 0x7d, 0x92, 0xd4, 0x90 }
+```
+
+In `wifi_sta.c`:
+```c
+esp_err_t bw_wifi_connect_blocking(void)
+{
+    static const uint8_t pinned[6] = BW_WIFI_BSSID;
+    if (!bssid_is_zero(pinned)) {
+        // Strict: only this BSSID, no scan fallback.
+        // If this fails, reboot-once policy in main.c handles recovery.
+        return try_connect(pinned);
+    }
+    // Scan mode (BSSID = zeros): NVS cached BSSID first, then any-BSSID.
+    ...
+}
+```
+
+**Scan mode fallback (BW_WIFI_BSSID = zeros):** NVS cached BSSID → scan. Cache is cleared on
+miss so the next boot after a failed cached-BSSID attempt goes straight to scan.
 
 ## Retry logic — reason-based filtering
 
 Not all disconnect reasons are worth retrying. Non-retriable reasons (wrong password,
-AP MAC-blocked the device) should abort immediately rather than burning all retries:
+AP MAC-blocked the device) should abort immediately:
 
 ```c
 static bool is_retriable(uint8_t r) {
     switch (r) {
-        case WIFI_REASON_AUTH_EXPIRE:             // 2  — timed out before auth completed
-        case WIFI_REASON_ASSOC_EXPIRE:            // 4  — association aged out
-        case WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT:  // 15 — EAPOL stalled
+        case WIFI_REASON_AUTH_EXPIRE:             // 2
+        case WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT:  // 15
         case WIFI_REASON_NO_AP_FOUND:             // 201
         case WIFI_REASON_AUTH_FAIL:               // 202
         case WIFI_REASON_ASSOC_FAIL:              // 203
@@ -95,43 +111,65 @@ static bool is_retriable(uint8_t r) {
 }
 ```
 
-In `WIFI_EVENT_STA_DISCONNECTED`:
+`BW_WIFI_MAX_RETRY = 4` (5 total attempts). `BW_WIFI_TIMEOUT_MS = 10000` covers ALL retries
+within one `try_connect()` call, not per retry.
+
+Always log the `bssid` field from the disconnect event — it identifies which AP dropped the
+connection when multiple APs share an SSID.
+
+## Reboot-once recovery (cold-boot only)
+
+A single soft reboot resolves transient driver hangs better than retrying within the same boot.
+Use the RTC GPIO domain to hold GPIO5 HIGH across the reboot so TPS22918 doesn't cut power
+during the ~500ms bootloader window:
 
 ```c
-bool retry = is_retriable(e->reason) && (s_retry < MAX_RETRY);
-ESP_LOGW(TAG, "DISCONNECTED bssid=%02x:.. reason=%d%s attempt=%d/%d", ...,
-         e->reason, retry ? "" : " [no-retry]", s_retry+1, MAX_RETRY);
-if (retry) { s_retry++; esp_wifi_connect(); }
-else xEventGroupSetBits(s_evt, BIT_FAIL);
-```
-
-Always log the `bssid` field from the disconnect event — it identifies *which* AP dropped
-the connection when multiple APs share an SSID.
-
-## Timeout sizing
-
-`BW_WIFI_TIMEOUT_MS = 40000` (40 s). With 5 retries and ~4 s per auth attempt:
-5 × 4 s = 20 s + scan time + margin → 40 s is safe. 15 s (old value) was too short.
-
-## Scan-based BSSID discovery
-
-Collect all BSSIDs for the target SSID during a pre-connect scan, then attempt
-each one in scan order (strongest RSSI first). Fall back to unloocked connect if
-the scan finds no match:
-
-```c
-for (int b = 0; b < s_target_count; b++) {
-    if (try_one_bssid(s_target_bssid[b], b, s_target_count) == ESP_OK) return ESP_OK;
+// power.c
+void bw_power_reboot_safe(void)
+{
+    rtc_gpio_init(BW_PWR_HOLD_GPIO);
+    rtc_gpio_set_direction(BW_PWR_HOLD_GPIO, RTC_GPIO_MODE_OUTPUT_ONLY);
+    rtc_gpio_set_level(BW_PWR_HOLD_GPIO, 1);
+    esp_restart();
 }
 ```
+
+Guard in `main.c` — only reboot on a clean cold boot, not after a previous SW/panic/WDT reboot:
+```c
+if (esp_reset_reason() == ESP_RST_POWERON)
+    bw_power_reboot_safe();
+// else: fall through → power off (bounds the chain to exactly one reboot)
+```
+
+## Timing budget (worst case)
+
+| Phase | Time |
+|-------|------|
+| First `try_connect()` | ≤ 10 s |
+| Soft reboot | ~0.5 s |
+| Second `try_connect()` (after reboot) | ≤ 10 s |
+| HTTP retries (3 × 20 s) | ≤ 60 s |
+| **Total** | **≤ 80.5 s** |
+
+Watchdog deadline: `BW_CYCLE_TIMEOUT_MS = 150 s` — safe margin.
+
+## Backoff between scan-mode stages
+
+Add `BW_WIFI_BACKOFF_MS = 500` pause between the cached-BSSID attempt and the scan fallback.
+Prevents hammering the AP with rapid reconnect attempts on congested channels.
+
+## NVS BSSID cache
+
+Namespace `bw_wifi`, key `bssid` (6-byte blob). Saved on every successful connect.
+Cleared when a cached-BSSID attempt fails — ensures the next boot (after reboot) doesn't
+waste another 10 s on a stale BSSID before scanning.
 
 ## Fritz!Box MAC-block
 
 Fritz!Box 7690 silently blocks a device MAC after repeated failed auth attempts
-(brute-force protection). **There is no UI entry for this** — it clears on router reboot
-only. Symptom: reason=2 on every attempt, ~1 s per attempt, no IP ever reached.
-Confirmed on MAC `74:4d:bd:95:99:98`. A different board (`34:85:18:92:17:80`) connected
-immediately to the same AP with identical firmware.
+(brute-force protection). No UI entry — clears on router reboot only. Symptom: reason=2
+on every attempt, ~1 s per attempt, no IP ever reached. BSSID pinning eliminates this
+by avoiding the mesh repeater that may have triggered the block.
 
 ## Key reason codes
 
@@ -139,8 +177,9 @@ immediately to the same AP with identical firmware.
 |------|------|---------|
 | 2 | AUTH_EXPIRE | AP timed out waiting for auth response |
 | 3 | AUTH_LEAVE | AP actively deauthed us |
-| 4 | ASSOC_EXPIRE | Association aged out |
 | 15 | 4WAY_HANDSHAKE_TIMEOUT | EAPOL 4-way stalled |
 | 201 | NO_AP_FOUND | AP not visible in connect-scan |
 | 202 | AUTH_FAIL | Internal auth failure |
-| 205 | CONNECTION_FAIL | Generic — includes brute-force block |
+| 203 | ASSOC_FAIL | Association rejected |
+| 204 | HANDSHAKE_TIMEOUT | EAPOL timeout (driver-level) |
+| 205 | CONNECTION_FAIL | Generic (includes brute-force block) |

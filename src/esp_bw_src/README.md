@@ -48,6 +48,25 @@ idf.py -p /dev/ttyACM0 flash
 3. The first build downloads `espressif/esp32-camera` from the
    Component Registry — needs internet.
 
+## WiFi robustness
+
+**BSSID pinning** (configured in `config.h`) eliminates the primary failure mode: mesh
+repeaters sharing the same SSID as the Fritz!Box can have different auth timing and cause
+`AUTH_FAIL` (reason=202) / `4WAY_HANDSHAKE_TIMEOUT` (reason=15) on every boot.
+
+```c
+// config.h — MAC from Fritz!Box UI: Home Network → Network → Network Connections
+#define BW_WIFI_BSSID  { 0xb4, 0xfc, 0x7d, 0x92, 0xd4, 0x90 }  // Fritz!Box primary
+// Set to { 0,0,0,0,0,0 } to fall back to scan mode (NVS cached BSSID → any-BSSID)
+```
+
+**Reboot-once recovery:** on first WiFi failure after a cold boot, `bw_power_reboot_safe()`
+holds GPIO5 HIGH via the RTC domain (survives `esp_restart()`) and reboots. The guard
+`esp_reset_reason() == ESP_RST_POWERON` ensures only one reboot per PIR event.
+
+**Timing budget:** 10s WiFi + reboot + 10s WiFi + 3×20s HTTP = ≤ 80s, well within the
+150s watchdog.
+
 ## Debug log levels
 
 All modules log under their own tag (`MAIN`, `PWR`, `ADC`, `WIFI`,
