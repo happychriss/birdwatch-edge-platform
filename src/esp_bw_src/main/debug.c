@@ -11,9 +11,6 @@
 #include "esp_psram.h"
 #include "esp_sleep.h"
 #include "esp_app_desc.h"
-#include "nvs_flash.h"
-#include "nvs.h"
-
 void bw_blink_init(void)
 {
     gpio_config_t io = {
@@ -117,51 +114,6 @@ void bw_log_wakeup_cause(const char *tag)
         if (causes & BIT(map[i].src))
             ESP_LOGI(tag, "wakeup cause: %s (bit %d)", map[i].name, map[i].src);
     }
-}
-
-#define BW_NVS_NS    "bwdbg"
-#define BW_NVS_STEP  "step"
-#define BW_NVS_BOOTS "boots"
-
-static bool s_usb_mode = false;
-
-void bw_checkpoint_set_usb_mode(bool reset_via_usb)
-{
-    s_usb_mode = reset_via_usb;
-}
-
-void bw_checkpoint_write(uint8_t step)
-{
-    if (s_usb_mode) return;  // preserve battery-run values for post-mortem
-    nvs_handle_t h;
-    if (nvs_open(BW_NVS_NS, NVS_READWRITE, &h) != ESP_OK) return;
-    nvs_set_u8(h, BW_NVS_STEP, step);
-    nvs_commit(h);
-    nvs_close(h);
-}
-
-void bw_checkpoint_read_log(const char *tag)
-{
-    nvs_handle_t h;
-    if (nvs_open(BW_NVS_NS, NVS_READWRITE, &h) != ESP_OK) return;
-
-    uint8_t  last_step = 0;
-    uint32_t boots     = 0;
-    nvs_get_u8(h,  BW_NVS_STEP,  &last_step);
-    nvs_get_u32(h, BW_NVS_BOOTS, &boots);
-
-    boots++;
-    nvs_set_u32(h, BW_NVS_BOOTS, boots);
-    nvs_commit(h);
-    nvs_close(h);
-
-    static const char *step_names[] = {
-        "none", "NVS init", "ADC+sensors", "camera captured",
-        "WiFi connected", "upload done", "cycle complete",
-    };
-    const char *name = (last_step < 7) ? step_names[last_step] : "?";
-    ESP_LOGI(tag, "boot #%lu | last checkpoint: step %d (%s)",
-             (unsigned long)boots, last_step, name);
 }
 
 esp_err_t bw_log_err(const char *tag, const char *what, esp_err_t err)

@@ -55,6 +55,7 @@
 #include "http_client.h"
 #include "camera_server.h"
 #include "remote_log.h"
+#include "diag.h"
 
 static const char *TAG = "MAIN";
 
@@ -86,7 +87,6 @@ static void run_normal_cycle(void)
     }
     float battery_v = bw_adc_read_battery_voltage();
     ESP_LOGI(TAG, "battery=%.3fV", battery_v);
-    bw_checkpoint_write(2);
 
     // Optional camera-based light-change check.  Currently kept here
     // so the server still sees bright_diff, but the gate is OFF —
@@ -107,6 +107,7 @@ static void run_normal_cycle(void)
     // ── Capture JPEG ───────────────────────────────────────────────────────
     if (bw_cam_init(BW_CAM_MODE_PHOTO) != ESP_OK) {
         ESP_LOGE(TAG, "camera init failed");
+        bw_diag_push("CAM_INIT_FAIL");
         bw_blink(BW_BLINK_ERR_CAM_INIT);
         bw_adc_deinit();
         return;
@@ -115,6 +116,7 @@ static void run_normal_cycle(void)
     camera_fb_t *fb = bw_cam_capture();
     if (!fb) {
         ESP_LOGE(TAG, "no frame captured — aborting cycle");
+        bw_diag_push("CAM_CAPTURE_FAIL");
         bw_blink(BW_BLINK_ERR_CAM_CAPTURE);
         bw_cam_deinit();
         bw_adc_deinit();
@@ -127,6 +129,7 @@ static void run_normal_cycle(void)
     uint8_t *img     = heap_caps_malloc(img_len, MALLOC_CAP_SPIRAM);
     if (!img) {
         ESP_LOGE(TAG, "PSRAM alloc failed (%u B) — aborting cycle", (unsigned)img_len);
+        bw_diag_push("CAM_ALLOC_FAIL");
         bw_blink(BW_BLINK_ERR_CAM_ALLOC);
         bw_cam_capture_return(fb);
         bw_cam_deinit();
@@ -138,14 +141,21 @@ static void run_normal_cycle(void)
     bw_cam_deinit();
 
     bw_blink(BW_BLINK_CAM_OK);
-    bw_checkpoint_write(3);
 
     // ── WiFi up & upload ───────────────────────────────────────────────────
     if (bw_wifi_connect_blocking() != ESP_OK) {
         ESP_LOGE(TAG, "WiFi connect failed");
+        static const char * const wifi_err[] = {
+            "WIFI_NO_AP", "WIFI_AUTH_FAIL", "WIFI_TIMEOUT"
+        };
+        bw_diag_push(wifi_err[bw_wifi_last_fail_reason()]);
         bw_blink(wifi_fail_blink());
         free(img);
         bw_adc_deinit();
+        // 3s cooldown before reboot — PIR still active from this cycle;
+        // light sleep quiets the ESP32 so it does not extend the PIR pulse.
+        esp_sleep_enable_timer_wakeup(3000000ULL);
+        esp_light_sleep_start();
         // Reboot once to retry — a fresh stack resolves transient driver hangs
         // better than retrying within the same boot.  Only on a clean cold
         // boot (POWERON) so a software-reboot / panic / watchdog recovery
@@ -156,9 +166,18 @@ static void run_normal_cycle(void)
         return;
     }
     bw_blink(BW_BLINK_WIFI_OK);
-    bw_checkpoint_write(4);
     bw_remote_log_init();
     ESP_LOGI(TAG, "WiFi up");
+
+    // Flush any errors from previous failed cycles to the server now that we
+    // have connectivity.  Posted as a status row (no image) in the debug field.
+    if (bw_diag_has_errors()) {
+        char diag_buf[512];
+        bw_diag_get_log(diag_buf, sizeof(diag_buf));
+        if (bw_http_post_status(battery_v, diag_buf) == ESP_OK) {
+            bw_diag_clear();
+        }
+    }
 
     // Each failed attempt disconnects and reconnects WiFi before retrying so a
     // mid-transfer drop (e.g. MISSING_ACKS) does not strand the retry loop on
@@ -173,6 +192,7 @@ static void run_normal_cycle(void)
             bw_wifi_disconnect();
             if (bw_wifi_connect_blocking() != ESP_OK) {
                 ESP_LOGE(TAG, "WiFi reconnect failed — aborting upload");
+                bw_diag_push("WIFI_RECONNECT_FAIL");
                 wifi_lost = true;
                 break;
             }
@@ -189,6 +209,7 @@ static void run_normal_cycle(void)
         bw_blink(wifi_fail_blink());
     } else if (mode == BW_MODE_ERROR) {
         ESP_LOGE(TAG, "upload failed after %d attempts", BW_HTTP_MAX_RETRIES);
+        bw_diag_push("UPLOAD_FAIL");
         bw_blink(BW_BLINK_ERR_UPLOAD);
         bw_http_post_status(0.0f, "Error sending image");
     } else if (mode == BW_MODE_CAMERA_SERVER) {
@@ -213,8 +234,7 @@ static void run_normal_cycle(void)
     } else {
         ESP_LOGI(TAG, "server requested PIR_SENSOR mode");
         bw_blink(BW_BLINK_UPLOAD_OK);
-        bw_checkpoint_write(5);
-    }
+        }
 
     bw_remote_log_deinit();
     bw_wifi_disconnect();
@@ -253,13 +273,7 @@ void app_main(void)
     } else {
         ESP_ERROR_CHECK(nvs);
     }
-    bool usb_reset = (esp_reset_reason() == ESP_RST_USB);
-    bw_checkpoint_set_usb_mode(usb_reset);
-    if (usb_reset) {
-        ESP_LOGI(TAG, "USB reset detected — NVS checkpoint preserved (read-only)");
-    }
-    bw_checkpoint_read_log(TAG);  // post-mortem: print last battery cycle's furthest step
-    bw_checkpoint_write(1);       // step 1: NVS + boot confirmed (skipped in USB mode)
+    bw_diag_init();
 
 #if BW_DEV_NO_SLEEP
     ESP_LOGW(TAG, "BW_DEV_NO_SLEEP: cycling continuously, no power release");
@@ -275,8 +289,13 @@ void app_main(void)
     bw_watchdog_start(BW_CYCLE_TIMEOUT_MS);
     run_normal_cycle();
     bw_watchdog_stop();
-    bw_blink(BW_BLINK_SLEEP);
     bw_log_sysinfo(TAG);
+    // Light sleep for 3s cooldown: CPU halted, clocks gated, SPI flash off.
+    // WiFi RF is already stopped; this eliminates residual CPU switching noise
+    // so the PIR does not see a false trigger before TPS22918 cuts power.
+    // GPIO5 pad latch holds HIGH during light sleep — TPS22918 stays on.
+    esp_sleep_enable_timer_wakeup(3000000ULL);
+    esp_light_sleep_start();
     bw_power_release();
     bw_power_deep_sleep();
 #endif

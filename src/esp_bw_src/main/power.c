@@ -71,9 +71,11 @@ void bw_power_release(void)
 
 void bw_power_deep_sleep(void)
 {
-    // No wakeup source — wakeup is always a cold boot triggered by TPS22918
-    // when the PIR fires.  On battery TPS22918 kills us when PIR drops, so
-    // this call only matters on USB (sleeps indefinitely; use BW_DEV_NO_SLEEP).
+    // Clear any wakeup sources (e.g. the 3s timer used for the light-sleep
+    // cooldown) so they do not carry over and wake the chip from deep sleep.
+    // No wakeup source — on battery TPS22918 kills the board when PIR drops.
+    // On USB the board sleeps indefinitely; use BW_DEV_NO_SLEEP for bench work.
+    esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_ALL);
     ESP_LOGI(TAG, "entering deep sleep");
     esp_deep_sleep_start();
 }

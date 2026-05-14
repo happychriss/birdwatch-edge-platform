@@ -71,17 +71,3 @@ void bw_log_wakeup_cause(const char *tag);
 // Convenience: log an esp_err_t without aborting.  Returns the err.
 esp_err_t bw_log_err(const char *tag, const char *what, esp_err_t err);
 
-// ─── NVS checkpoint (post-mortem, requires NVS to be initialised) ───────────
-// Write the current step (1–9) to NVS so that if power is cut before the
-// next checkpoint, the last value survives and can be read on next boot.
-// Also increments a persistent boot counter.
-void bw_checkpoint_write(uint8_t step);
-
-// Read and ESP_LOGI the last saved checkpoint and boot count.
-// Call once at boot (before any checkpoint_write) for post-mortem output.
-void bw_checkpoint_read_log(const char *tag);
-
-// Call after esp_reset_reason() is known.  When reset_via_usb is true,
-// all subsequent bw_checkpoint_write() calls are silently skipped so the
-// post-mortem values from the last battery cycle remain intact.
-void bw_checkpoint_set_usb_mode(bool reset_via_usb);

@@ -10,6 +10,7 @@ idf_component_register(
         "http_client.c"
         "camera_server.c"
         "remote_log.c"
+        "diag.c"
     INCLUDE_DIRS
         "."
     PRIV_REQUIRES

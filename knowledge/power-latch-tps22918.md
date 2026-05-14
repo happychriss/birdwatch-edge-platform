@@ -77,6 +77,28 @@ Both diodes drive into 100 kΩ; their source currents (12 mA PIR, 40 mA GPIO5) d
 - 10 µF in parallel, bulk reservoir; if electrolytic: + to VCC, – to GND
 - Placed physically close to PIR VCC/GND pins
 
+### PIR OUT signal filtering — 100 nF to GND (fitted 2026-05-14)
+- 100 nF ceramic (104) from PIR OUT to GND, physically close to PIR
+- Attenuates 2.4 GHz WiFi coupling into the PIR analog front-end
+- The diode (D1) isolates this cap from the TPS22918 ON node — no effect on shutdown timing
+- **Do not increase beyond 100 nF** — larger values slow legitimate PIR transitions
+
+## WiFi RF interference with PIR — known issue
+
+This is a well-documented problem across ESP8266/ESP32 + PIR deployments. Root cause: the PIR contains a high-impedance analog gain stage (BISS0001 or similar) that cannot distinguish thermal IR from 2.4 GHz RF coupling. Even with the PIR signal line disconnected from the ESP32, the PIR body itself picks up WiFi TX bursts.
+
+### What helps (in order of effectiveness)
+1. **Physical separation** — most reliable; >20 cm reduces field strength ~4×
+2. **100 nF on PIR OUT to GND** — fitted; filters 2.4 GHz, keeps PIR response intact
+3. **220 nF across BISS0001 pins 12 & 13** — community-recommended for stubborn cases; directly filters the analog amplifier input inside the PIR module
+4. **Aluminum foil shield, grounded** — wrap PIR module body; connect foil to GND; effective in combination with caps, not reliable alone
+5. **Ferrite bead on PIR VCC line** — blocks HF on the power rail into the PIR
+6. **Lower WiFi TX power** — `esp_wifi_set_max_tx_power(40)` (10 dBm instead of 20 dBm); reduces range but cuts RF emissions by 10×
+
+### What does NOT help
+- Firmware debounce — the PIR output pulse from RF is genuine (seconds long), not a glitch
+- Disconnecting PIR signal from ESP32 — PIR still triggers from RF on its own body (confirmed in this build)
+
 ## CT capacitor — not fitted
 
 The CT cap controls only the TPS22918 VOUT slew rate at turn-on. The main current surge in this system occurs when **WiFi is initialised** — several seconds into the boot cycle, well after `bw_power_init()` has driven GPIO5 HIGH. The CT cap has no effect on that surge. Real-world operation confirmed the turn-on inrush does not cause observable problems, so CT is left floating (TPS22918 pin table: "can be left floating").

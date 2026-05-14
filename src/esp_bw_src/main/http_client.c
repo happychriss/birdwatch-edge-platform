@@ -35,17 +35,20 @@ static esp_err_t evt_handler(esp_http_client_event_t *evt)
 }
 
 // ───────────────────────────── /status POST ────────────────────────────────
-esp_err_t bw_http_post_status(float battery_v, const char *trigger)
+esp_err_t bw_http_post_status(float battery_v, const char *msg)
 {
-    char body[128];
-    int n = snprintf(body, sizeof(body),
-                     "{\"battery\":\"%.3f\",\"source\":\"%s\",\"trigger\":\"%s\","
-                     "\"brightdiff\":\"0.0\"}",
-                     battery_v, BW_HTTP_SOURCE, trigger);
-    if (n <= 0 || n >= (int)sizeof(body)) {
-        ESP_LOGE(TAG, "status body truncated");
-        return ESP_ERR_INVALID_SIZE;
-    }
+    // Use cJSON so any special chars in msg (newlines, quotes) are properly escaped.
+    char batt_str[16];
+    snprintf(batt_str, sizeof(batt_str), "%.3f", battery_v);
+
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddStringToObject(root, "battery",   batt_str);
+    cJSON_AddStringToObject(root, "source",    BW_HTTP_SOURCE);
+    cJSON_AddStringToObject(root, "trigger",   msg);
+    cJSON_AddStringToObject(root, "brightdiff", "0.0");
+    char *body = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    if (!body) return ESP_ERR_NO_MEM;
 
     esp_http_client_config_t cfg = {
         .url           = BW_STATUS_URL,
@@ -54,12 +57,12 @@ esp_err_t bw_http_post_status(float battery_v, const char *trigger)
         .event_handler = evt_handler,
     };
     esp_http_client_handle_t c = esp_http_client_init(&cfg);
-    if (!c) return ESP_FAIL;
+    if (!c) { cJSON_free(body); return ESP_FAIL; }
 
     esp_http_client_set_header(c, "Content-Type", "application/json");
-    esp_http_client_set_post_field(c, body, n);
+    esp_http_client_set_post_field(c, body, strlen(body));
 
-    ESP_LOGI(TAG, "POST %s body=%s", BW_STATUS_URL, body);
+    ESP_LOGI(TAG, "POST %s  len=%u", BW_STATUS_URL, (unsigned)strlen(body));
     esp_err_t err = esp_http_client_perform(c);
     if (err == ESP_OK) {
         ESP_LOGI(TAG, "  → status=%d len=%lld",
@@ -69,6 +72,7 @@ esp_err_t bw_http_post_status(float battery_v, const char *trigger)
         ESP_LOGE(TAG, "  perform: %s", esp_err_to_name(err));
     }
     esp_http_client_cleanup(c);
+    cJSON_free(body);
     return err;
 }
 
