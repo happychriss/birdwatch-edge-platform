@@ -130,13 +130,52 @@ Power down: camera deinit, remote log flush, WiFi off, GPIO5 LOW
 
 ## 4. False-Trigger Filtering (Light Change Detection)
 
-PIR sensors are sensitive to rapid infrared changes caused by moving shadows or cloud cover.
+PIR sensors are sensitive to rapid infrared changes caused by moving shadows or cloud cover. The scene's sky region and moving plant/railing shadows on the tile floor are the dominant sources of false triggers.
 
 ### 4.1 Camera Grayscale Brightness Diff (implemented, currently disabled)
 
 - `bw_light_check()` in `light_check.c` — takes a grayscale QQVGA frame, computes average pixel brightness, compares against the value stored in NVS from the previous wakeup.
 - If the difference exceeds `BW_BRIGHTNESS_THRESHOLD` (15.0 on a 0–255 scale), the trigger is considered a light-change event and image upload is suppressed.
-- **Currently disabled in `main.c`** — the `#if 0` block around `bw_light_check()` means all events result in image upload regardless of brightness change. `bright_diff` sent to server is always 0.0.
+- **Currently disabled in `main.c`** — single global brightness is too coarse; it cannot distinguish a bird arriving from a cloud passing. Superseded by §4.2.
+
+### 4.2 Cloud-Check Filter
+
+> **Full specification:** [`requirements-cloud-detection.md`](requirements-cloud-detection.md)  
+> **Python simulation:** [`src/cloud-check/`](src/cloud-check/README.md) — Phase 1 complete.
+
+Binary on-device classifier: **"cloud"** (suppress upload) vs **"non-cloud"** (bird/person/anything-new → upload).
+
+**Approach:** classical per-tile signal processing against an adaptive background model. Not ML — no weights, no training, pure integer arithmetic. Runs in < 10 ms on the ESP32-S3 once ported to C.
+
+**Current results on 147 labelled real-scene frames (online, self-calibrating):**
+
+| Metric | Value |
+|--------|-------|
+| Non-cloud recall (birds/people) | **1.000** — zero misses |
+| Cloud recall (false-trigger suppression) | **0.606** — 61 % of cloud frames filtered |
+
+**Decision pipeline (5 stages in priority order):**
+
+1. **WARMUP** — bucket has < 8 observations → upload (model not yet reliable)
+2. **DARK_OBJ** — tiles newly darker than both model and previous frame → upload (object arrived)
+3. **QUIET** — ≤ 5 % of tiles anomalous → suppress (scene matches model)
+4. **SCENE_DRIFT** — tiles dark vs model but not vs previous frame → upload + re-calibrate model (stale baseline)
+5. **AMBIGUOUS** — default → upload
+
+See [`requirements-cloud-detection.md`](requirements-cloud-detection.md) for full algorithm, parameter rationale, and the ESP-IDF port plan.
+
+### 4.3 Training Data
+
+`/workspace/training-data/` (not committed beyond folder structure):
+
+| Folder | Count | Label | Notes |
+|--------|-------|-------|-------|
+| `real-data/sun/` | 109 | cloud | Empty balcony, varying sun/shadow, 2026-05 scene |
+| `real-data/birds-simu/` | 11 | non-cloud | Same scene + small dark object as bird stand-in |
+| `real-data/people/` | 27 | non-cloud | Same scene + person legs/hand in frame |
+| `with-birds/` | 31 | non-cloud (aux) | 2025-07 scene, different camera angle and lighting — held out for cross-domain check, not mixed into training |
+
+All images are 1600×1200 SXGA JPEG, downsampled to 640×480 grayscale inside the pipeline to match the on-device filter input.
 
 ---
 
@@ -197,7 +236,7 @@ This prevents the TPS22918 from power-cycling and immediately re-triggering whil
 
 | Issue | Location | Notes |
 |-------|----------|-------|
-| Camera brightness filter disabled | `main.c` | `bw_light_check()` wrapped in `#if 0`; `bright_diff` is always 0.0 sent to server |
+| Camera brightness filter disabled | `main.c` | `bw_light_check()` wrapped in `#if 0`; `bright_diff` is always 0.0 sent to server. Being superseded by §4.2 cloud-check filter |
 | OV3660 compatibility untested | `camera.c` | Newer XIAO boards ship with OV3660 instead of OV2640. Driver should be compatible but not verified |
 | EXT1 wakeup is fallback only | `power.c` | `bw_power_deep_sleep_pir_wake()` configures EXT1 on GPIO1 — only reached when USB/bench power keeps board alive after TPS22918 release is ignored |
 

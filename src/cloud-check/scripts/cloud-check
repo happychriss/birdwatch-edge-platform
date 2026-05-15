@@ -1,0 +1,10 @@
+#!/bin/bash
+set -e
+cd "$(dirname "$0")/.."
+
+echo "=== cloud-check pipeline ==="
+.venv/bin/python -m scripts.evaluate --skip-aux
+echo ""
+echo "=== starting server ==="
+echo "Gallery: http://localhost:8001/gallery"
+.venv/bin/python serve.py --port 8001

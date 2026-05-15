@@ -1,5 +1,6 @@
 # ─── Claude AI session files ────────────────────────────────────────────────
 memory.md
+my-remarks.md
 .claude/
 
 # ─── IDE / editor ───────────────────────────────────────────────────────────
@@ -45,3 +46,10 @@ src/python_bw_src/.env
 src/python_bw_src/.venv/
 src/python_bw_src/__pycache__/
 src/python_bw_src/*.pyc
+
+# ─── Cloud-check filter (Python simulation) ──────────────────────────────────
+src/cloud-check/.venv/
+src/cloud-check/**/__pycache__/
+src/cloud-check/**/*.pyc
+src/cloud-check/reports/
+src/cloud-check/synth-data/
