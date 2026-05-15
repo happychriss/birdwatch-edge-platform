@@ -1,0 +1,322 @@
+// ─── Cloud-check filter — ESP32-S3 port of the Python pipeline ───────────────
+//
+// Algorithm matches src/cloud-check/ exactly.  Decision stages (priority order):
+//
+//   WARMUP     — model not yet bootstrapped; upload always (can't risk missing a bird)
+//   DARK_OBJ   — tiles newly dark vs both model AND previous frame → real object → upload
+//   QUIET      — ≤5 % tiles anomalous → scene matches model → suppress
+//   SCENE_DRIFT— tiles dark vs model but NOT newly dark vs prev → stale model → upload + re-calibrate
+//   AMBIGUOUS  — default → upload
+//
+// Uses QQVGA (160×120) grayscale, 16×12 tile grid (10×10 px per tile, 192 tiles total).
+// Background model (mean + variance per tile) and previous-frame tile means persist in NVS
+// under namespace "cc" so state survives power-off between PIR events.
+//
+// All thresholds and behaviour are controlled by the #define constants below.
+// To tune: change the constant, rebuild, flash.
+
+#include "cloud_check.h"
+#include "camera.h"
+#include "debug.h"
+
+#include <string.h>
+#include <math.h>
+#include <stdint.h>
+#include <stdbool.h>
+#include <stdio.h>
+
+#include "esp_log.h"
+#include "nvs.h"
+
+static const char *TAG    = "CC";
+static const char *NVS_NS = "cc";
+
+// ── Frame / grid layout ──────────────────────────────────────────────────────
+// QQVGA: 160×120.  16×12 grid gives 10×10 px tiles — same tile count (192) as
+// the Python simulation running on 640×480 with 40×40 tiles.
+#define CC_FRAME_W    160
+#define CC_FRAME_H    120
+#define CC_TILES_X    16
+#define CC_TILES_Y    12
+#define CC_NUM_TILES  (CC_TILES_X * CC_TILES_Y)     // 192
+#define CC_TILE_W     (CC_FRAME_W / CC_TILES_X)     // 10
+#define CC_TILE_H     (CC_FRAME_H / CC_TILES_Y)     // 10
+
+// ── Background model parameters ──────────────────────────────────────────────
+// Values found by exhaustive grid search (18 144 configurations) over the
+// 147-frame real-scene dataset.  Non-cloud recall = 1.000, cloud recall = 0.606.
+#define CC_EMA_ALPHA        0.15f   // background update speed (lower = slower adaptation)
+#define CC_VAR_FLOOR        36.0f   // minimum tile variance (std ≥ 6); prevents over-confidence
+#define CC_INIT_VAR         256.0f  // variance prior for unseen tiles (std = 16)
+#define CC_INIT_MEAN        128.0f  // mean prior for unseen tiles (mid-scale grey)
+#define CC_Z_THRESHOLD      3.0f    // z-score to flag a tile as anomalous (both bright AND dark)
+#define CC_QUIET_RATIO      0.05f   // ≤5 % anomalous → QUIET → suppress
+#define CC_DARK_DELTA_MODEL 30.0f   // tile must be ≥30 DN darker than model mean (DARK_OBJ check)
+#define CC_DARK_DELTA_PREV  15.0f   // tile must be ≥15 DN darker than previous frame (temporal check)
+#define CC_DARK_MIN_TILES   1       // ≥1 qualifying tile triggers DARK_OBJ / SCENE_DRIFT
+#define CC_WARMUP_FRAMES    8       // frames before model is considered bootstrapped
+
+// ── NVS key names ─────────────────────────────────────────────────────────────
+// "cc_m"   : tile means     (192 × float  = 768 B)
+// "cc_v"   : tile variances (192 × float  = 768 B)
+// "cc_p"   : previous-frame tile means (192 × uint8 = 192 B)
+// "cc_seen": total frames observed this bucket (uint16)
+static const char *KEY_MEAN  = "cc_m";
+static const char *KEY_VAR   = "cc_v";
+static const char *KEY_PREV  = "cc_p";
+static const char *KEY_SEEN  = "cc_seen";
+
+// ── In-RAM model state ────────────────────────────────────────────────────────
+static float    s_mean[CC_NUM_TILES];
+static float    s_var[CC_NUM_TILES];
+static uint8_t  s_prev[CC_NUM_TILES];
+static bool     s_prev_valid  = false;
+static uint16_t s_frames_seen = 0;   // mirrors Python's bucket_seen (every frame, not just updates)
+
+// ── NVS helpers ───────────────────────────────────────────────────────────────
+
+static void load_model(void)
+{
+    nvs_handle_t h;
+    bool ok = false;
+
+    if (nvs_open(NVS_NS, NVS_READONLY, &h) == ESP_OK) {
+        size_t sm = sizeof(s_mean), sv = sizeof(s_var);
+        bool got_mean = (nvs_get_blob(h, KEY_MEAN, s_mean, &sm) == ESP_OK && sm == sizeof(s_mean));
+        bool got_var  = (nvs_get_blob(h, KEY_VAR,  s_var,  &sv) == ESP_OK && sv == sizeof(s_var));
+        uint16_t seen = 0;
+        nvs_get_u16(h, KEY_SEEN, &seen);
+        s_frames_seen = seen;
+        nvs_close(h);
+        ok = got_mean && got_var;
+    }
+
+    if (!ok) {
+        for (int i = 0; i < CC_NUM_TILES; i++) {
+            s_mean[i] = CC_INIT_MEAN;
+            s_var[i]  = CC_INIT_VAR;
+        }
+        s_frames_seen = 0;
+        ESP_LOGI(TAG, "no prior model — initialised fresh");
+    }
+}
+
+static void save_model(void)
+{
+    nvs_handle_t h;
+    if (nvs_open(NVS_NS, NVS_READWRITE, &h) != ESP_OK) {
+        ESP_LOGW(TAG, "model save: nvs_open failed");
+        return;
+    }
+    nvs_set_blob(h, KEY_MEAN, s_mean, sizeof(s_mean));
+    nvs_set_blob(h, KEY_VAR,  s_var,  sizeof(s_var));
+    nvs_set_u16(h, KEY_SEEN, s_frames_seen);
+    nvs_commit(h);
+    nvs_close(h);
+}
+
+static void load_prev(void)
+{
+    nvs_handle_t h;
+    s_prev_valid = false;
+    if (nvs_open(NVS_NS, NVS_READONLY, &h) != ESP_OK) return;
+    size_t sp = sizeof(s_prev);
+    s_prev_valid = (nvs_get_blob(h, KEY_PREV, s_prev, &sp) == ESP_OK && sp == sizeof(s_prev));
+    nvs_close(h);
+    if (!s_prev_valid) ESP_LOGI(TAG, "no prior frame — temporal check skipped");
+}
+
+static void save_prev(const uint8_t *tile_means)
+{
+    nvs_handle_t h;
+    if (nvs_open(NVS_NS, NVS_READWRITE, &h) != ESP_OK) {
+        ESP_LOGW(TAG, "prev save: nvs_open failed");
+        return;
+    }
+    nvs_set_blob(h, KEY_PREV, tile_means, CC_NUM_TILES);
+    nvs_commit(h);
+    nvs_close(h);
+}
+
+// ── Feature extraction ────────────────────────────────────────────────────────
+
+static void extract_tile_means(const uint8_t *frame, uint8_t *out)
+{
+    for (int ty = 0; ty < CC_TILES_Y; ty++) {
+        for (int tx = 0; tx < CC_TILES_X; tx++) {
+            uint32_t sum = 0;
+            for (int py = 0; py < CC_TILE_H; py++) {
+                const uint8_t *row = frame + (ty * CC_TILE_H + py) * CC_FRAME_W + tx * CC_TILE_W;
+                for (int px = 0; px < CC_TILE_W; px++) sum += row[px];
+            }
+            out[ty * CC_TILES_X + tx] = (uint8_t)(sum / (CC_TILE_W * CC_TILE_H));
+        }
+    }
+}
+
+// ── EMA background update ─────────────────────────────────────────────────────
+// Matches background.py BackgroundModel.update() exactly:
+//   new_mean = (1-α)*mean + α*x
+//   residual = x - new_mean          (= delta * (1-α))
+//   new_var  = (1-α)*var + α*residual²
+
+static void update_model(const uint8_t *means)
+{
+    for (int i = 0; i < CC_NUM_TILES; i++) {
+        float x        = (float)means[i];
+        float new_mean = (1.0f - CC_EMA_ALPHA) * s_mean[i] + CC_EMA_ALPHA * x;
+        float residual = x - new_mean;
+        float new_var  = (1.0f - CC_EMA_ALPHA) * s_var[i] + CC_EMA_ALPHA * residual * residual;
+        s_mean[i] = new_mean;
+        s_var[i]  = new_var < CC_VAR_FLOOR ? CC_VAR_FLOOR : new_var;
+    }
+}
+
+// ── Decision pipeline ─────────────────────────────────────────────────────────
+// Matches classifier.py classify() + pipeline.py run_stream() exactly.
+//
+// Key facts:
+// 1. z-score is ABSOLUTE (both brighter AND darker tiles are anomalous).
+//    bright anomalies don't trigger dark_obj but DO increase the QUIET ratio.
+// 2. dark_model_tiles and new_dark_tiles are counted independently — they can
+//    be DIFFERENT tiles. DARK_OBJ fires when ≥1 of each exists (not the same tile).
+// 3. s_frames_seen is incremented BEFORE the warmup check (mirrors Python's
+//    model.observe() call before classify()).
+
+static void run_pipeline(const uint8_t *means, bw_cc_result_t *out)
+{
+    // Mirror Python's model.observe(): increment BEFORE the warmup check.
+    if (s_frames_seen < 0xFFFF) s_frames_seen++;
+
+    // WARMUP — model not yet bootstrapped
+    bool warmup = (s_frames_seen < CC_WARMUP_FRAMES);
+    if (warmup) {
+        update_model(means);
+        save_model();
+        save_prev(means);
+        strcpy(out->label, "non-cloud");
+        strcpy(out->stage, "WARMUP");
+        ESP_LOGI(TAG, "WARMUP (%u frames seen) → non-cloud", s_frames_seen);
+        return;
+    }
+
+    // Per-tile anomaly analysis
+    // z = |model_mean - tile_mean| / std  (absolute — matches Python np.abs())
+    // dark_model_tiles: anomalous AND darker than model by ≥ CC_DARK_DELTA_MODEL
+    // new_dark_tiles  : anomalous AND darker than previous frame by ≥ CC_DARK_DELTA_PREV
+    // These two sets are independent (a tile can be in one but not the other).
+    int anomalous        = 0;
+    int dark_model_tiles = 0;
+    int new_dark_tiles   = 0;
+
+    for (int i = 0; i < CC_NUM_TILES; i++) {
+        float x   = (float)means[i];
+        float m   = s_mean[i];
+        float std = sqrtf(s_var[i]);
+
+        // Absolute z-score: bright AND dark deviations both count as anomalous.
+        float z = fabsf(m - x) / std;
+        bool z_anom = (z > CC_Z_THRESHOLD);
+
+        if (z_anom) {
+            anomalous++;
+            // Tile darker than model by ≥ 30 DN (dark_tiles in Python)
+            if (m - x >= CC_DARK_DELTA_MODEL) dark_model_tiles++;
+            // Tile darker than previous frame by ≥ 15 DN (new_dark_tiles in Python)
+            if (s_prev_valid && (float)s_prev[i] - x >= CC_DARK_DELTA_PREV) new_dark_tiles++;
+        }
+    }
+
+    float ratio = (float)anomalous / CC_NUM_TILES;
+
+    // dark_obj_condition matches Python exactly:
+    //   dark_tiles >= 1 AND (no temporal OR new_dark_tiles >= 1)
+    bool dark_obj_cond = (dark_model_tiles >= CC_DARK_MIN_TILES) &&
+                         (!s_prev_valid || new_dark_tiles >= CC_DARK_MIN_TILES);
+
+    // stale_condition: dark tiles exist vs model, but none appeared fresh this frame
+    //   dark_tiles >= 1 AND temporal_available AND new_dark_tiles < 1
+    bool stale_cond = (dark_model_tiles >= CC_DARK_MIN_TILES) &&
+                      s_prev_valid && (new_dark_tiles < CC_DARK_MIN_TILES);
+
+    // DARK_OBJ — compact dark object appeared this frame
+    if (dark_obj_cond) {
+        save_prev(means);
+        strcpy(out->label, "non-cloud");
+        strcpy(out->stage, "DARK_OBJ");
+        ESP_LOGI(TAG, "DARK_OBJ (dark_model=%d new_dark=%d ratio=%.0f%%) → non-cloud",
+                 dark_model_tiles, new_dark_tiles, ratio * 100.0f);
+        return;
+    }
+
+    // QUIET — scene essentially unchanged, just a minor lighting fluctuation
+    if (ratio <= CC_QUIET_RATIO) {
+        update_model(means);
+        save_model();
+        save_prev(means);
+        strcpy(out->label, "cloud");
+        strcpy(out->stage, "QUIET");
+        ESP_LOGI(TAG, "QUIET (ratio=%.0f%%) → cloud (suppress)", ratio * 100.0f);
+        return;
+    }
+
+    // SCENE_DRIFT — tiles dark vs model were already present in previous frame
+    // → model is stale (overnight scene change); re-calibrate and upload to be safe
+    if (stale_cond) {
+        update_model(means);
+        save_model();
+        save_prev(means);
+        strcpy(out->label, "non-cloud");
+        strcpy(out->stage, "SCENE_DRIFT");
+        ESP_LOGI(TAG, "SCENE_DRIFT (dark_model=%d new_dark=0) → non-cloud + recalibrate",
+                 dark_model_tiles);
+        return;
+    }
+
+    // AMBIGUOUS — default: upload (safety bias, never suppress on doubt)
+    save_prev(means);
+    strcpy(out->label, "non-cloud");
+    strcpy(out->stage, "AMBIGUOUS");
+    ESP_LOGI(TAG, "AMBIGUOUS (ratio=%.0f%% dark_model=%d new_dark=%d) → non-cloud",
+             ratio * 100.0f, dark_model_tiles, new_dark_tiles);
+}
+
+// ── Public API ────────────────────────────────────────────────────────────────
+
+esp_err_t bw_cc_assess(bw_cc_result_t *out)
+{
+    memset(out, 0, sizeof(*out));
+
+    esp_err_t err = bw_cam_init(BW_CAM_MODE_LIGHTCHECK);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "camera init failed: %s", esp_err_to_name(err));
+        strcpy(out->label, "non-cloud");
+        strcpy(out->stage, "CAM_ERR");
+        return err;
+    }
+
+    camera_fb_t *fb = bw_cam_capture();
+    if (!fb || fb->len < (size_t)(CC_FRAME_W * CC_FRAME_H)) {
+        ESP_LOGE(TAG, "no valid frame (len=%u)", fb ? (unsigned)fb->len : 0u);
+        if (fb) bw_cam_capture_return(fb);
+        bw_cam_deinit();
+        strcpy(out->label, "non-cloud");
+        strcpy(out->stage, "CAM_ERR");
+        return ESP_FAIL;
+    }
+
+    uint8_t means[CC_NUM_TILES];
+    extract_tile_means(fb->buf, means);
+    bw_cam_capture_return(fb);
+    bw_cam_deinit();
+
+    load_model();
+    load_prev();
+    run_pipeline(means, out);
+
+    ESP_LOGI(TAG, "─── result: %-9s  stage: %-11s  seen: %u  prev: %s ───",
+             out->label, out->stage, s_frames_seen,
+             s_prev_valid ? "yes" : "no");
+
+    return ESP_OK;
+}

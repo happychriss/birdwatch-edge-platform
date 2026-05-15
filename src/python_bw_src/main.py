@@ -3,22 +3,12 @@
 # Press Shift+F10 to execute it or replace it with your code.
 # Press Double Shift to search everywhere for classes, files, tool windows, actions, and settings.
 from flask import Flask, request, jsonify, render_template, redirect
-from datetime import datetime
+from datetime import datetime, timedelta
+from collections import defaultdict
 import os
-import re
 import requests
 import time
-import threading
-from collections import deque
 from db import BwPhoto, Session
-
-_ansi_re = re.compile(r'\x1b\[[0-9;]*m')
-
-# ─── Remote log buffer (filled by POST /log from the device) ─────────────────
-_log_lines = deque(maxlen=500)
-_log_lock  = threading.Lock()
-
-# Set maximum allowed payload to 16MB (adjust as needed)
 
 
 birdwatch_http = "http://192.168.1.43"
@@ -46,16 +36,28 @@ def index():
     entries = session.query(BwPhoto).order_by(BwPhoto.date.desc()).offset(offset).limit(per_page).all()
     
     latest_image_entry = session.query(BwPhoto).filter(BwPhoto.filename.isnot(None)).order_by(BwPhoto.id.desc()).first()
-    image_path = None
-    if latest_image_entry:
-        image_path = latest_image_entry.filename
-    
-    return render_template('index.html', 
-                          status=global_status, 
-                          entries=entries, 
-                          image_path=image_path,
-                          page=page,
-                          total_pages=total_pages)
+
+    last_seen = None
+    last_seen_detail = None
+    if latest_image_entry and latest_image_entry.date:
+        s = int((datetime.now() - latest_image_entry.date).total_seconds())
+        if s < 60:
+            last_seen = f"{s}s ago"
+        elif s < 3600:
+            last_seen = f"{s // 60}m {s % 60}s ago"
+        elif s < 86400:
+            last_seen = f"{s // 3600}h {(s % 3600) // 60}m ago"
+        else:
+            last_seen = f"{s // 86400}d ago"
+        last_seen_detail = latest_image_entry.date.strftime("%d.%m.%y %H:%M:%S")
+
+    return render_template('index.html',
+                           status=global_status,
+                           entries=entries,
+                           page=page,
+                           total_pages=total_pages,
+                           last_seen=last_seen,
+                           last_seen_detail=last_seen_detail)
 
 
 # called from the web page
@@ -79,17 +81,15 @@ def status():
     battery = request.json.get('battery')
     source = request.json.get('source')
     trigger = request.json.get('trigger')
-    brightdiff = request.json.get('brightdiff')
     date = datetime.now()
 
     try:
         battery = float(battery)
-        brightdiff = float(brightdiff)
     except (TypeError, ValueError):
-        print("Invalid battery or brightdiff value")
-        return jsonify({'message': 'Invalid battery or brightdiff value'}), 400
+        print("Invalid battery value")
+        return jsonify({'message': 'Invalid battery value'}), 400
 
-    new_photo = BwPhoto(source=source, date=date, voltage=battery, debug=trigger, brightdiff=brightdiff)
+    new_photo = BwPhoto(source=source, date=date, voltage=battery, debug=trigger)
     session.add(new_photo)
     session.commit()
 
@@ -153,19 +153,20 @@ def process_request_upload_file():
         battery = request.form.get('battery')
         source = request.form.get('source')
         trigger = request.form.get('trigger')
-        brightdiff = request.form.get('brightdiff')
+        cc_label = request.form.get('cc_label')
+        cc_stage = request.form.get('cc_stage')
 
-        print(f"Form data - battery: {battery}, source: {source}, trigger: {trigger}, brightdiff: {brightdiff}")
+        print(f"Form data - battery: {battery}, source: {source}, trigger: {trigger}, cc: {cc_label}/{cc_stage}")
 
         date = datetime.now()
         try:
             battery = float(battery)
-            brightdiff = float(brightdiff)
         except (TypeError, ValueError):
-            print("Invalid battery or brightdiff value")
-            return jsonify({'message': 'Invalid battery or brightdiff value'}), 400
+            print("Invalid battery value")
+            return jsonify({'message': 'Invalid battery value'}), 400
 
-        new_photo = BwPhoto(source=source, date=date, voltage=battery, debug=trigger, filename=filename, brightdiff=brightdiff)
+        new_photo = BwPhoto(source=source, date=date, voltage=battery, debug=trigger, filename=filename,
+                            cc_label=cc_label, cc_stage=cc_stage)
         session.add(new_photo)
         session.commit()
 
@@ -239,40 +240,77 @@ def browse_results():
 
     return render_template(
         'browse_results.html',
-        timestamp=timestamp,
         image_path=current_image,
         next_index=next_index,
         prev_index=prev_index,
-        time_diff=time_diff
+        current_index=current_index,
+        total_images=len(images),
+        time_diff=time_diff,
+        entry=current_entry,
     )
 
 
-@app.route('/log', methods=['POST'])
-def receive_log():
-    lines = request.get_json(silent=True) or []
-    ts = datetime.now().strftime('%H:%M:%S')
-    with _log_lock:
-        for line in lines:
-            _log_lines.append(f"{ts}  {_ansi_re.sub('', line)}")
-    return '', 204
+@app.route('/battery')
+def battery():
+    volt_rows = (session.query(BwPhoto.date, BwPhoto.voltage)
+                 .filter(BwPhoto.voltage.isnot(None), BwPhoto.voltage > 0)
+                 .order_by(BwPhoto.date.asc())
+                 .all())
+    photo_rows = (session.query(BwPhoto.date, BwPhoto.cc_label)
+                  .filter(BwPhoto.filename.isnot(None))
+                  .order_by(BwPhoto.date.asc())
+                  .all())
 
-@app.route('/logs')
-def logs():
-    with _log_lock:
-        lines = list(_log_lines)
-    return render_template('logs.html', lines=lines)
+    volt_by_hour = defaultdict(list)
+    for r in volt_rows:
+        if r.date:
+            volt_by_hour[r.date.replace(minute=0, second=0, microsecond=0)].append(float(r.voltage))
 
-@app.route('/logs/data')
-def logs_data():
-    with _log_lock:
-        lines = list(_log_lines)
-    return jsonify(lines)
+    cloud_by_hour   = defaultdict(int)
+    process_by_hour = defaultdict(int)
+    for r in photo_rows:
+        if r.date:
+            hk = r.date.replace(minute=0, second=0, microsecond=0)
+            if r.cc_label == 'cloud':
+                cloud_by_hour[hk] += 1
+            else:
+                process_by_hour[hk] += 1
 
-@app.route('/logs/clear', methods=['POST'])
-def logs_clear():
-    with _log_lock:
-        _log_lines.clear()
-    return '', 204
+    hourly = []
+    if volt_by_hour:
+        start_h = min(volt_by_hour.keys())
+        end_h   = datetime.now().replace(minute=0, second=0, microsecond=0)
+        last_v  = None
+        cur = start_h
+        while cur <= end_h:
+            if cur in volt_by_hour:
+                v = round(sum(volt_by_hour[cur]) / len(volt_by_hour[cur]), 3)
+                last_v = v
+                est = False
+            elif last_v is not None:
+                v = last_v
+                est = True
+            else:
+                cur += timedelta(hours=1)
+                continue
+            hourly.append({'t': cur.strftime('%Y-%m-%dT%H:%M:%S'), 'v': v, 'est': est,
+                           'nc': cloud_by_hour.get(cur, 0),
+                           'np': process_by_hour.get(cur, 0)})
+            cur += timedelta(hours=1)
+
+    daily = defaultdict(list)
+    for r in volt_rows:
+        if r.date and r.voltage:
+            daily[r.date.strftime('%Y-%m-%d')].append(float(r.voltage))
+
+    daily_rows = [
+        {'day': day, 'count': len(vs),
+         'min': round(min(vs), 2), 'avg': round(sum(vs) / len(vs), 2), 'max': round(max(vs), 2)}
+        for day, vs in sorted(daily.items(), reverse=True)
+    ]
+
+    return render_template('battery.html', hourly=hourly, daily_rows=daily_rows)
+
 
 if __name__ == '__main__':
     app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024

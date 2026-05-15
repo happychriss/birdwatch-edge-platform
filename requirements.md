@@ -84,8 +84,8 @@ GPIO3 (D2) selects the WiFi antenna on the XIAO ESP32-S3: 0 = built-in, 1 = exte
 - **Photo mode:** JPEG, FRAMESIZE_SXGA, quality 10 (high quality)
 - **AWB:** wb_mode=2 (Cloudy/6500K fixed matrix) — avoids green-cast failure seen with auto-AWB in mixed outdoor light
 - **AE:** ae_level=+1 EV, aec_value=450 — lifts foreground exposure in high-contrast sky scenes; AGC on
-- **Light-check mode:** Grayscale, FRAMESIZE_QQVGA (160×120) — used for fast brightness comparison (currently disabled, see §8)
-- **Frame discard:** 6 frames at 100 ms intervals before capture to let AEC/AGC converge (~10 fps sensor)
+- **Cloud-check mode:** Grayscale, FRAMESIZE_QQVGA (160×120) — one frame captured before the main JPEG for the cloud-check filter (§4.2); uses `CAMERA_GRAB_WHEN_EMPTY` to avoid frame-buffer overflow log noise
+- **Frame discard:** 6 frames at 100 ms intervals before the main JPEG capture to let AEC/AGC converge (~10 fps sensor)
 
 ---
 
@@ -128,17 +128,11 @@ Power down: camera deinit, remote log flush, WiFi off, GPIO5 LOW
 
 ---
 
-## 4. False-Trigger Filtering (Light Change Detection)
+## 4. False-Trigger Filtering
 
 PIR sensors are sensitive to rapid infrared changes caused by moving shadows or cloud cover. The scene's sky region and moving plant/railing shadows on the tile floor are the dominant sources of false triggers.
 
-### 4.1 Camera Grayscale Brightness Diff (implemented, currently disabled)
-
-- `bw_light_check()` in `light_check.c` — takes a grayscale QQVGA frame, computes average pixel brightness, compares against the value stored in NVS from the previous wakeup.
-- If the difference exceeds `BW_BRIGHTNESS_THRESHOLD` (15.0 on a 0–255 scale), the trigger is considered a light-change event and image upload is suppressed.
-- **Currently disabled in `main.c`** — single global brightness is too coarse; it cannot distinguish a bird arriving from a cloud passing. Superseded by §4.2.
-
-### 4.2 Cloud-Check Filter
+### 4.1 Cloud-Check Filter
 
 > **Full specification:** [`requirements-cloud-detection.md`](requirements-cloud-detection.md)  
 > **Python simulation:** [`src/cloud-check/`](src/cloud-check/README.md) — Phase 1 complete.
@@ -162,9 +156,9 @@ Binary on-device classifier: **"cloud"** (suppress upload) vs **"non-cloud"** (b
 4. **SCENE_DRIFT** — tiles dark vs model but not vs previous frame → upload + re-calibrate model (stale baseline)
 5. **AMBIGUOUS** — default → upload
 
-See [`requirements-cloud-detection.md`](requirements-cloud-detection.md) for full algorithm, parameter rationale, and the ESP-IDF port plan.
+See [`requirements-cloud-detection.md`](requirements-cloud-detection.md) for full algorithm and parameter rationale.
 
-### 4.3 Training Data
+### 4.2 Training Data
 
 `/workspace/training-data/` (not committed beyond folder structure):
 
@@ -183,9 +177,8 @@ All images are 1600×1200 SXGA JPEG, downsampled to 640×480 grayscale inside th
 
 - **Protocol:** HTTP POST to a home server (Python/Flask, port 8000)
 - **Endpoints (device → server):**
-  - `POST /upload` — JPEG image + metadata (battery, trigger reason, bright_diff)
+  - `POST /upload` — JPEG image + metadata (battery, trigger reason, cc_label, cc_stage)
   - `POST /status` — heartbeat with battery and trigger info
-  - `POST /log` — JSON array of log lines (remote log feature, see §8)
 - **Server address:** `192.168.1.110:8000` (`BW_TARGET_ZO 1`) or `192.168.1.100:8000` (default)
 - **Trigger reasons sent:** `"PIR"`, `"Boot"`, `"Timer"`, `"Camera Start"`, `"Camera Stop"`
 - **Return value** from `/upload` determines `global_mode` (`PIR_SENSOR=0` or `CAMERA_SERVER=1`)
@@ -236,7 +229,6 @@ This prevents the TPS22918 from power-cycling and immediately re-triggering whil
 
 | Issue | Location | Notes |
 |-------|----------|-------|
-| Camera brightness filter disabled | `main.c` | `bw_light_check()` wrapped in `#if 0`; `bright_diff` is always 0.0 sent to server. Being superseded by §4.2 cloud-check filter |
 | OV3660 compatibility untested | `camera.c` | Newer XIAO boards ship with OV3660 instead of OV2640. Driver should be compatible but not verified |
 | EXT1 wakeup is fallback only | `power.c` | `bw_power_deep_sleep_pir_wake()` configures EXT1 on GPIO1 — only reached when USB/bench power keeps board alive after TPS22918 release is ignored |
 
@@ -246,10 +238,8 @@ This prevents the TPS22918 from power-cycling and immediately re-triggering whil
 
 - **Build:** `source /home/ubuntu/esp-idf/export.sh && cd /workspace/src/esp_bw_src && idf.py build`
 - **Flash:** `source /home/ubuntu/esp-idf/export.sh && idf.py -p /dev/ttyACM0 flash`
-- **Serial monitor:** pyserial on `/dev/ttyACM0` at 115200 baud; or open `http://192.168.1.100:8000/logs` for WiFi-based remote log viewer
+- **Serial monitor:** pyserial on `/dev/ttyACM0` at 115200 baud
 - **Credentials:** WiFi SSID/password in `main/credentials.h` (not committed)
-- **NVS:** Used to persist last camera brightness value across cycles (`namespace="storage"`, `key="last_avg"`)
+- **NVS:** Used by cloud_check (background model + previous frame, namespace `"cc"`) and WiFi (BSSID cache)
 - **Dev flags in `config.h`:**
-  - `BW_DEV_NO_SLEEP 1` — skip GPIO5 LOW + deep sleep; device loops forever after cycle (keeps USB alive for monitoring)
-  - `BW_REMOTE_LOG 1` — forward all `ESP_LOGx` output to server `/log` endpoint via HTTP POST
   - `BW_TARGET_ZO 1` — switch to secondary server (`192.168.1.110`)

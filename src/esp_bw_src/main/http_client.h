@@ -14,8 +14,10 @@ esp_err_t bw_http_post_status(float battery_v, const char *trigger);
 // Upload an in-memory JPEG with metadata.  Parses the server reply
 // and returns the requested mode (PIR_SENSOR or CAMERA_SERVER).
 // Negative return → error.
+// cc_label / cc_stage: cloud-check decision ("non-cloud"/"cloud", stage name).
 bw_mode_t bw_http_upload_image(float       battery_v,
                                const char *trigger,
-                               float       bright_diff,
+                               const char *cc_label,
+                               const char *cc_stage,
                                const uint8_t *jpg_buf,
                                size_t         jpg_len);

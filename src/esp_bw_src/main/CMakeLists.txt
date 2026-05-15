@@ -6,10 +6,9 @@ idf_component_register(
         "adc_sense.c"
         "wifi_sta.c"
         "camera.c"
-        "light_check.c"
+        "cloud_check.c"
         "http_client.c"
         "camera_server.c"
-        "remote_log.c"
         "diag.c"
     INCLUDE_DIRS
         "."

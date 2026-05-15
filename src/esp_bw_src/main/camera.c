@@ -134,10 +134,11 @@ esp_err_t bw_cam_init(bw_cam_mode_t mode)
         .pixel_format  = fmt,
         .frame_size    = size,
         .jpeg_quality  = (fmt == PIXFORMAT_JPEG) ? 12 : 0,
-        .fb_count      = (fmt == PIXFORMAT_JPEG) ? 2  : 2,
+        .fb_count      = 2,
         .fb_location   = (fmt == PIXFORMAT_JPEG) ? CAMERA_FB_IN_PSRAM
                                                  : CAMERA_FB_IN_DRAM,
-        .grab_mode     = CAMERA_GRAB_LATEST,
+        .grab_mode     = (fmt == PIXFORMAT_JPEG) ? CAMERA_GRAB_LATEST
+                                                 : CAMERA_GRAB_WHEN_EMPTY,
     };
 
     ESP_LOGI(TAG, "init mode=%s fmt=%d size=%d",
@@ -158,7 +159,17 @@ esp_err_t bw_cam_init(bw_cam_mode_t mode)
     if (mode == BW_CAM_MODE_PHOTO) apply_photo_settings(s);
     else                            apply_lightcheck_settings(s);
 
-    vTaskDelay(pdMS_TO_TICKS(500));
+    // Drain frames for 500 ms while AEC/AGC converges.
+    // QQVGA runs at ~70 fps (14 ms/frame); a 100 ms vTaskDelay between fb_get
+    // calls leaves the 2-FB pool full for 86 ms each iteration → FB-OVF.
+    // Fix: yield only 1 ms so we consume frames as fast as they arrive.
+    TickType_t t0 = xTaskGetTickCount();
+    while ((xTaskGetTickCount() - t0) < pdMS_TO_TICKS(500)) {
+        camera_fb_t *fb = esp_camera_fb_get();
+        if (fb) esp_camera_fb_return(fb);
+        vTaskDelay(1);
+    }
+
     s_inited = true;
     return ESP_OK;
 }

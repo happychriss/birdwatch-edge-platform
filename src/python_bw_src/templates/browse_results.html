@@ -1,82 +1,167 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
-    <title>Browse Results</title>
-    <style>
-        body {
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            justify-content: center;
-            background-color: #f0f0f0;
-            margin: 0;
-            padding: 0;
-        }
-        img {
-            max-width: 90%;
-            max-height: 90%;
-        }
-        .info-container {
-            margin: 10px 0;
-            padding: 10px;
-            background-color: #fff;
-            border-radius: 5px;
-            box-shadow: 0 2px 5px rgba(0,0,0,0.1);
-            width: 80%;
-            max-width: 800px;
-        }
-        .info-row {
-            display: flex;
-            justify-content: space-between;
-            margin: 5px 0;
-        }
-        .info-label {
-            font-weight: bold;
-            margin-right: 10px;
-        }
-        .buttons {
-            margin-top: 20px;
-        }
-        .buttons button {
-            padding: 10px 20px;
-            margin: 0 10px;
-            background-color: #4CAF50;
-            color: white;
-            border: none;
-            cursor: pointer;
-        }
-        .buttons button:hover {
-            background-color: #45a049;
-        }
-    </style>
+<meta charset="utf-8">
+<title>BirdWatch — photo viewer</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: #eef2f7; color: #2c3e50; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; font-size: 13px; min-height: 100vh; display: flex; flex-direction: column; }
+
+  /* ── Header / nav bar ──────────────────────────────────────────── */
+  .topbar {
+    background: linear-gradient(135deg, #1a6fa8 0%, #2980b9 100%);
+    color: #fff; padding: 10px 18px;
+    display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+  }
+  .topbar h1 { font-size: 14px; font-weight: 700; }
+  .topbar a  { color: rgba(255,255,255,0.85); text-decoration: none; font-size: 12px; }
+  .topbar a:hover { color: #fff; }
+  .nav-counter { margin-left: auto; font-size: 12px; opacity: 0.85; }
+
+  /* ── Details panel ──────────────────────────────────────────────── */
+  .details {
+    background: #fff; border-bottom: 1px solid #dce8f0;
+    padding: 10px 18px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  }
+  .detail-group { display: flex; align-items: center; gap: 5px; }
+  .detail-label { font-size: 10px; color: #8a9bb0; text-transform: uppercase; letter-spacing: 0.4px; }
+
+  .badge {
+    padding: 2px 9px; border-radius: 10px; font-size: 11px;
+    font-weight: 700; letter-spacing: 0.3px; text-transform: uppercase;
+  }
+  .badge-cloud    { background: #d6eaf8; color: #1a6fa8; }
+  .badge-noncloud { background: #d5f5e3; color: #1e8449; }
+  .badge-unknown  { background: #eee; color: #778; }
+  .badge-volt     { background: #f4f6f7; color: #556; border: 1px solid #dce; }
+  .badge-debug    { background: #fff3cd; color: #856404; border: 1px solid #ffd97d; }
+  .badge-file     { background: #f0f6fc; color: #556; border: 1px solid #b0c8e0; font-weight: 400; }
+
+  .stage-badge { padding: 2px 9px; border-radius: 10px; font-size: 11px; font-weight: 700; color: #fff; }
+
+  .sep { color: #cdd; }
+
+  .time-diff { font-size: 11px; color: #8a9bb0; }
+
+  /* ── Navigation bar ─────────────────────────────────────────────── */
+  .navbar {
+    background: #f0f6fc; border-bottom: 1px solid #dce8f0;
+    padding: 7px 18px; display: flex; align-items: center; gap: 10px;
+  }
+  .nav-btn {
+    padding: 5px 16px; border: 1px solid #b0c8e0; border-radius: 5px;
+    background: #fff; color: #1a6fa8; cursor: pointer; font-size: 13px;
+    font-weight: 600; text-decoration: none; transition: background 0.12s;
+    user-select: none;
+  }
+  .nav-btn:hover  { background: #daeaf7; }
+  .nav-btn.back   { background: #f0f6fc; color: #556; }
+  .nav-btn.back:hover { background: #dce8f0; }
+  .nav-spacer { flex: 1; }
+  .nav-hint { font-size: 11px; color: #8a9bb0; }
+
+  /* ── Photo ─────────────────────────────────────────────────────── */
+  .photo-wrap {
+    flex: 1; display: flex; align-items: center; justify-content: center;
+    padding: 16px; background: #e8eff7;
+  }
+  .photo-wrap img {
+    max-width: 100%; max-height: calc(100vh - 200px);
+    border-radius: 6px; box-shadow: 0 4px 24px rgba(41,128,185,0.15);
+    display: block;
+  }
+  .no-photo {
+    color: #8a9bb0; font-size: 14px; padding: 60px;
+    background: #fff; border-radius: 6px; text-align: center;
+  }
+</style>
 </head>
 <body>
-    <h1>Image Details</h1>
-    <div class="info-container">
 
+<!-- ── Top bar ──────────────────────────────────────────────────────── -->
+<div class="topbar">
+  <h1>🐦 BirdWatch</h1>
+  <a href="/">← gallery</a>
+  <span class="nav-counter">
+    {% if total_images %}{{ current_index + 1 }} / {{ total_images }}{% endif %}
+  </span>
+</div>
 
-        <div class="info-row">
-            <span class="info-label">Paht:</span>
-            <span>{{ image_path }}</span>
-        </div>
+<!-- ── Details ──────────────────────────────────────────────────────── -->
+{% if entry %}
+  {% set label = entry.cc_label if entry.cc_label else 'unknown' %}
+  {% set stage = entry.cc_stage if entry.cc_stage else '' %}
+  {% if stage == 'WARMUP' %}{% set sc = '#9b59b6' %}
+  {% elif stage == 'DARK_OBJ' %}{% set sc = '#2ecc71' %}
+  {% elif stage == 'QUIET' %}{% set sc = '#3498db' %}
+  {% elif stage == 'SCENE_DRIFT' %}{% set sc = '#e67e22' %}
+  {% elif stage == 'AMBIGUOUS' %}{% set sc = '#f39c12' %}
+  {% else %}{% set sc = '#aab' %}{% endif %}
+  {% set boring = ['Boot', 'PIR', 'Timer', 'Camera Start', 'Camera Stop', '', none] %}
+  {% set show_debug = entry.debug and entry.debug not in boring %}
+<div class="details">
+  <div class="detail-group">
+    <span class="detail-label">date</span>
+    <strong>{{ entry.date.strftime("%d.%m.%Y %H:%M:%S") }}</strong>
+  </div>
+  <span class="sep">·</span>
+  <div class="detail-group">
+    {% if label == 'cloud' %}
+      <span class="badge badge-cloud">clouds</span>
+    {% elif label == 'non-cloud' %}
+      <span class="badge badge-noncloud">process</span>
+    {% else %}
+      <span class="badge badge-unknown">—</span>
+    {% endif %}
+    {% if stage %}
+      <span class="stage-badge" style="background:{{ sc }}">{{ stage }}</span>
+    {% endif %}
+  </div>
+  {% if entry.voltage %}
+  <span class="sep">·</span>
+  <div class="detail-group">
+    <span class="detail-label">battery</span>
+    <span class="badge badge-volt">{{ "%.2f"|format(entry.voltage) }} V</span>
+  </div>
+  {% endif %}
+  {% if time_diff %}
+  <span class="sep">·</span>
+  <span class="time-diff">Δ {{ time_diff }} since previous</span>
+  {% endif %}
+  {% if show_debug %}
+  <span class="sep">·</span>
+  <span class="badge badge-debug">{{ entry.debug }}</span>
+  {% endif %}
+  <span class="sep">·</span>
+  <span class="badge badge-file">{{ image_path }}</span>
+</div>
+{% endif %}
 
+<!-- ── Navigation ───────────────────────────────────────────────────── -->
+<div class="navbar">
+  <a class="nav-btn" href="/browse_results?index={{ prev_index }}">← prev</a>
+  <a class="nav-btn" href="/browse_results?index={{ next_index }}">next →</a>
+  <span class="nav-spacer"></span>
+  <a class="nav-btn back" href="/">gallery</a>
+  <span class="nav-hint">← → keys to navigate</span>
+</div>
 
-        <div class="info-row">
-            <span class="info-label">Timestamp:</span>
-            <span>{{ timestamp }}</span>
-        </div>
-        {% if time_diff is not none %}
-        <div class="info-row">
-            <span class="info-label">Time since previous picture:</span>
-            <span>{{ time_diff }}</span>
-        </div>
-        {% endif %}
-    </div>
-    <img src="{{ url_for('static', filename=image_path) }}" alt="Latest Image">
-    <div class="buttons">
-        <button onclick="window.location.href='/browse_results?index={{ prev_index }}'">Previous</button>
-        <button onclick="window.location.href='/browse_results?index={{ next_index }}'">Next</button>
-        <button onclick="window.location.href='/'">Close</button>
-    </div>
+<!-- ── Photo ────────────────────────────────────────────────────────── -->
+<div class="photo-wrap">
+  {% if image_path %}
+    <img src="{{ url_for('static', filename=image_path) }}" alt="photo">
+  {% else %}
+    <div class="no-photo">No image available</div>
+  {% endif %}
+</div>
+
+<script>
+document.addEventListener('keydown', function(e) {
+  if (e.key === 'ArrowLeft')  location.href = '/browse_results?index={{ prev_index }}';
+  if (e.key === 'ArrowRight') location.href = '/browse_results?index={{ next_index }}';
+  if (e.key === 'Escape')     location.href = '/';
+});
+</script>
+
 </body>
 </html>

@@ -51,10 +51,9 @@
 #include "adc_sense.h"
 #include "wifi_sta.h"
 #include "camera.h"
-#include "light_check.h"
+#include "cloud_check.h"
 #include "http_client.h"
 #include "camera_server.h"
-#include "remote_log.h"
 #include "diag.h"
 
 static const char *TAG = "MAIN";
@@ -88,21 +87,17 @@ static void run_normal_cycle(void)
     float battery_v = bw_adc_read_battery_voltage();
     ESP_LOGI(TAG, "battery=%.3fV", battery_v);
 
-    // Optional camera-based light-change check.  Currently kept here
-    // so the server still sees bright_diff, but the gate is OFF —
-    // every PIR triggers an upload.  Flip the `if` to enable.
-    float bright_diff = 0.0f;
-#if 0
-    bw_light_result_t lr;
-    if (bw_light_check(&lr) == ESP_OK) {
-        bright_diff = lr.bright_diff;
-        if (lr.is_light_change) {
-            ESP_LOGW(TAG, "suppressed upload (light change)");
-            bw_adc_deinit();
-            return;
-        }
+    // ── Cloud-check filter ─────────────────────────────────────────────────
+    // Runs on a QQVGA grayscale frame before the main JPEG capture.
+    // In debug mode the upload always proceeds; the decision is sent as
+    // metadata (cc_label / cc_stage) so the server can display it.
+    // To suppress uploads for cloud frames: check result.label == "cloud".
+    bw_cc_result_t cc;
+    if (bw_cc_assess(&cc) != ESP_OK) {
+        ESP_LOGW(TAG, "cloud-check failed — proceeding with upload");
+        strcpy(cc.label, "non-cloud");
+        strcpy(cc.stage, "CAM_ERR");
     }
-#endif
 
     // ── Capture JPEG ───────────────────────────────────────────────────────
     if (bw_cam_init(BW_CAM_MODE_PHOTO) != ESP_OK) {
@@ -152,9 +147,8 @@ static void run_normal_cycle(void)
         bw_blink(wifi_fail_blink());
         free(img);
         bw_adc_deinit();
-        // 3s cooldown before reboot — PIR still active from this cycle;
-        // light sleep quiets the ESP32 so it does not extend the PIR pulse.
-        esp_sleep_enable_timer_wakeup(3000000ULL);
+        ESP_LOGI(TAG, "cooldown sleep → reboot");
+        esp_sleep_enable_timer_wakeup(BW_COOLDOWN_SLEEP_US);
         esp_light_sleep_start();
         // Reboot once to retry — a fresh stack resolves transient driver hangs
         // better than retrying within the same boot.  Only on a clean cold
@@ -166,7 +160,6 @@ static void run_normal_cycle(void)
         return;
     }
     bw_blink(BW_BLINK_WIFI_OK);
-    bw_remote_log_init();
     ESP_LOGI(TAG, "WiFi up");
 
     // Flush any errors from previous failed cycles to the server now that we
@@ -199,7 +192,7 @@ static void run_normal_cycle(void)
             ESP_LOGI(TAG, "WiFi back up");
         }
         ESP_LOGI(TAG, "upload attempt %d/%d", attempt, BW_HTTP_MAX_RETRIES);
-        mode = bw_http_upload_image(battery_v, trigger, bright_diff, img, img_len);
+        mode = bw_http_upload_image(battery_v, trigger, cc.label, cc.stage, img, img_len);
         if (mode != BW_MODE_ERROR) break;
     }
     free(img);
@@ -236,7 +229,6 @@ static void run_normal_cycle(void)
         bw_blink(BW_BLINK_UPLOAD_OK);
         }
 
-    bw_remote_log_deinit();
     bw_wifi_disconnect();
     bw_adc_deinit();
 }
@@ -249,22 +241,13 @@ void app_main(void)
     bw_blink_init();
     bw_blink(BW_BLINK_BOOT);
 
-#if BW_TEST_PWR_HOLD_BLINK
-    // Blink for 10s to verify the TPS22918 power hold is working after boot.
-    // If the board cuts power before 10s are up, the power hold is not working.
-    for (int i = 0; i < 20; i++) {
-        bw_blink(BW_BLINK_BOOT);
-        vTaskDelay(pdMS_TO_TICKS(500));
-    }
-#endif
-
     esp_log_level_set("*", ESP_LOG_INFO);
     esp_log_level_set(TAG, ESP_LOG_VERBOSE);
 
     bw_log_sysinfo(TAG);
     bw_log_wakeup_cause(TAG);
 
-    // NVS (used by checkpoints, light_check, and WiFi).
+    // NVS (used by cloud_check diagnostics, and WiFi).
     esp_err_t nvs = nvs_flash_init();
     if (nvs == ESP_ERR_NVS_NO_FREE_PAGES || nvs == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         ESP_LOGW(TAG, "NVS needs erase — wiping");
@@ -275,28 +258,13 @@ void app_main(void)
     }
     bw_diag_init();
 
-#if BW_DEV_NO_SLEEP
-    ESP_LOGW(TAG, "BW_DEV_NO_SLEEP: cycling continuously, no power release");
-    while (1) {
-        bw_watchdog_start(BW_CYCLE_TIMEOUT_MS);
-        run_normal_cycle();
-        bw_watchdog_stop();
-        bw_blink(BW_BLINK_SLEEP);
-        bw_log_sysinfo(TAG);
-        vTaskDelay(pdMS_TO_TICKS(3000));
-    }
-#else
     bw_watchdog_start(BW_CYCLE_TIMEOUT_MS);
     run_normal_cycle();
     bw_watchdog_stop();
     bw_log_sysinfo(TAG);
-    // Light sleep for 3s cooldown: CPU halted, clocks gated, SPI flash off.
-    // WiFi RF is already stopped; this eliminates residual CPU switching noise
-    // so the PIR does not see a false trigger before TPS22918 cuts power.
-    // GPIO5 pad latch holds HIGH during light sleep — TPS22918 stays on.
-    esp_sleep_enable_timer_wakeup(3000000ULL);
+    ESP_LOGI(TAG, "cooldown sleep → power release");
+    esp_sleep_enable_timer_wakeup(BW_COOLDOWN_SLEEP_US);
     esp_light_sleep_start();
     bw_power_release();
     bw_power_deep_sleep();
-#endif
 }

@@ -62,7 +62,6 @@ See [`src/cloud-check/`](src/cloud-check/README.md) for the Python simulation an
 
 The current release covers the full capture-filter-upload loop. Planned extensions:
 
-- **Cloud-check C port** — port the Python filter to `cloud_check.c` on the ESP32-S3; currently runs as a Python server queried over HTTP
 - **Cloud detection pipeline** — route confirmed detections to a cloud model for species classification
 - **Post-processing pipeline** — species tagging, confidence scoring, time-series logging
 - **Edge retraining** — feed field captures back into training on the home server
