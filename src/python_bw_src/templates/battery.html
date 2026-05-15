@@ -1,0 +1,269 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>BirdWatch — Battery</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: #eef2f7; color: #2c3e50; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; font-size: 13px; }
+
+  header {
+    background: linear-gradient(135deg, #1a6fa8 0%, #2980b9 100%);
+    color: #fff; padding: 10px 18px;
+    display: flex; align-items: center; gap: 14px;
+  }
+  header h1 { font-size: 16px; font-weight: 700; letter-spacing: 0.3px; }
+  header a { color: rgba(255,255,255,0.85); text-decoration: none; font-size: 12px; }
+  header a:hover { color: #fff; }
+  .header-title { margin-left: auto; font-size: 12px; opacity: 0.8; }
+
+  .card {
+    background: #fff; border-radius: 8px; padding: 16px;
+    margin: 16px 18px 0; box-shadow: 0 1px 4px rgba(41,128,185,0.10);
+  }
+  .card-title { font-size: 13px; font-weight: 600; color: #2c3e50; margin-bottom: 14px; }
+
+  .legend-row {
+    display: flex; gap: 16px; margin-bottom: 12px; font-size: 11px; color: #556; flex-wrap: wrap;
+  }
+  .legend-item { display: flex; align-items: center; gap: 5px; }
+  .legend-line { width: 20px; height: 2px; border-radius: 1px; }
+  .legend-dash { width: 20px; height: 2px; background: repeating-linear-gradient(90deg,#bbb 0,#bbb 4px,transparent 4px,transparent 8px); }
+  .legend-dot  { width: 8px; height: 8px; border-radius: 50%; }
+
+  table { width: 100%; border-collapse: collapse; }
+  th {
+    background: #f0f6fc; color: #8a9bb0; font-size: 11px; text-transform: uppercase;
+    letter-spacing: 0.4px; padding: 8px 12px; text-align: left;
+    border-bottom: 1px solid #dce8f0;
+  }
+  td { padding: 7px 12px; border-bottom: 1px solid #f0f4f8; font-size: 12px; }
+  tr:last-child td { border-bottom: none; }
+
+  .volt { font-weight: 600; font-variant-numeric: tabular-nums; }
+  .v-high { color: #27ae60; }
+  .v-mid  { color: #e67e22; }
+  .v-low  { color: #c0392b; }
+
+  .bar-wrap { display: flex; align-items: center; gap: 8px; }
+  .bar { height: 8px; border-radius: 4px; min-width: 2px; }
+
+  .no-data { text-align: center; color: #8a9bb0; padding: 32px; }
+</style>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3.0.0/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
+</head>
+<body>
+
+<header>
+  <h1>🐦 BirdWatch</h1>
+  <a href="/">← gallery</a>
+  <span class="header-title">Battery</span>
+</header>
+
+<!-- ── Chart ─────────────────────────────────────────────────────────── -->
+<div class="card">
+  <div class="card-title">Hourly battery voltage &amp; photo activity</div>
+
+  <div class="legend-row">
+    <div class="legend-item">
+      <div class="legend-dot" style="background:#27ae60"></div> ≥ 3.8 V
+    </div>
+    <div class="legend-item">
+      <div class="legend-dot" style="background:#e67e22"></div> 3.5 – 3.8 V
+    </div>
+    <div class="legend-item">
+      <div class="legend-dot" style="background:#c0392b"></div> &lt; 3.5 V
+    </div>
+    <div class="legend-item">
+      <div class="legend-dot" style="background:#ccc; border: 1px solid #aaa;"></div> estimated (no reading)
+    </div>
+    <div class="legend-item">
+      <div style="width:12px;height:12px;background:rgba(41,128,185,0.45);border-radius:2px;"></div> clouds/hr
+    </div>
+    <div class="legend-item">
+      <div style="width:12px;height:12px;background:rgba(39,174,96,0.45);border-radius:2px;"></div> process/hr
+    </div>
+  </div>
+
+  {% if hourly %}
+    <canvas id="voltChart" height="80"></canvas>
+  {% else %}
+    <div class="no-data">No battery data recorded yet</div>
+  {% endif %}
+</div>
+
+<!-- ── Daily table ───────────────────────────────────────────────────── -->
+<div class="card" style="margin-bottom: 18px;">
+  <div class="card-title">Daily summary</div>
+  <table>
+    <thead>
+      <tr>
+        <th>Date</th>
+        <th>Readings</th>
+        <th>Min</th>
+        <th>Avg</th>
+        <th>Max</th>
+        <th style="width:130px">Level</th>
+      </tr>
+    </thead>
+    <tbody>
+    {% for row in daily_rows %}
+      {% set vc = 'v-high' if row.avg >= 3.8 else ('v-mid' if row.avg >= 3.5 else 'v-low') %}
+      {% set bar_pct = ((row.avg - 3.0) / 1.2 * 100) | round(1) %}
+      {% set bar_col = '#27ae60' if row.avg >= 3.8 else ('#e67e22' if row.avg >= 3.5 else '#c0392b') %}
+      <tr>
+        <td><strong>{{ row.day }}</strong></td>
+        <td>{{ row.count }}</td>
+        <td class="volt {{ vc }}">{{ "%.2f"|format(row.min) }} V</td>
+        <td class="volt {{ vc }}">{{ "%.2f"|format(row.avg) }} V</td>
+        <td class="volt {{ vc }}">{{ "%.2f"|format(row.max) }} V</td>
+        <td>
+          <div class="bar-wrap">
+            <div class="bar" style="width:{{ bar_pct | int }}px; background:{{ bar_col }}"></div>
+            <span style="font-size:10px; color:#8a9bb0">{{ bar_pct }}%</span>
+          </div>
+        </td>
+      </tr>
+    {% else %}
+      <tr><td colspan="6" class="no-data">No data</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+<script>
+const hourly = {{ hourly | tojson }};
+if (hourly.length) {
+  const labels      = hourly.map(p => p.t);
+  const voltData    = hourly.map(p => p.v);
+  const cloudData   = hourly.map(p => p.nc);
+  const processData = hourly.map(p => p.np);
+  const isEst       = hourly.map(p => p.est);
+
+  const dotColor = hourly.map(p =>
+    p.est ? '#cccccc' : p.v >= 3.8 ? '#27ae60' : p.v >= 3.5 ? '#e67e22' : '#c0392b'
+  );
+
+  // x-axis spans all data but at least 4 days
+  const xMin = new Date(Math.min(
+    new Date(hourly[0].t).getTime(),
+    Date.now() - 4 * 24 * 3600 * 1000
+  ));
+
+  new Chart(document.getElementById('voltChart'), {
+    data: {
+      labels,
+      datasets: [
+        {
+          type: 'line',
+          label: 'Voltage (V)',
+          data: voltData,
+          yAxisID: 'yVolt',
+          borderColor: '#2980b9',
+          backgroundColor: 'rgba(41,128,185,0.06)',
+          borderWidth: 1.5,
+          pointRadius: 3,
+          pointBackgroundColor: dotColor,
+          pointBorderColor: dotColor,
+          tension: 0.2,
+          fill: true,
+          order: 2,
+          segment: {
+            borderColor: ctx => (isEst[ctx.p0DataIndex] || isEst[ctx.p0DataIndex + 1])
+              ? '#cccccc' : undefined,
+            borderDash: ctx => (isEst[ctx.p0DataIndex] || isEst[ctx.p0DataIndex + 1])
+              ? [5, 4] : undefined,
+          },
+        },
+        {
+          type: 'bar',
+          label: 'Clouds/hr',
+          data: cloudData,
+          yAxisID: 'yCount',
+          backgroundColor: 'rgba(41,128,185,0.45)',
+          borderColor: 'rgba(41,128,185,0.7)',
+          borderWidth: 1,
+          borderRadius: 2,
+          stack: 'photos',
+          order: 1,
+        },
+        {
+          type: 'bar',
+          label: 'Process/hr',
+          data: processData,
+          yAxisID: 'yCount',
+          backgroundColor: 'rgba(39,174,96,0.45)',
+          borderColor: 'rgba(39,174,96,0.7)',
+          borderWidth: 1,
+          borderRadius: 2,
+          stack: 'photos',
+          order: 1,
+        }
+      ]
+    },
+    options: {
+      responsive: true,
+      interaction: { mode: 'index', intersect: false },
+      scales: {
+        x: {
+          type: 'time',
+          min: xMin,
+          time: {
+            unit: 'hour',
+            stepSize: 6,
+            tooltipFormat: 'dd.MM.yy HH:mm',
+            displayFormats: { hour: 'HH' },
+          },
+          ticks: {
+            font: { size: 11 },
+            maxRotation: 0,
+            callback: function(val) {
+              const d = new Date(val);
+              if (d.getHours() === 0)
+                return String(d.getDate()).padStart(2,'0') + '.' + String(d.getMonth()+1).padStart(2,'0');
+              return String(d.getHours()).padStart(2,'0');
+            }
+          },
+          grid: { color: '#f0f4f8' }
+        },
+        yVolt: {
+          type: 'linear',
+          position: 'left',
+          min: 3.0, max: 4.3,
+          ticks: { font: { size: 11 }, callback: v => v.toFixed(1) + ' V' },
+          grid: { color: '#e8eff7' },
+          title: { display: true, text: 'Voltage', font: { size: 11 }, color: '#8a9bb0' }
+        },
+        yCount: {
+          type: 'linear',
+          position: 'right',
+          min: 0,
+          stacked: true,
+          ticks: { font: { size: 11 }, stepSize: 1, precision: 0 },
+          grid: { drawOnChartArea: false },
+          title: { display: true, text: 'Photos/hr', font: { size: 11 }, color: '#8a9bb0' }
+        }
+      },
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          callbacks: {
+            label: ctx => {
+              if (ctx.datasetIndex === 0) {
+                const tag = isEst[ctx.dataIndex] ? ' (estimated)' : '';
+                return ' ' + ctx.parsed.y.toFixed(3) + ' V' + tag;
+              }
+              if (ctx.datasetIndex === 1) return ' ' + ctx.parsed.y + ' clouds';
+              return ' ' + ctx.parsed.y + ' process';
+            }
+          }
+        }
+      }
+    }
+  });
+}
+</script>
+
+</body>
+</html>
