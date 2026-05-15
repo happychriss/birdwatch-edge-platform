@@ -12,10 +12,9 @@ SYNTH_ROOT = Path(__file__).resolve().parents[1] / "synth-data"
 # "cloud" = empty scene under some lighting (the false-positive class to suppress).
 # "non-cloud" = anything-new in the frame (bird, person, simulated object).
 FOLDERS = {
-    "real-data/sun": ("cloud", "real-2026"),
-    "real-data/birds-simu": ("non-cloud", "real-2026"),
-    "real-data/people": ("non-cloud", "real-2026"),
-    "with-birds": ("non-cloud", "aux-2025"),
+    "real-data/clouds":               ("cloud",     "real-2026"),
+    "real-data/process-birds-pillow": ("non-cloud", "real-2026"),
+    "real-data/process-people":       ("non-cloud", "real-2026"),
 }
 
 SYNTH_FOLDERS = {

@@ -79,6 +79,9 @@ src/
 ├── cloud-check/      Cloud-check filter (Python simulation, see below)
 └── scripts/          Build, flash, monitor, server scripts
 training-data/        Field captures for model calibration  (images gitignored)
+  real-data/clouds/             Empty-scene frames → label: cloud
+  real-data/process-birds-pillow/  Pillow stand-in → label: non-cloud
+  real-data/process-people/       Person visible   → label: non-cloud
 external-docs/        Component datasheets
 requirements.md       Full functional specification
 requirements-cloud-detection.md   Cloud-check algorithm specification

@@ -29,3 +29,9 @@ class Config:
     # in the sweep — it catches the visually-invisible birds (ratio≈0 frames)
     # that QUIET would otherwise suppress.
     warmup_frames_per_bucket: int = 8  # below this many observations the bucket leans non-cloud
+
+    # Night gate (Stage 0).  When the frame is too dark for reliable anomaly
+    # detection, upload unconditionally.  Proxy for "sun is down" that works
+    # without a clock or location — handles overcast days and season shifts.
+    # Set to 0 to disable.
+    night_brightness_threshold: float = 80.0  # frame-wide tile-mean average below this → NIGHT

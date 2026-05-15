@@ -41,7 +41,7 @@ from cloud_check.features import extract_tile_features, load_gray_vga
 # the production classifier.
 # ---------------------------------------------------------------------------
 
-ALL_STAGES = ("WARMUP", "DARK_OBJ", "QUIET", "DIFFUSE", "SCENE_DRIFT", "AMBIGUOUS")
+ALL_STAGES = ("NIGHT", "WARMUP", "DARK_OBJ", "QUIET", "DIFFUSE", "SCENE_DRIFT", "AMBIGUOUS")
 
 
 def classify_inline(
@@ -54,6 +54,11 @@ def classify_inline(
 ) -> tuple[str, str]:
     """Identical to cloud_check.classifier.classify but supports stage ablation
     and returns only what the sweep needs: (label, trigger)."""
+
+    # Stage 0 — NIGHT
+    if "NIGHT" in enabled and cfg.night_brightness_threshold > 0:
+        if tile_mean.mean() < cfg.night_brightness_threshold:
+            return "non-cloud", "NIGHT"
 
     bucket = model._idx(hour)
     z = np.abs(tile_mean - model.mean[bucket]) / np.sqrt(model.var[bucket])
@@ -167,7 +172,7 @@ def evaluate(cfg: Config, cache: list[CachedSample],
         # - warmup: always (bootstrap)
         # - cloud prediction: always
         # - SCENE_DRIFT: yes (model is stale)
-        if was_warmup or label == "cloud" or trigger == "SCENE_DRIFT":
+        if was_warmup or label == "cloud" or trigger in ("SCENE_DRIFT", "NIGHT"):
             model.update(s.hour, s.tile_mean)
         prev_mean[bucket] = s.tile_mean
 
@@ -187,36 +192,39 @@ def evaluate(cfg: Config, cache: list[CachedSample],
 def grid() -> Iterable[Config]:
     """Cartesian product of parameter values. Order: most-impactful first.
 
-    Total = 4 * 7 * 3 * 2 * 4 * 3 * 3 * 3 = 18 144 configs.
-    Each config evaluation is ~50 ms on cached features → ~15 minutes.
+    Total = 5 * 4 * 7 * 3 * 2 * 4 * 3 * 3 * 3 = 90 720 configs.
+    Each config evaluation is ~50 ms on cached features → ~75 minutes.
     """
     base = Config()
-    for tile_z in [2.0, 2.5, 3.0, 3.5]:
-      for q_ratio in [0.005, 0.01, 0.015, 0.02, 0.025, 0.03, 0.05]:
-        for d_delta in [20.0, 25.0, 30.0]:
-          for d_min in [1, 2]:
-            for t_delta in [5.0, 10.0, 15.0, 20.0]:
-              for alpha in [0.15, 0.25, 0.35]:
-                for warm in [3, 5, 8]:
-                  for diff_min in [0.45, 0.55, 0.65]:
-                    yield replace(
-                        base,
-                        tile_z_threshold=tile_z,
-                        quiet_anomaly_ratio=q_ratio,
-                        dark_object_min_delta=d_delta,
-                        dark_object_min_tiles=d_min,
-                        temporal_dark_delta=t_delta,
-                        ema_alpha=alpha,
-                        warmup_frames_per_bucket=warm,
-                        diffuse_min_ratio=diff_min,
-                    )
+    for night_thresh in [0.0, 30.0, 50.0, 70.0, 80.0]:
+      for tile_z in [2.0, 2.5, 3.0, 3.5]:
+        for q_ratio in [0.005, 0.01, 0.015, 0.02, 0.025, 0.03, 0.05]:
+          for d_delta in [20.0, 25.0, 30.0]:
+            for d_min in [1, 2]:
+              for t_delta in [5.0, 10.0, 15.0, 20.0]:
+                for alpha in [0.15, 0.25, 0.35]:
+                  for warm in [3, 5, 8]:
+                    for diff_min in [0.45, 0.55, 0.65]:
+                      yield replace(
+                          base,
+                          night_brightness_threshold=night_thresh,
+                          tile_z_threshold=tile_z,
+                          quiet_anomaly_ratio=q_ratio,
+                          dark_object_min_delta=d_delta,
+                          dark_object_min_tiles=d_min,
+                          temporal_dark_delta=t_delta,
+                          ema_alpha=alpha,
+                          warmup_frames_per_bucket=warm,
+                          diffuse_min_ratio=diff_min,
+                      )
 
 
 def cfg_summary(cfg: Config) -> str:
-    return (f"z={cfg.tile_z_threshold} q={cfg.quiet_anomaly_ratio} "
-            f"dδ={cfg.dark_object_min_delta} d#={cfg.dark_object_min_tiles} "
-            f"tδ={cfg.temporal_dark_delta} α={cfg.ema_alpha} "
-            f"warm={cfg.warmup_frames_per_bucket} dmin={cfg.diffuse_min_ratio}")
+    return (f"night={cfg.night_brightness_threshold} z={cfg.tile_z_threshold} "
+            f"q={cfg.quiet_anomaly_ratio} dδ={cfg.dark_object_min_delta} "
+            f"d#={cfg.dark_object_min_tiles} tδ={cfg.temporal_dark_delta} "
+            f"α={cfg.ema_alpha} warm={cfg.warmup_frames_per_bucket} "
+            f"dmin={cfg.diffuse_min_ratio}")
 
 
 def print_row(tag: str, r: dict, cfg_str: str = "") -> None:

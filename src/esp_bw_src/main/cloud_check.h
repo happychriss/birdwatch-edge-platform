@@ -14,7 +14,7 @@
 
 typedef struct {
     char label[16];   // "non-cloud" or "cloud"
-    char stage[16];   // "WARMUP" | "DARK_OBJ" | "QUIET" | "SCENE_DRIFT" | "AMBIGUOUS" | "CAM_ERR"
+    char stage[16];   // "NIGHT" | "WARMUP" | "DARK_OBJ" | "QUIET" | "SCENE_DRIFT" | "AMBIGUOUS" | "CAM_ERR"
 } bw_cc_result_t;
 
 // Run the cloud-check pipeline.  Captures one QQVGA frame, loads the NVS

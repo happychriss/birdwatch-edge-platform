@@ -2,6 +2,7 @@
 //
 // Algorithm matches src/cloud-check/ exactly.  Decision stages (priority order):
 //
+//   NIGHT      — frame too dark for reliable detection → upload (sun is down)
 //   WARMUP     — model not yet bootstrapped; upload always (can't risk missing a bird)
 //   DARK_OBJ   — tiles newly dark vs both model AND previous frame → real object → upload
 //   QUIET      — ≤5 % tiles anomalous → scene matches model → suppress
@@ -55,6 +56,7 @@ static const char *NVS_NS = "cc";
 #define CC_DARK_DELTA_PREV  15.0f   // tile must be ≥15 DN darker than previous frame (temporal check)
 #define CC_DARK_MIN_TILES   1       // ≥1 qualifying tile triggers DARK_OBJ / SCENE_DRIFT
 #define CC_WARMUP_FRAMES    8       // frames before model is considered bootstrapped
+#define CC_NIGHT_THRESHOLD  80      // frame global mean below this → NIGHT → upload (sun is down)
 
 // ── NVS key names ─────────────────────────────────────────────────────────────
 // "cc_m"   : tile means     (192 × float  = 768 B)
@@ -185,6 +187,22 @@ static void update_model(const uint8_t *means)
 
 static void run_pipeline(const uint8_t *means, bw_cc_result_t *out)
 {
+    // NIGHT — frame too dark for reliable anomaly detection → upload unconditionally.
+    // Proxy for "sun is down" that requires no clock or location.  Matches Python
+    // Stage 0 in classifier.py (tile_mean.mean() < night_brightness_threshold).
+    uint32_t gm_sum = 0;
+    for (int i = 0; i < CC_NUM_TILES; i++) gm_sum += means[i];
+    uint32_t global_mean = gm_sum / CC_NUM_TILES;
+    if (global_mean < CC_NIGHT_THRESHOLD) {
+        update_model(means);
+        save_model();
+        save_prev(means);
+        strcpy(out->label, "non-cloud");
+        strcpy(out->stage, "NIGHT");
+        ESP_LOGI(TAG, "NIGHT (global_mean=%" PRIu32 " < %d) → non-cloud", global_mean, CC_NIGHT_THRESHOLD);
+        return;
+    }
+
     // Mirror Python's model.observe(): increment BEFORE the warmup check.
     if (s_frames_seen < 0xFFFF) s_frames_seen++;
 

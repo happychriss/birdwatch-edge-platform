@@ -44,6 +44,22 @@ def classify(
 
     cfg = cfg or model.cfg
 
+    # Stage 0 — NIGHT: frame too dark for reliable anomaly detection → upload.
+    global_mean = float(tile_mean.mean())
+    if cfg.night_brightness_threshold > 0 and global_mean < cfg.night_brightness_threshold:
+        return ClassifierResult(
+            label="non-cloud",
+            trigger="NIGHT",
+            anomaly_mask=np.zeros(tile_mean.shape, dtype=bool),
+            blob_max_size=0,
+            anomaly_ratio=0.0,
+            compactness=0.0,
+            reason=f"scene too dark (global_mean={global_mean:.1f} < {cfg.night_brightness_threshold})",
+            warmup=model.warmup_remaining(hour) > 0,
+            new_dark_tiles=0,
+            temporal_available=prev_tile_mean is not None,
+        )
+
     z = model.z_scores(hour, tile_mean)
     mask = z > cfg.tile_z_threshold
     total_anom = int(mask.sum())

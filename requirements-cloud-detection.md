@@ -178,20 +178,43 @@ The oracle-vs-online gap in cloud recall is caused by day-boundary scene changes
 
 | Folder | Count | Label | Notes |
 |--------|-------|-------|-------|
-| `real-data/sun/` | 109 | cloud | Empty balcony, varying sun/shadow, 2026-05 |
-| `real-data/birds-simu/` | 11 | non-cloud | Same scene + small dark pillow as stand-in |
-| `real-data/people/` | 27 | non-cloud | Same scene + person visible |
-| `with-birds/` | 31 | non-cloud (aux, held out) | 2025-07 scene, different angle, cross-domain check |
+| `real-data/clouds/` | 110 | cloud | Empty balcony, varying sun/shadow, 2026-05 |
+| `real-data/process-birds-pillow/` | 12 | non-cloud | Same scene + small dark pillow as bird stand-in |
+| `real-data/process-people/` | 27 | non-cloud | Same scene + person visible |
 
 ---
 
-## 7. Development Path
+## 7. Three-Project Consistency Rule
+
+The cloud-check algorithm is implemented in **three places** that must stay in sync:
+
+| Project | File(s) | Role |
+|---------|---------|------|
+| `src/cloud-check/` | `cloud_check/classifier.py`, `config.py` | Python simulation — ground truth for algorithm logic and parameter tuning |
+| `src/esp_bw_src/` | `main/cloud_check.c` | ESP32-S3 C port — production firmware running on device |
+| `src/python_bw_src/` | `templates/index.html`, `templates/browse_results.html` | Home server gallery — displays stage badges received from device |
+
+**When adding or renaming a stage** (e.g. `NIGHT`, `WARMUP`, `DARK_OBJ` …) you must update all three:
+
+1. `classifier.py` — add the new trigger string and decision logic
+2. `config.py` — add any new threshold parameter with a sensible default
+3. `cloud_check.c` — add the matching `#define` constant and C logic in `run_pipeline()`
+4. `cloud_check.h` — update the `stage[]` field comment to list the new value
+5. `serve.py` (`src/cloud-check/`) — add the stage colour to `_TRIGGER_COLOR`
+6. Both gallery templates in `src/python_bw_src/templates/` — add the stage colour `{% if stage == '...' %}`
+
+**When changing a threshold** — update `config.py` default and the matching `#define` in `cloud_check.c`.
+
+---
+
+## 8. Development Path
 
 **Phase 1 — Python simulation (complete)**  
 `src/cloud-check/` — full pipeline, confusion matrix, parameter sweep, gallery server, debug inspector.
 
-**Phase 2 — ESP-IDF C port (planned)**  
-Re-implement in `cloud_check.c`. The pipeline is integer-arithmetic-friendly by design:
+**Phase 2 — ESP-IDF C port (complete)**  
+`main/cloud_check.c` — all stages ported: NIGHT, WARMUP, DARK_OBJ, QUIET, SCENE_DRIFT, AMBIGUOUS.  
+Integer-arithmetic-friendly by design:
 
 | Operation | ESP32-S3 estimate |
 |-----------|-------------------|
@@ -204,4 +227,5 @@ Re-implement in `cloud_check.c`. The pipeline is integer-arithmetic-friendly by 
 Previous-frame tile means persist in RAM across the cycle (192 × 1 byte = 192 bytes). Background model persists in NVS.
 
 **Phase 3 — Server feedback (future)**  
-The home server can echo a corrective label (`cloud` / `non-cloud`) per uploaded image to accelerate model re-calibration after scene changes, without requiring any firmware update.
+The home server can echo a corrective label (`cloud` / `non-cloud`) per uploaded image to accelerate model re-calibration after scene changes, without requiring any firmware update.  
+Stage badges received from the device are already displayed in the gallery (`python_bw_src`).

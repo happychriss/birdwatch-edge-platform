@@ -20,9 +20,10 @@ Only `/workspace` and `/home/ubuntu/.claude` survive a container recreate. Every
    - `ls /home/ubuntu/.local/bin/` — user-installed binaries
    - `ls /home/ubuntu/esp-idf/.git/refs/tags/ 2>/dev/null | tail -5` and check `git -C /home/ubuntu/esp-idf describe --tags` for ESP-IDF version
    - `ls /home/ubuntu/.espressif/python_env/` — IDF Python env names tell you which IDF versions were installed
-   - `ls /usr/local/bin/` (custom) — anything not from a base package
+   - `ls /usr/local/bin/` (custom) — anything not from a base package; read and embed each custom file as a heredoc in the restore script so it is fully self-contained
    - Read `/home/ubuntu/.zshrc` and `/home/ubuntu/.bashrc` — capture custom PATH / source lines
    - Check `~/.gitconfig` for important user.name/user.email values
+   - Check for `~/.p10k.zsh` — it's lost on rebuild and cannot be auto-restored; flag it as a manual step in the final notes
    - List any venvs under `/workspace` (those are safe — note them but don't include in restore)
 
 2. **Diff against base image (best effort)** — try `docker inspect $(hostname) 2>/dev/null` to find the image; if accessible, compare the apt list against what the image ships. If not accessible (typical from inside the container), include the full manual-apt list.

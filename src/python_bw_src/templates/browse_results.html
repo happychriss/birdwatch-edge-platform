@@ -91,7 +91,8 @@
 {% if entry %}
   {% set label = entry.cc_label if entry.cc_label else 'unknown' %}
   {% set stage = entry.cc_stage if entry.cc_stage else '' %}
-  {% if stage == 'WARMUP' %}{% set sc = '#9b59b6' %}
+  {% if stage == 'NIGHT' %}{% set sc = '#1a1a2e' %}
+  {% elif stage == 'WARMUP' %}{% set sc = '#9b59b6' %}
   {% elif stage == 'DARK_OBJ' %}{% set sc = '#2ecc71' %}
   {% elif stage == 'QUIET' %}{% set sc = '#3498db' %}
   {% elif stage == 'SCENE_DRIFT' %}{% set sc = '#e67e22' %}
