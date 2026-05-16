@@ -45,14 +45,14 @@ The cloud-check filter is a **classical signal-processing pipeline** (not a neur
 | Fully portable to bare-metal C | Requires ML framework |
 | Adapts automatically to season/scene changes | Re-training needed when scene changes |
 
-**Measured on 147 labelled field captures (online / self-calibrating mode):**
+**Measured on 153 labelled field captures (online / self-calibrating mode):**
 
 | Metric | Result |
 |--------|--------|
 | Non-cloud recall — birds and people never missed | **100 %** |
-| Cloud recall — false triggers suppressed | **61 %** |
+| Cloud recall — false triggers suppressed | **55 %** |
 
-The model starts cold and calibrates itself over the first ~8 PIR events per day-period. After that it suppresses 61 % of sun/cloud false triggers with zero missed real events.
+The model starts cold and calibrates itself over the first ~8 PIR events per day-period. After that it suppresses 55 % of sun/cloud false triggers with zero missed real events.
 
 See [`src/cloud-check/`](src/cloud-check/README.md) for the Python simulation and [`requirements-cloud-detection.md`](requirements-cloud-detection.md) for the full algorithm specification.
 

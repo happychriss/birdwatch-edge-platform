@@ -168,7 +168,7 @@ Includes twilight/night scenarios from `real-data/wrong_night/` with filename-en
 
 Parameters were found by focused grid search over 720 configurations (`scripts/sweep.py`): 540 configs achieve zero missed birds; the production config maximises cloud filtering among those.
 
-The oracle-vs-online gap in cloud recall is caused by day-boundary scene changes (items moved on balcony overnight) where SCENE_DRIFT must re-calibrate over several frames before QUIET starts firing reliably.
+The key parameter change was lowering `tile_z_threshold` from 3.0 → 2.5: high sky-tile variance in bucket 0 (EMA model std ≈ 36) caused DARK_OBJ to miss dark objects whose z-scores fell just below 3.0 despite absolute deltas exceeding 120 DN. `quiet_anomaly_ratio` rises from 0.05 → 0.20 to compensate (more tiles counted as anomalous at z=2.5). `night_brightness_threshold` dropped from 80 → 70 to avoid model-state side effects from near-twilight photos.
 
 ---
 
