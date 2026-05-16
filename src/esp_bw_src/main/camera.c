@@ -83,9 +83,9 @@ static void apply_lightcheck_settings(sensor_t *s)
     s->set_gainceiling(s, (gainceiling_t)4);
 
     s->set_bpc(s, 0);
-    s->set_wpc(s, 0);
-    s->set_raw_gma(s, 0);
-    s->set_lenc(s, 0);
+    s->set_wpc(s, 1);
+    s->set_raw_gma(s, 1);  // gamma ON — keeps brightness scale consistent with JPEG frames
+    s->set_lenc(s, 1);     // lens correction ON — keeps per-tile means consistent with JPEG
 
     s->set_hmirror(s, 0);
     s->set_vflip(s, 0);
