@@ -85,8 +85,8 @@ GPIO3 (D2) selects the WiFi antenna on the XIAO ESP32-S3: 0 = built-in, 1 = exte
 - **AWB:** wb_mode=2 (Cloudy/6500K fixed matrix) — avoids green-cast failure seen with auto-AWB in mixed outdoor light
 - **AE:** ae_level=+1 EV, aec_value=450 — lifts foreground exposure in high-contrast sky scenes; AGC on
 - **Cloud-check mode:** Grayscale, FRAMESIZE_QQVGA (160×120) — one frame captured before the main JPEG for the cloud-check filter (§4.2); uses `CAMERA_GRAB_WHEN_EMPTY` to avoid frame-buffer overflow log noise
-- **XCLK:** 20 MHz (OV2640 max 24 MHz) — raises SXGA frame rate ~5→7 fps, shortening AEC settle time
-- **Frame discard:** 10 frames before the main JPEG capture to let AEC/AGC converge after the QQVGA→SXGA mode switch (~1 s settle window at 20 MHz)
+- **XCLK:** 16 MHz — tested stable; 20 MHz caused continuous FB-OVF and NO-EOI on SXGA JPEG (OV2640 JPEG compressor can't keep up at that PCLK for large frames)
+- **Frame discard:** 6 frames at 100 ms intervals before the main JPEG capture to let AEC/AGC converge after the QQVGA→SXGA mode switch (~600 ms)
 - **Exposure mode:** decided from cloud-check `global_mean` — `NORMAL` (≥130 DN) or `LOWLIGHT` (<130 DN, boosted AE/AGC); transmitted as `photo_mode` field and displayed in the server gallery
 
 ---

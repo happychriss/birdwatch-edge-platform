@@ -116,8 +116,7 @@ static void run_normal_cycle(void)
         bw_adc_deinit();
         return;
     }
-    bw_cam_discard_frames(10, 100);  // AEC settle after LIGHTCHECK→PHOTO mode switch;
-                                     // 10 frames at 20 MHz SXGA ≈ 100 ms/frame = ~1 s settle window
+    bw_cam_discard_frames(6, 100);   // AEC settle after LIGHTCHECK→PHOTO mode switch (~600 ms at 16 MHz SXGA)
     camera_fb_t *fb = bw_cam_capture();
     if (!fb) {
         ESP_LOGE(TAG, "no frame captured — aborting cycle");

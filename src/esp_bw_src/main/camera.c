@@ -160,8 +160,7 @@ esp_err_t bw_cam_init(bw_cam_mode_t mode)
         .pin_vsync     = CAM_PIN_VSYNC,
         .pin_href      = CAM_PIN_HREF,
         .pin_pclk      = CAM_PIN_PCLK,
-        .xclk_freq_hz  = 20000000,  // was 16 MHz; 20 MHz is within OV2640 spec and
-                                    // raises SXGA JPEG fps ~5→7 fps, shortening AEC settle time
+        .xclk_freq_hz  = 16000000,  // 16 MHz — tested stable; 20 MHz caused FB-OVF / NO-EOI on SXGA JPEG
         .ledc_timer    = LEDC_TIMER_0,
         .ledc_channel  = LEDC_CHANNEL_0,
         .pixel_format  = fmt,
