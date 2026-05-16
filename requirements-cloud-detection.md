@@ -96,7 +96,7 @@ The model has too few observations to make a reliable call. Missing a bird durin
 #### Stage 2 — DARK_OBJ
 | | |
 |---|---|
-| **Condition** | ≥ 1 tile satisfies **all three**: z-score > 3.0 AND tile mean dropped ≥ 30 below bucket mean AND tile mean dropped ≥ 15 below **previous frame** |
+| **Condition** | ≥ 1 tile satisfies **all three**: z-score > 2.5 AND tile mean dropped ≥ 30 below bucket mean AND tile mean dropped ≥ 15 below **previous frame** |
 | **Decision** | `non-cloud` — upload |
 | **Model update** | No |
 
@@ -107,7 +107,7 @@ Dark silhouettes against the bright sky or floor are the primary object cue. The
 #### Stage 3 — QUIET
 | | |
 |---|---|
-| **Condition** | ≤ 5 % of tiles are anomalous (z-score > 3.0) |
+| **Condition** | ≤ 20 % of tiles are anomalous (z-score > 2.5) |
 | **Decision** | `cloud` — suppress upload |
 | **Model update** | Yes |
 
@@ -146,7 +146,7 @@ frame arrives
     │
     ├─ newly dark tiles ≥ 1? ────────────────────── DARK_OBJ    → upload
     │
-    ├─ anomaly ratio ≤ 0.05? ────────────────────── QUIET       → suppress + update
+    ├─ anomaly ratio ≤ 0.20? ────────────────────── QUIET       → suppress + update
     │
     ├─ dark tiles not new vs prev frame? ──────────  SCENE_DRIFT → upload + update
     │
@@ -159,14 +159,14 @@ frame arrives
 
 ## 5. Performance
 
-Evaluated on 147 labelled real-scene frames, May 2026 (109 cloud, 38 non-cloud, chronological online replay).
+Evaluated on 153 labelled real-scene frames, May 2026 (111 cloud, 42 non-cloud, chronological online replay).
+Includes twilight/night scenarios from `real-data/wrong_night/` with filename-encoded labels.
 
 | Mode | Non-cloud recall | Cloud recall | Missed birds |
 |------|-----------------|--------------|--------------|
-| Oracle (ground-truth model updates) | 1.000 | 0.688 | 0 |
-| **Online (self-calibrating, no labels)** | **1.000** | **0.606** | **0** |
+| **Online (self-calibrating, no labels)** | **1.000** | **0.550** | **0** |
 
-Parameters were found by exhaustive grid search over 18 144 configurations (`scripts/sweep.py`): 6 282 configs achieve zero missed birds; the production config maximises cloud filtering among those.
+Parameters were found by focused grid search over 720 configurations (`scripts/sweep.py`): 540 configs achieve zero missed birds; the production config maximises cloud filtering among those.
 
 The oracle-vs-online gap in cloud recall is caused by day-boundary scene changes (items moved on balcony overnight) where SCENE_DRIFT must re-calibrate over several frames before QUIET starts firing reliably.
 
@@ -178,9 +178,10 @@ The oracle-vs-online gap in cloud recall is caused by day-boundary scene changes
 
 | Folder | Count | Label | Notes |
 |--------|-------|-------|-------|
-| `real-data/clouds/` | 110 | cloud | Empty balcony, varying sun/shadow, 2026-05 |
-| `real-data/process-birds-pillow/` | 12 | non-cloud | Same scene + small dark pillow as bird stand-in |
-| `real-data/process-people/` | 27 | non-cloud | Same scene + person visible |
+| `real-data/clouds/` | ~111 | cloud | Empty balcony, varying sun/shadow, 2026-05 |
+| `real-data/process-birds-pillow/` | ~12 | non-cloud | Same scene + small dark pillow as bird stand-in |
+| `real-data/process-people/` | ~27 | non-cloud | Same scene + person visible |
+| `real-data/wrong_night/` | ~3 | mixed | Twilight/night scenarios; label encoded in filename prefix (`cloud_`, `person_`, `pillow_`) |
 
 ---
 

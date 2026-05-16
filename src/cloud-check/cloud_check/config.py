@@ -19,8 +19,8 @@ class Config:
     # Decision rule. Built around the asymmetry: missing a bird/person is much
     # worse than uploading a spurious cloud frame. We default to "non-cloud"
     # and only suppress when the evidence for "this is just lighting" is clear.
-    tile_z_threshold: float = 3.0      # per-tile z-score above which the tile is "anomalous"
-    quiet_anomaly_ratio: float = 0.05  # ≤ this fraction of tiles anomalous → essentially identical scene → cloud
+    tile_z_threshold: float = 2.5      # per-tile z-score above which the tile is "anomalous"
+    quiet_anomaly_ratio: float = 0.20  # ≤ this fraction of tiles anomalous → essentially identical scene → cloud
     dark_object_min_delta: float = 30.0  # tile became this much darker than bucket mean → object-like
     dark_object_min_tiles: int = 1      # minimum number of such dark tiles required to trigger DARK_OBJ
     temporal_dark_delta: float = 15.0   # tile must be this much darker than PREVIOUS frame → genuinely new dark event
@@ -34,4 +34,4 @@ class Config:
     # detection, upload unconditionally.  Proxy for "sun is down" that works
     # without a clock or location — handles overcast days and season shifts.
     # Set to 0 to disable.
-    night_brightness_threshold: float = 80.0  # frame-wide tile-mean average below this → NIGHT
+    night_brightness_threshold: float = 70.0  # frame-wide tile-mean average below this → NIGHT

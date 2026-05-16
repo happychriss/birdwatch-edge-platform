@@ -27,7 +27,6 @@ from pathlib import Path
 from typing import Iterable
 
 import numpy as np
-from scipy.ndimage import label as cc_label
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -41,7 +40,7 @@ from cloud_check.features import extract_tile_features, load_gray_vga
 # the production classifier.
 # ---------------------------------------------------------------------------
 
-ALL_STAGES = ("NIGHT", "WARMUP", "DARK_OBJ", "QUIET", "DIFFUSE", "SCENE_DRIFT", "AMBIGUOUS")
+ALL_STAGES = ("NIGHT", "WARMUP", "DARK_OBJ", "QUIET", "SCENE_DRIFT", "AMBIGUOUS")
 
 
 def classify_inline(
@@ -96,19 +95,6 @@ def classify_inline(
         return "non-cloud", "DARK_OBJ"
     if "QUIET" in enabled and ratio <= cfg.quiet_anomaly_ratio:
         return "cloud", "QUIET"
-    if "DIFFUSE" in enabled and ratio >= cfg.diffuse_min_ratio:
-        # compactness check; need blob_max
-        labelled, _ = cc_label(mask)
-        if labelled.max() == 0:
-            blob_max = 0
-        else:
-            sizes = np.bincount(labelled.ravel())
-            sizes[0] = 0
-            blob_max = int(sizes.max())
-        total_anom = int(mask.sum())
-        compactness = blob_max / total_anom if total_anom > 0 else 0.0
-        if compactness <= cfg.diffuse_max_compactness:
-            return "cloud", "DIFFUSE"
     if stale_fires:
         return "non-cloud", "SCENE_DRIFT"
     return "non-cloud", "AMBIGUOUS"
@@ -190,41 +176,37 @@ def evaluate(cfg: Config, cache: list[CachedSample],
 # ---------------------------------------------------------------------------
 
 def grid() -> Iterable[Config]:
-    """Cartesian product of parameter values. Order: most-impactful first.
+    """Focused grid targeting the z_threshold / QUIET boundary.
 
-    Total = 5 * 4 * 7 * 3 * 2 * 4 * 3 * 3 * 3 = 90 720 configs.
-    Each config evaluation is ~50 ms on cached features → ~75 minutes.
+    The FN=2 case (wrong_night person + pillow) fails because high sky-tile
+    variance (model_std_avg ≈ 36) keeps z-scores below 3.0 even when the
+    absolute delta vs model is 120+.  Lowering tile_z_threshold is the fix;
+    quiet_anomaly_ratio may need to rise to compensate (more tiles flagged
+    as anomalous in lighting frames).
+
+    Total = 3 * 4 * 5 * 4 * 3 = 720 configs (~25 s on cached features).
     """
     base = Config()
-    for night_thresh in [0.0, 30.0, 50.0, 70.0, 80.0]:
-      for tile_z in [2.0, 2.5, 3.0, 3.5]:
-        for q_ratio in [0.005, 0.01, 0.015, 0.02, 0.025, 0.03, 0.05]:
-          for d_delta in [20.0, 25.0, 30.0]:
-            for d_min in [1, 2]:
-              for t_delta in [5.0, 10.0, 15.0, 20.0]:
-                for alpha in [0.15, 0.25, 0.35]:
-                  for warm in [3, 5, 8]:
-                    for diff_min in [0.45, 0.55, 0.65]:
-                      yield replace(
-                          base,
-                          night_brightness_threshold=night_thresh,
-                          tile_z_threshold=tile_z,
-                          quiet_anomaly_ratio=q_ratio,
-                          dark_object_min_delta=d_delta,
-                          dark_object_min_tiles=d_min,
-                          temporal_dark_delta=t_delta,
-                          ema_alpha=alpha,
-                          warmup_frames_per_bucket=warm,
-                          diffuse_min_ratio=diff_min,
-                      )
+    for night_thresh in [70.0, 80.0, 90.0]:
+        for tile_z in [1.5, 2.0, 2.5, 3.0]:
+            for q_ratio in [0.05, 0.10, 0.15, 0.20, 0.25]:
+                for d_delta in [15.0, 20.0, 25.0, 30.0]:
+                    for t_delta in [5.0, 10.0, 15.0]:
+                        yield replace(
+                            base,
+                            night_brightness_threshold=night_thresh,
+                            tile_z_threshold=tile_z,
+                            quiet_anomaly_ratio=q_ratio,
+                            dark_object_min_delta=d_delta,
+                            temporal_dark_delta=t_delta,
+                        )
 
 
 def cfg_summary(cfg: Config) -> str:
     return (f"night={cfg.night_brightness_threshold} z={cfg.tile_z_threshold} "
             f"q={cfg.quiet_anomaly_ratio} dδ={cfg.dark_object_min_delta} "
-            f"d#={cfg.dark_object_min_tiles} tδ={cfg.temporal_dark_delta} "
-            f"α={cfg.ema_alpha} warm={cfg.warmup_frames_per_bucket} "
-            f"dmin={cfg.diffuse_min_ratio}")
+            f"tδ={cfg.temporal_dark_delta} α={cfg.ema_alpha} "
+            f"warm={cfg.warmup_frames_per_bucket}")
 
 
 def print_row(tag: str, r: dict, cfg_str: str = "") -> None:
@@ -258,13 +240,6 @@ def main() -> None:
         delta_tn = r["TN"] - base_r["TN"]
         delta_str = f"ΔFN={delta_fn:+d}  ΔTN={delta_tn:+d}"
         print_row(f"NO {stage:<11s}", r, delta_str)
-
-    # Pair ablations: disable each pair of "cloud" stages
-    print("\n--- DISABLE BOTH CLOUD FILTERS (QUIET + DIFFUSE) ---")
-    enabled = frozenset(s for s in ALL_STAGES if s not in ("QUIET", "DIFFUSE"))
-    r = evaluate(base_cfg, cache, enabled)
-    print_row("no QUIET+no DIFFUSE", r,
-              f"ΔFN={r['FN']-base_r['FN']:+d}  ΔTN={r['TN']-base_r['TN']:+d}")
 
     # 3. Full parameter grid
     print("\n--- PARAMETER GRID SWEEP ---")

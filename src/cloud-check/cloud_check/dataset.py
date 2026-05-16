@@ -22,6 +22,17 @@ SYNTH_FOLDERS = {
     "birds_paste": ("non-cloud", "synth"),
 }
 
+# Folders where the label is encoded in the filename prefix (prefix_YYYYMMDD_HHMMSS.jpg).
+# Used for ad-hoc test scenarios where mixed labels land in a single folder.
+FILENAME_LABELED_FOLDERS = {
+    "real-data/wrong_night": "real-2026",
+}
+_FILENAME_LABEL_PREFIX = {
+    "cloud":  "cloud",
+    "person": "non-cloud",
+    "pillow": "non-cloud",
+}
+
 _TIMESTAMP_RE = re.compile(r"(20\d{6})_(\d{6})")
 
 
@@ -77,6 +88,20 @@ def load_dataset(root: Path | None = None, include_synth: bool = False) -> list[
                     taken_at=_parse_timestamp(jpg.name),
                 )
             )
+    for rel, domain in FILENAME_LABELED_FOLDERS.items():
+        folder = base / rel
+        if not folder.is_dir():
+            continue
+        for jpg in sorted(folder.glob("*.jpg")):
+            prefix = jpg.stem.split("_")[0]
+            label = _FILENAME_LABEL_PREFIX.get(prefix)
+            if label is None:
+                continue
+            samples.append(
+                Sample(path=jpg, label=label, domain=domain,
+                       taken_at=_parse_timestamp(jpg.name))
+            )
+
     if include_synth and SYNTH_ROOT.is_dir():
         for rel, (label, domain) in SYNTH_FOLDERS.items():
             folder = SYNTH_ROOT / rel
