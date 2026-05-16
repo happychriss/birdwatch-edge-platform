@@ -8,7 +8,7 @@ from collections import defaultdict
 import os
 import requests
 import time
-from db import BwPhoto, Session, init_schema
+from db import BwPhoto, Session
 
 
 birdwatch_http = "http://192.168.1.43"
@@ -314,7 +314,6 @@ def battery():
 
 
 if __name__ == '__main__':
-    init_schema()
     app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024
     app.run(host='0.0.0.0', port=8000)
 
