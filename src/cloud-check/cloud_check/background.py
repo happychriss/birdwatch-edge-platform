@@ -4,26 +4,24 @@ import numpy as np
 
 from .config import Config
 from .dataset import time_bucket
-from .features import GRID_H, GRID_W
-
-
 class BackgroundModel:
     """Per-tile running statistics, bucketed by day-period.
 
     Layout mirrors the planned on-device NVS blob:
-        mean   : (num_buckets, GRID_H, GRID_W) float32
-        var    : (num_buckets, GRID_H, GRID_W) float32
-        count  : (num_buckets, GRID_H, GRID_W) uint16
+        mean   : (num_buckets, grid_h, grid_w) float32
+        var    : (num_buckets, grid_h, grid_w) float32
+        count  : (num_buckets, grid_h, grid_w) uint16
         bucket_seen : (num_buckets,) uint16  — total frames observed in this bucket
 
-    Default storage on the device for 4 buckets × 12 × 16 tiles:
-        4 × 192 × (4+4+2) + 4×2  ≈ 7 700 bytes
+    Storage for 4 buckets × cfg.grid_h × cfg.grid_w tiles:
+        QQVGA (16×12=192 tiles): 4 × 192 × 10 bytes ≈ 7 700 bytes
+        QVGA  (32×24=768 tiles): 4 × 768 × 10 bytes ≈ 30 700 bytes
     """
 
     def __init__(self, cfg: Config | None = None) -> None:
         self.cfg = cfg or Config()
         n = self.cfg.num_time_buckets
-        shape = (n, GRID_H, GRID_W)
+        shape = (n, self.cfg.grid_h, self.cfg.grid_w)
         self.mean = np.full(shape, 128.0, dtype=np.float32)
         self.var = np.full(shape, self.cfg.init_var, dtype=np.float32)
         self.count = np.zeros(shape, dtype=np.uint16)

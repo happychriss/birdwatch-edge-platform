@@ -30,8 +30,24 @@ class Config:
     # that QUIET would otherwise suppress.
     warmup_frames_per_bucket: int = 8  # below this many observations the bucket leans non-cloud
 
+    # Tile grid.  16×12 at VGA maps to the QQVGA (160×120) lightcheck with
+    # 10×10-pixel tiles.  32×24 at VGA maps to QVGA (320×240) with the same
+    # 10×10-pixel tile size — 4× more tiles, better spatial resolution for
+    # small objects.  Changing these requires matching firmware constants.
+    grid_w: int = 16   # number of tile columns
+    grid_h: int = 12   # number of tile rows
+
     # Night gate (Stage 0).  When the frame is too dark for reliable anomaly
     # detection, upload unconditionally.  Proxy for "sun is down" that works
     # without a clock or location — handles overcast days and season shifts.
     # Set to 0 to disable.
     night_brightness_threshold: float = 70.0  # frame-wide tile-mean average below this → NIGHT
+
+    # Indirect-light gate (Stage 2b, after DARK_OBJ).  Low-to-moderate brightness
+    # combined with high spatial contrast (sun from the side, hard shadows) creates
+    # a regime where the background model z-scores are unreliable: the model has
+    # accumulated high variance from sun/cloud cycling, so even a 100 DN object
+    # delta yields z < 2.5.  In this zone we cannot distinguish a cloud shadow from
+    # a small dark object, so we admit the limitation and upload unconditionally.
+    # Sits above night_brightness_threshold; set to 0 to disable.
+    indirect_light_threshold: float = 95.0  # global_mean below this (but above night) → INDIRECT_LIGHT

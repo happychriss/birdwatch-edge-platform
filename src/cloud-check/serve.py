@@ -123,7 +123,7 @@ def assess():
         was_warmup = _model.warmup_remaining(hour) > 0
         _model.observe(hour)
         result = classify(feats["mean"], hour, _model, _cfg, prev_tile_mean=prev)
-        if was_warmup or result.label == "cloud" or result.trigger in ("SCENE_DRIFT", "NIGHT"):
+        if was_warmup or result.label == "cloud" or result.trigger in ("SCENE_DRIFT", "NIGHT", "INDIRECT_LIGHT"):
             _model.update(hour, feats["mean"])
         _prev_tile_mean[bucket] = feats["mean"]
         _assess_count += 1
@@ -190,12 +190,13 @@ def model_reset():
 # ---------------------------------------------------------------------------
 
 _TRIGGER_COLOR = {
-    "NIGHT":        "#1a1a2e",
-    "WARMUP":       "#9b59b6",
-    "DARK_OBJ":     "#2ecc71",
-    "QUIET":        "#3498db",
-    "SCENE_DRIFT":  "#f39c12",
-    "AMBIGUOUS":    "#e67e22",
+    "NIGHT":          "#1a1a2e",
+    "WARMUP":         "#9b59b6",
+    "DARK_OBJ":       "#2ecc71",
+    "INDIRECT_LIGHT": "#e74c3c",
+    "QUIET":          "#3498db",
+    "SCENE_DRIFT":    "#f39c12",
+    "AMBIGUOUS":      "#e67e22",
 }
 
 _GALLERY_TEMPLATE = """<!DOCTYPE html>
@@ -333,7 +334,7 @@ def gallery():
         was_warmup = gal_model.warmup_remaining(s.hour_bucket) > 0
         gal_model.observe(s.hour_bucket)
         pred = classify(feats["mean"], s.hour_bucket, gal_model, gal_cfg, prev_tile_mean=prev)
-        if was_warmup or pred.label == "cloud" or pred.trigger in ("SCENE_DRIFT", "NIGHT"):
+        if was_warmup or pred.label == "cloud" or pred.trigger in ("SCENE_DRIFT", "NIGHT", "INDIRECT_LIGHT"):
             gal_model.update(s.hour_bucket, feats["mean"])
         gal_prev[bucket] = feats["mean"]
         r = R()

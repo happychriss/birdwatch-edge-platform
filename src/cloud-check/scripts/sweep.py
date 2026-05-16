@@ -40,7 +40,7 @@ from cloud_check.features import extract_tile_features, load_gray_vga
 # the production classifier.
 # ---------------------------------------------------------------------------
 
-ALL_STAGES = ("NIGHT", "WARMUP", "DARK_OBJ", "QUIET", "SCENE_DRIFT", "AMBIGUOUS")
+ALL_STAGES = ("NIGHT", "WARMUP", "DARK_OBJ", "INDIRECT_LIGHT", "QUIET", "SCENE_DRIFT", "AMBIGUOUS")
 
 
 def classify_inline(
@@ -93,6 +93,9 @@ def classify_inline(
         return "non-cloud", "WARMUP"
     if dark_obj_fires:
         return "non-cloud", "DARK_OBJ"
+    if ("INDIRECT_LIGHT" in enabled and cfg.indirect_light_threshold > 0
+            and float(tile_mean.mean()) < cfg.indirect_light_threshold):
+        return "non-cloud", "INDIRECT_LIGHT"
     if "QUIET" in enabled and ratio <= cfg.quiet_anomaly_ratio:
         return "cloud", "QUIET"
     if stale_fires:
@@ -112,13 +115,13 @@ class CachedSample:
     filename: str
 
 
-def load_cache() -> list[CachedSample]:
+def load_cache(grid_w: int = 16, grid_h: int = 12) -> list[CachedSample]:
     raw = [s for s in load_dataset() if s.domain != "aux-2025"]
     raw.sort(key=lambda s: (s.taken_at.isoformat() if s.taken_at else s.path.name))
     cache: list[CachedSample] = []
     for s in raw:
         frame = load_gray_vga(s.path)
-        feats = extract_tile_features(frame)
+        feats = extract_tile_features(frame, grid_w=grid_w, grid_h=grid_h)
         cache.append(CachedSample(
             label=s.label,
             hour=s.hour_bucket,
@@ -158,7 +161,7 @@ def evaluate(cfg: Config, cache: list[CachedSample],
         # - warmup: always (bootstrap)
         # - cloud prediction: always
         # - SCENE_DRIFT: yes (model is stale)
-        if was_warmup or label == "cloud" or trigger in ("SCENE_DRIFT", "NIGHT"):
+        if was_warmup or label == "cloud" or trigger in ("SCENE_DRIFT", "NIGHT", "INDIRECT_LIGHT"):
             model.update(s.hour, s.tile_mean)
         prev_mean[bucket] = s.tile_mean
 
@@ -176,37 +179,36 @@ def evaluate(cfg: Config, cache: list[CachedSample],
 # ---------------------------------------------------------------------------
 
 def grid() -> Iterable[Config]:
-    """Focused grid targeting the z_threshold / QUIET boundary.
+    """Grid exploring INDIRECT_LIGHT threshold and lightcheck resolution.
 
-    The FN=2 case (wrong_night person + pillow) fails because high sky-tile
-    variance (model_std_avg ≈ 36) keeps z-scores below 3.0 even when the
-    absolute delta vs model is 120+.  Lowering tile_z_threshold is the fix;
-    quiet_anomaly_ratio may need to rise to compensate (more tiles flagged
-    as anomalous in lighting frames).
+    indirect_light_threshold=0 disables the stage.
+    grid (16×12) = current QQVGA lightcheck; (32×24) = proposed QVGA lightcheck.
 
-    Total = 3 * 4 * 5 * 4 * 3 = 720 configs (~25 s on cached features).
+    Total = 2 * 4 * 3 * 3 * 4 * 3 = 864 configs (~20 s on cached features).
     """
     base = Config()
-    for night_thresh in [70.0, 80.0, 90.0]:
-        for tile_z in [1.5, 2.0, 2.5, 3.0]:
-            for q_ratio in [0.05, 0.10, 0.15, 0.20, 0.25]:
-                for d_delta in [15.0, 20.0, 25.0, 30.0]:
-                    for t_delta in [5.0, 10.0, 15.0]:
-                        yield replace(
-                            base,
-                            night_brightness_threshold=night_thresh,
-                            tile_z_threshold=tile_z,
-                            quiet_anomaly_ratio=q_ratio,
-                            dark_object_min_delta=d_delta,
-                            temporal_dark_delta=t_delta,
-                        )
+    for gw, gh in [(16, 12), (32, 24)]:
+        for indirect_thresh in [0.0, 95.0, 105.0, 115.0]:
+            for tile_z in [2.0, 2.5, 3.0]:
+                for q_ratio in [0.15, 0.20, 0.25]:
+                    for d_delta in [20.0, 25.0, 30.0, 35.0]:
+                        for t_delta in [10.0, 15.0, 20.0]:
+                            yield replace(
+                                base,
+                                grid_w=gw, grid_h=gh,
+                                indirect_light_threshold=indirect_thresh,
+                                tile_z_threshold=tile_z,
+                                quiet_anomaly_ratio=q_ratio,
+                                dark_object_min_delta=d_delta,
+                                temporal_dark_delta=t_delta,
+                            )
 
 
 def cfg_summary(cfg: Config) -> str:
-    return (f"night={cfg.night_brightness_threshold} z={cfg.tile_z_threshold} "
-            f"q={cfg.quiet_anomaly_ratio} dδ={cfg.dark_object_min_delta} "
-            f"tδ={cfg.temporal_dark_delta} α={cfg.ema_alpha} "
-            f"warm={cfg.warmup_frames_per_bucket}")
+    res = "QQVGA" if cfg.grid_w == 16 else "QVGA"
+    return (f"{res} indirect={cfg.indirect_light_threshold} "
+            f"z={cfg.tile_z_threshold} q={cfg.quiet_anomaly_ratio} "
+            f"dδ={cfg.dark_object_min_delta} tδ={cfg.temporal_dark_delta}")
 
 
 def print_row(tag: str, r: dict, cfg_str: str = "") -> None:
@@ -219,27 +221,34 @@ def print_row(tag: str, r: dict, cfg_str: str = "") -> None:
 # ---------------------------------------------------------------------------
 
 def main() -> None:
-    print("Caching tile features...")
+    print("Caching tile features (QQVGA 16×12 and QVGA 32×24)...")
     t0 = time.time()
-    cache = load_cache()
-    print(f"  cached {len(cache)} frames in {time.time()-t0:.1f}s")
+    cache_qqvga = load_cache(grid_w=16, grid_h=12)
+    cache_qvga  = load_cache(grid_w=32, grid_h=24)
+    caches = {(16, 12): cache_qqvga, (32, 24): cache_qvga}
+    print(f"  cached {len(cache_qqvga)} frames × 2 grids in {time.time()-t0:.1f}s")
 
-    # 1. Production baseline
-    base_cfg = Config()
-    print("\n--- BASELINE (current production Config) ---")
-    base_r = evaluate(base_cfg, cache)
-    print_row("baseline", base_r, cfg_summary(base_cfg))
+    # 1. Production baselines (both resolutions, no INDIRECT_LIGHT)
+    base_qqvga = Config(grid_w=16, grid_h=12)
+    base_qvga  = Config(grid_w=32, grid_h=24)
+    print("\n--- BASELINE (current QQVGA, no INDIRECT_LIGHT) ---")
+    base_r = evaluate(base_qqvga, cache_qqvga)
+    print_row("QQVGA baseline", base_r, cfg_summary(base_qqvga))
     print(f"    triggers: {dict(sorted(base_r['triggers'].items()))}")
 
-    # 2. Ablations on baseline config
-    print("\n--- STAGE ABLATIONS (baseline config, one rule disabled) ---")
+    print("\n--- BASELINE (QVGA resolution, no INDIRECT_LIGHT) ---")
+    qvga_r = evaluate(base_qvga, cache_qvga)
+    print_row("QVGA  baseline", qvga_r, cfg_summary(base_qvga))
+    print(f"    triggers: {dict(sorted(qvga_r['triggers'].items()))}")
+
+    # 2. Ablations on QQVGA baseline
+    print("\n--- STAGE ABLATIONS (QQVGA baseline, one rule disabled) ---")
     for stage in ALL_STAGES:
         enabled = frozenset(s for s in ALL_STAGES if s != stage)
-        r = evaluate(base_cfg, cache, enabled)
+        r = evaluate(base_qqvga, cache_qqvga, enabled)
         delta_fn = r["FN"] - base_r["FN"]
         delta_tn = r["TN"] - base_r["TN"]
-        delta_str = f"ΔFN={delta_fn:+d}  ΔTN={delta_tn:+d}"
-        print_row(f"NO {stage:<11s}", r, delta_str)
+        print_row(f"NO {stage:<13s}", r, f"ΔFN={delta_fn:+d}  ΔTN={delta_tn:+d}")
 
     # 3. Full parameter grid
     print("\n--- PARAMETER GRID SWEEP ---")
@@ -248,32 +257,32 @@ def main() -> None:
     t0 = time.time()
     results: list[tuple[Config, dict]] = []
     for i, cfg in enumerate(grid_list):
+        cache = caches[(cfg.grid_w, cfg.grid_h)]
         r = evaluate(cfg, cache)
         results.append((cfg, r))
-        if (i + 1) % 1000 == 0:
+        if (i + 1) % 500 == 0:
             pace = (i + 1) / (time.time() - t0)
             eta = (len(grid_list) - i - 1) / pace
             print(f"    {i+1}/{len(grid_list)}  ({pace:.0f}/s, ETA {eta:.0f}s)")
     print(f"  done in {time.time()-t0:.1f}s")
 
-    # Pareto: prefer FN == 0; among those, max TN.
     fn_zero = [(c, r) for c, r in results if r["FN"] == 0]
-    print(f"\n  configs with FN==0 (zero missed birds): {len(fn_zero)} / {len(results)}")
+    print(f"\n  configs with FN==0: {len(fn_zero)} / {len(results)}")
 
-    print("\n--- TOP 10 BY FN==0 then max TN ---")
+    print("\n--- TOP 15 BY FN==0 then max TN ---")
     fn_zero.sort(key=lambda cr: (-cr[1]["TN"], cr[1]["FP"]))
-    for cfg, r in fn_zero[:10]:
+    for cfg, r in fn_zero[:15]:
         print_row("", r, cfg_summary(cfg))
 
-    print("\n--- TOP 10 BY MAX TN OVERALL (any FN) ---")
-    by_tn = sorted(results, key=lambda cr: (-cr[1]["TN"], cr[1]["FN"]))
-    for cfg, r in by_tn[:10]:
-        print_row("", r, cfg_summary(cfg))
-
-    print("\n--- TOP 10 BY MIN FN (most birds caught), ties broken by TN ---")
-    by_fn = sorted(results, key=lambda cr: (cr[1]["FN"], -cr[1]["TN"]))
-    for cfg, r in by_fn[:10]:
-        print_row("", r, cfg_summary(cfg))
+    print("\n--- TOP 5 FN==0 QQVGA  vs  TOP 5 FN==0 QVGA ---")
+    qqvga_fn0 = [(c, r) for c, r in fn_zero if c.grid_w == 16]
+    qvga_fn0  = [(c, r) for c, r in fn_zero if c.grid_w == 32]
+    print("  QQVGA:")
+    for cfg, r in qqvga_fn0[:5]:
+        print_row("   ", r, cfg_summary(cfg))
+    print("  QVGA:")
+    for cfg, r in qvga_fn0[:5]:
+        print_row("   ", r, cfg_summary(cfg))
 
 
 if __name__ == "__main__":

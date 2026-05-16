@@ -104,7 +104,18 @@ Dark silhouettes against the bright sky or floor are the primary object cue. The
 
 ---
 
-#### Stage 3 — QUIET
+#### Stage 3 — INDIRECT_LIGHT
+| | |
+|---|---|
+| **Condition** | global_mean < 95 (but ≥ NIGHT threshold of 70) |
+| **Decision** | `non-cloud` — upload |
+| **Model update** | Yes |
+
+Low-angle sun (morning/evening) creates hard directional shadows — **high spatial contrast, moderate brightness**. This is exactly when PIR false triggers are most common, and also when the background model is least reliable: the model has accumulated high variance from sun/cloud cycling in this lighting zone, so z-scores are compressed even for large object-sized deltas (a 100 DN difference yields z ≈ 2.3, below the 2.5 threshold). Cloud and non-cloud frames are indistinguishable by any spatial or luminance metric. The honest response is to upload unconditionally and let the user decide.
+
+---
+
+#### Stage 5 — QUIET
 | | |
 |---|---|
 | **Condition** | ≤ 20 % of tiles are anomalous (z-score > 2.5) |
@@ -115,7 +126,7 @@ The scene is essentially identical to the stored model. Nothing happened; the PI
 
 ---
 
-#### Stage 4 — SCENE_DRIFT
+#### Stage 6 — SCENE_DRIFT
 | | |
 |---|---|
 | **Condition** | ≥ 1 tile is dark vs the model (same as DARK_OBJ threshold) **but** none of those tiles are newly dark vs the previous frame |
@@ -142,15 +153,19 @@ When no rule fires with confidence, lean upload.
 ```
 frame arrives
     │
-    ├─ bucket < 8 frames seen? ──────────────────── WARMUP      → upload + update
+    ├─ global_mean < 70?  ───────────────────────── NIGHT           → upload + update
     │
-    ├─ newly dark tiles ≥ 1? ────────────────────── DARK_OBJ    → upload
+    ├─ bucket < 8 frames seen? ──────────────────── WARMUP          → upload + update
     │
-    ├─ anomaly ratio ≤ 0.20? ────────────────────── QUIET       → suppress + update
+    ├─ newly dark tiles ≥ 1? ────────────────────── DARK_OBJ        → upload
     │
-    ├─ dark tiles not new vs prev frame? ──────────  SCENE_DRIFT → upload + update
+    ├─ global_mean < 95?  ───────────────────────── INDIRECT_LIGHT  → upload + update
     │
-    └─ otherwise ───────────────────────────────── AMBIGUOUS    → upload
+    ├─ anomaly ratio ≤ 0.20? ────────────────────── QUIET           → suppress + update
+    │
+    ├─ dark tiles not new vs prev frame? ──────────  SCENE_DRIFT    → upload + update
+    │
+    └─ otherwise ───────────────────────────────── AMBIGUOUS        → upload
 ```
 
 > **Note on DIFFUSE rule:** an earlier rule ("many anomalous tiles, low compactness → global lighting shift → cloud") was prototyped but removed. The grid-search ablation (`scripts/sweep.py`) showed it fires zero times on real data — every global lighting shift also produces dark tiles, so DARK_OBJ or SCENE_DRIFT intercepts it first.
@@ -159,14 +174,16 @@ frame arrives
 
 ## 5. Performance
 
-Evaluated on 153 labelled real-scene frames, May 2026 (111 cloud, 42 non-cloud, chronological online replay).
-Includes twilight/night scenarios from `real-data/wrong_night/` with filename-encoded labels.
+Evaluated on 168 labelled real-scene frames, May 2026 (118 cloud, 50 non-cloud, chronological online replay).
+Includes indirect-light morning sequences where cloud/non-cloud frames are luminance-indistinguishable.
 
 | Mode | Non-cloud recall | Cloud recall | Missed birds |
 |------|-----------------|--------------|--------------|
-| **Online (self-calibrating, no labels)** | **1.000** | **0.550** | **0** |
+| **Online (self-calibrating, no labels)** | **1.000** | **0.559** | **0** |
 
-Parameters were found by focused grid search over 720 configurations (`scripts/sweep.py`): 540 configs achieve zero missed birds; the production config maximises cloud filtering among those.
+Parameters found by focused grid search over 864 configurations (`scripts/sweep.py`, QQVGA grid).
+INDIRECT_LIGHT fires on frames with `70 ≤ global_mean < 95`; those 3–5 frames per session are uploaded
+unconditionally — the algorithm admits it cannot distinguish cloud from object in this zone.
 
 The key parameter change was lowering `tile_z_threshold` from 3.0 → 2.5: high sky-tile variance in bucket 0 (EMA model std ≈ 36) caused DARK_OBJ to miss dark objects whose z-scores fell just below 3.0 despite absolute deltas exceeding 120 DN. `quiet_anomaly_ratio` rises from 0.05 → 0.20 to compensate (more tiles counted as anomalous at z=2.5). `night_brightness_threshold` dropped from 80 → 70 to avoid model-state side effects from near-twilight photos.
 
@@ -178,10 +195,9 @@ The key parameter change was lowering `tile_z_threshold` from 3.0 → 2.5: high 
 
 | Folder | Count | Label | Notes |
 |--------|-------|-------|-------|
-| `real-data/clouds/` | ~111 | cloud | Empty balcony, varying sun/shadow, 2026-05 |
-| `real-data/process-birds-pillow/` | ~12 | non-cloud | Same scene + small dark pillow as bird stand-in |
-| `real-data/process-people/` | ~27 | non-cloud | Same scene + person visible |
-| `real-data/wrong_night/` | ~3 | mixed | Twilight/night scenarios; label encoded in filename prefix (`cloud_`, `person_`, `pillow_`) |
+| `real-data/clouds/` | ~118 | cloud | Empty balcony, varying sun/shadow, 2026-05 |
+| `real-data/process-birds-pillow/` | ~20 | non-cloud | Same scene + small dark pillow as bird stand-in |
+| `real-data/process-people/` | ~30 | non-cloud | Same scene + person visible |
 
 ---
 

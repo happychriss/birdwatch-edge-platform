@@ -21,11 +21,13 @@ from cloud_check.features import extract_tile_features, load_gray_vga
 REPORT = Path(__file__).resolve().parents[1] / "reports"
 
 TRIGGER_COLOR = {
-    "WARMUP":       "#9b59b6",
-    "DARK_OBJ":     "#2ecc71",
-    "QUIET":        "#3498db",
-    "SCENE_DRIFT":  "#f39c12",
-    "AMBIGUOUS":    "#e67e22",
+    "NIGHT":          "#1a1a2e",
+    "WARMUP":         "#9b59b6",
+    "DARK_OBJ":       "#2ecc71",
+    "INDIRECT_LIGHT": "#e74c3c",
+    "QUIET":          "#3498db",
+    "SCENE_DRIFT":    "#f39c12",
+    "AMBIGUOUS":      "#e67e22",
 }
 
 HTML_HEAD = """<!DOCTYPE html>

@@ -116,14 +116,21 @@ def classify(
         decision = "non-cloud"
         reason = (f"dark object cue (dark_tiles={dark_tiles}, new_dark={new_dark_tiles}, "
                   f"blob={blob_max}, ratio={ratio:.2f})")
+    elif cfg.indirect_light_threshold > 0 and global_mean < cfg.indirect_light_threshold:
+        # Indirect-light zone: low-to-moderate brightness + high spatial contrast
+        # (sun at low angle, hard directional shadows).  Background model z-scores
+        # are unreliable here because the model has accumulated high variance from
+        # sun/cloud cycling.  We cannot distinguish a cloud shadow from a small
+        # dark object, so we admit the limitation and upload unconditionally.
+        trigger = "INDIRECT_LIGHT"
+        decision = "non-cloud"
+        reason = (f"indirect light zone (global_mean={global_mean:.1f} < "
+                  f"{cfg.indirect_light_threshold}) — z-scores unreliable → upload")
     elif ratio <= cfg.quiet_anomaly_ratio:
         trigger = "QUIET"
         decision = "cloud"
         reason = f"scene matches model (ratio={ratio:.3f} ≤ {cfg.quiet_anomaly_ratio})"
     elif stale_condition:
-        # Dark tiles vs model but none of them are newly dark vs previous frame.
-        # The scene drifted (items moved, sun angle, plants) and the model is stale.
-        # Upload (safety bias) but signal that the model should update from this frame.
         trigger = "SCENE_DRIFT"
         decision = "non-cloud"
         reason = (f"persistent scene drift (dark_tiles={dark_tiles}, new_dark=0, "

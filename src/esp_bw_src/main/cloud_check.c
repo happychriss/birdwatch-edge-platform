@@ -2,12 +2,14 @@
 //
 // Algorithm matches src/cloud-check/ exactly.  Decision stages (priority order):
 //
-//   NIGHT      — frame too dark for reliable detection → upload (sun is down)
-//   WARMUP     — model not yet bootstrapped; upload always (can't risk missing a bird)
-//   DARK_OBJ   — tiles newly dark vs both model AND previous frame → real object → upload
-//   QUIET      — ≤20 % tiles anomalous → scene matches model → suppress
-//   SCENE_DRIFT— tiles dark vs model but NOT newly dark vs prev → stale model → upload + re-calibrate
-//   AMBIGUOUS  — default → upload
+//   NIGHT          — frame too dark for reliable detection → upload (sun is down)
+//   WARMUP         — model not yet bootstrapped; upload always (can't risk missing a bird)
+//   DARK_OBJ       — tiles newly dark vs both model AND previous frame → real object → upload
+//   INDIRECT_LIGHT — low-to-moderate brightness + high contrast (sun from side); z-scores
+//                    unreliable → admit limitation, upload unconditionally
+//   QUIET          — ≤20 % tiles anomalous → scene matches model → suppress
+//   SCENE_DRIFT    — tiles dark vs model but NOT newly dark vs prev → stale model → upload + re-calibrate
+//   AMBIGUOUS      — default → upload
 //
 // Uses QQVGA (160×120) grayscale, 16×12 tile grid (10×10 px per tile, 192 tiles total).
 // Background model (mean + variance per tile) and previous-frame tile means persist in NVS
@@ -44,8 +46,8 @@ static const char *NVS_NS = "cc";
 #define CC_TILE_H     (CC_FRAME_H / CC_TILES_Y)     // 10
 
 // ── Background model parameters ──────────────────────────────────────────────
-// Values found by focused grid search (720 configurations) over the
-// 153-frame real-scene dataset.  Non-cloud recall = 1.000, cloud recall = 0.550.
+// Values found by focused grid search (864 configurations) over the
+// 168-frame real-scene dataset.  Non-cloud recall = 1.000, cloud recall = 0.559.
 #define CC_EMA_ALPHA        0.15f   // background update speed (lower = slower adaptation)
 #define CC_VAR_FLOOR        36.0f   // minimum tile variance (std ≥ 6); prevents over-confidence
 #define CC_INIT_VAR         256.0f  // variance prior for unseen tiles (std = 16)
@@ -56,7 +58,8 @@ static const char *NVS_NS = "cc";
 #define CC_DARK_DELTA_PREV  15.0f   // tile must be ≥15 DN darker than previous frame (temporal check)
 #define CC_DARK_MIN_TILES   1       // ≥1 qualifying tile triggers DARK_OBJ / SCENE_DRIFT
 #define CC_WARMUP_FRAMES    8       // frames before model is considered bootstrapped
-#define CC_NIGHT_THRESHOLD  70      // frame global mean below this → NIGHT → upload (sun is down)
+#define CC_NIGHT_THRESHOLD      70  // frame global mean below this → NIGHT → upload (sun is down)
+#define CC_INDIRECT_THRESHOLD   95  // global mean in (NIGHT, INDIRECT) → indirect light → upload
 
 // ── NVS key names ─────────────────────────────────────────────────────────────
 // "cc_m"   : tile means     (192 × float  = 768 B)
@@ -264,6 +267,24 @@ static void run_pipeline(const uint8_t *means, bw_cc_result_t *out)
         strcpy(out->stage, "DARK_OBJ");
         ESP_LOGI(TAG, "DARK_OBJ (dark_model=%d new_dark=%d ratio=%.0f%%) → non-cloud",
                  dark_model_tiles, new_dark_tiles, ratio * 100.0f);
+        return;
+    }
+
+    // INDIRECT_LIGHT — low-to-moderate brightness with high spatial contrast.
+    // Low-angle sun (morning/evening) creates hard directional shadows that cause
+    // PIR false triggers.  In this brightness zone the background model accumulates
+    // high variance from sun/cloud cycling, making z-scores unreliable: even a
+    // 100 DN object delta can produce z < 2.5.  We cannot distinguish a cloud
+    // shadow from a small dark object, so we admit the limitation and upload.
+    // Model is updated so it tracks the indirect-light baseline.
+    if (global_mean < CC_INDIRECT_THRESHOLD) {
+        update_model(means);
+        save_model();
+        save_prev(means);
+        strcpy(out->label, "non-cloud");
+        strcpy(out->stage, "INDIRECT_LIGHT");
+        ESP_LOGI(TAG, "INDIRECT_LIGHT (global_mean=%" PRIu32 " < %d) → non-cloud",
+                 global_mean, CC_INDIRECT_THRESHOLD);
         return;
     }
 
