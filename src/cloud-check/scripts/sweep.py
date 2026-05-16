@@ -40,7 +40,7 @@ from cloud_check.features import extract_tile_features, load_gray_vga
 # the production classifier.
 # ---------------------------------------------------------------------------
 
-ALL_STAGES = ("NIGHT", "WARMUP", "DARK_OBJ", "INDIRECT_LIGHT", "QUIET", "SCENE_DRIFT", "AMBIGUOUS")
+ALL_STAGES = ("NIGHT", "WARMUP", "DARK_OBJ", "INDIRECT_LIGHT", "SPOT_CHANGE", "QUIET", "SCENE_DRIFT", "AMBIGUOUS")
 
 
 def classify_inline(
@@ -57,7 +57,7 @@ def classify_inline(
     # Stage 0 — NIGHT
     if "NIGHT" in enabled and cfg.night_brightness_threshold > 0:
         if tile_mean.mean() < cfg.night_brightness_threshold:
-            return "non-cloud", "NIGHT"
+            return "process", "NIGHT"
 
     bucket = model._idx(hour)
     z = np.abs(tile_mean - model.mean[bucket]) / np.sqrt(model.var[bucket])
@@ -84,23 +84,32 @@ def classify_inline(
     )
     stale_fires = (
         "SCENE_DRIFT" in enabled
-        and dark_tiles >= cfg.dark_object_min_tiles
+        and dark_tiles >= cfg.scene_drift_min_tiles
         and temporal_available
         and new_dark_tiles < cfg.dark_object_min_tiles
     )
 
     if warmup and "WARMUP" in enabled:
-        return "non-cloud", "WARMUP"
+        return "process", "WARMUP"
     if dark_obj_fires:
-        return "non-cloud", "DARK_OBJ"
+        return "process", "DARK_OBJ"
     if ("INDIRECT_LIGHT" in enabled and cfg.indirect_light_threshold > 0
             and float(tile_mean.mean()) < cfg.indirect_light_threshold):
-        return "non-cloud", "INDIRECT_LIGHT"
+        return "process", "INDIRECT_LIGHT"
+    if (
+        "SPOT_CHANGE" in enabled
+        and prev_tile_mean is not None
+        and cfg.spot_change_max_tiles > 0
+        and abs(float(tile_mean.mean()) - float(prev_tile_mean.mean())) < cfg.spot_change_global_stability
+        and 1 <= int((tile_mean - prev_tile_mean < -cfg.spot_change_tile_delta).sum()) <= cfg.spot_change_max_tiles
+        and int((np.abs(tile_mean - prev_tile_mean) >= 10).sum()) <= cfg.spot_change_max_noisy_tiles
+    ):
+        return "process", "SPOT_CHANGE"
     if "QUIET" in enabled and ratio <= cfg.quiet_anomaly_ratio:
-        return "cloud", "QUIET"
+        return "clouds", "QUIET"
     if stale_fires:
-        return "non-cloud", "SCENE_DRIFT"
-    return "non-cloud", "AMBIGUOUS"
+        return "process", "SCENE_DRIFT"
+    return "process", "AMBIGUOUS"
 
 
 # ---------------------------------------------------------------------------
@@ -147,22 +156,25 @@ def evaluate(cfg: Config, cache: list[CachedSample],
         label, trigger = classify_inline(s.tile_mean, s.hour, model, cfg, prev, enabled)
         trigger_counts[trigger] = trigger_counts.get(trigger, 0) + 1
 
-        # Decision matrix (label "non-cloud" = upload, "cloud" = suppress).
-        if s.label == "non-cloud" and label == "non-cloud":
+        # Decision matrix (label "process" = upload, "clouds" = suppress).
+        if s.label == "process" and label == "process":
             tp += 1
-        elif s.label == "non-cloud" and label == "cloud":
+        elif s.label == "process" and label == "clouds":
             fn += 1
-        elif s.label == "cloud" and label == "non-cloud":
+        elif s.label == "clouds" and label == "process":
             fp += 1
         else:
             tn += 1
 
         # Update policy — mirrors production:
         # - warmup: always (bootstrap)
-        # - cloud prediction: always
-        # - SCENE_DRIFT: yes (model is stale)
-        if was_warmup or label == "cloud" or trigger in ("SCENE_DRIFT", "NIGHT", "INDIRECT_LIGHT"):
+        # - clouds prediction: always
+        # - SCENE_DRIFT / NIGHT / INDIRECT_LIGHT: yes (model tracks baseline)
+        # - SPOT_CHANGE / DARK_OBJ / AMBIGUOUS: no (possible object → don't pollute model)
+        if was_warmup or label == "clouds" or trigger in ("SCENE_DRIFT", "NIGHT", "INDIRECT_LIGHT"):
             model.update(s.hour, s.tile_mean)
+        if trigger == "SCENE_DRIFT":
+            model.reset_warmup(s.hour)
         prev_mean[bucket] = s.tile_mean
 
     nc_recall = tp / (tp + fn) if (tp + fn) else 0.0
@@ -179,12 +191,12 @@ def evaluate(cfg: Config, cache: list[CachedSample],
 # ---------------------------------------------------------------------------
 
 def grid() -> Iterable[Config]:
-    """Grid exploring INDIRECT_LIGHT threshold and lightcheck resolution.
+    """Grid exploring INDIRECT_LIGHT, SPOT_CHANGE, and lightcheck resolution.
 
-    indirect_light_threshold=0 disables the stage.
-    grid (16×12) = current QQVGA lightcheck; (32×24) = proposed QVGA lightcheck.
+    indirect_light_threshold=0 / spot_change_max_tiles=0 disables those stages.
+    grid (16×12) = QQVGA lightcheck; (32×24) = QVGA lightcheck.
 
-    Total = 2 * 4 * 3 * 3 * 4 * 3 = 864 configs (~20 s on cached features).
+    Total = 2 * 4 * 3 * 3 * 4 * 3 * 2 * 3 = 5184 configs (~2 min on cached features).
     """
     base = Config()
     for gw, gh in [(16, 12), (32, 24)]:
@@ -193,22 +205,27 @@ def grid() -> Iterable[Config]:
                 for q_ratio in [0.15, 0.20, 0.25]:
                     for d_delta in [20.0, 25.0, 30.0, 35.0]:
                         for t_delta in [10.0, 15.0, 20.0]:
-                            yield replace(
-                                base,
-                                grid_w=gw, grid_h=gh,
-                                indirect_light_threshold=indirect_thresh,
-                                tile_z_threshold=tile_z,
-                                quiet_anomaly_ratio=q_ratio,
-                                dark_object_min_delta=d_delta,
-                                temporal_dark_delta=t_delta,
-                            )
+                            for spot_tiles in [0, 5]:           # 0=disabled, 5=production
+                                for spot_stab in [5.0, 8.0, 10.0]:  # max global delta
+                                    yield replace(
+                                        base,
+                                        grid_w=gw, grid_h=gh,
+                                        indirect_light_threshold=indirect_thresh,
+                                        tile_z_threshold=tile_z,
+                                        quiet_anomaly_ratio=q_ratio,
+                                        dark_object_min_delta=d_delta,
+                                        temporal_dark_delta=t_delta,
+                                        spot_change_max_tiles=spot_tiles,
+                                        spot_change_global_stability=spot_stab,
+                                    )
 
 
 def cfg_summary(cfg: Config) -> str:
     res = "QQVGA" if cfg.grid_w == 16 else "QVGA"
+    spot = f" spot={cfg.spot_change_max_tiles}@{cfg.spot_change_global_stability}" if cfg.spot_change_max_tiles else " spot=off"
     return (f"{res} indirect={cfg.indirect_light_threshold} "
             f"z={cfg.tile_z_threshold} q={cfg.quiet_anomaly_ratio} "
-            f"dδ={cfg.dark_object_min_delta} tδ={cfg.temporal_dark_delta}")
+            f"dδ={cfg.dark_object_min_delta} tδ={cfg.temporal_dark_delta}{spot}")
 
 
 def print_row(tag: str, r: dict, cfg_str: str = "") -> None:

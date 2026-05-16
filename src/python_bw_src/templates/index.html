@@ -173,12 +173,14 @@
 {% for entry in entries %}
   {% set label = entry.cc_label if entry.cc_label else 'unknown' %}
   {% set stage = entry.cc_stage if entry.cc_stage else '' %}
-  {% set card_cls = 'cloud' if label == 'cloud' else ('noncloud' if label == 'non-cloud' else 'unknown') %}
+  {% set lowlight = entry.photo_mode == 'LOWLIGHT' %}
+  {% set card_cls = 'cloud' if label == 'clouds' else ('noncloud' if label == 'process' else 'unknown') %}
 
   {% if stage == 'NIGHT' %}{% set sc = '#1a1a2e' %}
   {% elif stage == 'WARMUP' %}{% set sc = '#9b59b6' %}
   {% elif stage == 'DARK_OBJ' %}{% set sc = '#2ecc71' %}
   {% elif stage == 'INDIRECT_LIGHT' %}{% set sc = '#e74c3c' %}
+  {% elif stage == 'SPOT_CHANGE' %}{% set sc = '#ff6b35' %}
   {% elif stage == 'QUIET' %}{% set sc = '#3498db' %}
   {% elif stage == 'SCENE_DRIFT' %}{% set sc = '#e67e22' %}
   {% elif stage == 'AMBIGUOUS' %}{% set sc = '#f39c12' %}
@@ -205,15 +207,18 @@
     <div class="info">
       <div class="date-text">{{ entry.date.strftime("%d.%m.%y %H:%M") }}</div>
       <div class="row">
-        {% if label == 'cloud' %}
+        {% if label == 'clouds' %}
           <span class="badge badge-cloud">clouds</span>
-        {% elif label == 'non-cloud' %}
+        {% elif label == 'process' %}
           <span class="badge badge-noncloud">process</span>
         {% else %}
           <span class="badge badge-unknown">—</span>
         {% endif %}
         {% if stage %}
           <span class="stage-badge" style="background:{{ sc }}">{{ stage }}</span>
+        {% endif %}
+        {% if lowlight %}
+          <span class="badge" style="background:#f39c12;color:#fff">LOWLIGHT</span>
         {% endif %}
       </div>
       <div class="row">

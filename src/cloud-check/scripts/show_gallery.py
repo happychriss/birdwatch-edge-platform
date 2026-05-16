@@ -7,8 +7,12 @@ Usage (from /workspace/src/cloud-check):
 
 from __future__ import annotations
 
+import base64
+import io
 import sys
 from pathlib import Path
+
+from PIL import Image
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -25,6 +29,7 @@ TRIGGER_COLOR = {
     "WARMUP":         "#9b59b6",
     "DARK_OBJ":       "#2ecc71",
     "INDIRECT_LIGHT": "#e74c3c",
+    "SPOT_CHANGE":    "#ff6b35",
     "QUIET":          "#3498db",
     "SCENE_DRIFT":    "#f39c12",
     "AMBIGUOUS":      "#e67e22",
@@ -80,48 +85,61 @@ def run() -> None:
         was_warmup = model.warmup_remaining(s.hour_bucket) > 0
         model.observe(s.hour_bucket)
         pred = classify(feats["mean"], s.hour_bucket, model, cfg, prev_tile_mean=prev)
-        if was_warmup or pred.label == "cloud" or pred.trigger == "SCENE_DRIFT":
+        if was_warmup or pred.label == "clouds" or pred.trigger in (
+            "SCENE_DRIFT", "NIGHT", "INDIRECT_LIGHT"
+        ):
             model.update(s.hour_bucket, feats["mean"])
+        if pred.trigger == "SCENE_DRIFT":
+            model.reset_warmup(s.hour_bucket)
         prev_tile_mean[bucket] = feats["mean"]
         rows.append((s, pred))
 
-    tp = sum(1 for s, p in rows if s.label == "non-cloud" and p.label == "non-cloud")
-    fn = sum(1 for s, p in rows if s.label == "non-cloud" and p.label == "cloud")
-    fp = sum(1 for s, p in rows if s.label == "cloud"     and p.label == "non-cloud")
-    tn = sum(1 for s, p in rows if s.label == "cloud"     and p.label == "cloud")
-    nc_recall = tp / (tp + fn) if (tp + fn) else 0
-    c_recall  = tn / (tn + fp) if (tn + fp) else 0
+    tp = sum(1 for s, p in rows if s.label == "process" and p.label == "process")
+    fn = sum(1 for s, p in rows if s.label == "process" and p.label == "clouds")
+    fp = sum(1 for s, p in rows if s.label == "clouds"  and p.label == "process")
+    tn = sum(1 for s, p in rows if s.label == "clouds"  and p.label == "clouds")
+    proc_recall  = tp / (tp + fn) if (tp + fn) else 0
+    cloud_recall = tn / (tn + fp) if (tn + fp) else 0
 
     legend = " ".join(
         f'<span><span class="swatch" style="background:{c}"></span>{t}</span>'
         for t, c in TRIGGER_COLOR.items()
     ) + ' <span><span class="swatch" style="border:2px solid #e74c3c"></span>WRONG</span>'
 
+    def thumb_b64(path: Path, size: int = 220) -> str:
+        """Return a base64-encoded JPEG thumbnail as a data URI."""
+        img = Image.open(path).convert("RGB")
+        img.thumbnail((size, size), Image.LANCZOS)
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=72)
+        return "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode()
+
     cards = []
     for s, pred in rows:
         correct = pred.label == s.label
-        if correct and s.label == "cloud":    cls = "ok-cloud"
-        elif correct:                          cls = "ok-obj"
-        else:                                  cls = "wrong"
+        if correct and s.label == "clouds":  cls = "ok-cloud"
+        elif correct:                         cls = "ok-obj"
+        else:                                 cls = "wrong"
 
-        truth_cls  = "b-obj"   if s.label    == "non-cloud" else "b-cloud"
-        pred_cls   = "b-obj"   if pred.label == "non-cloud" else ("b-cloud" if correct else "b-wrong")
-        trig_color = TRIGGER_COLOR[pred.trigger]
-
-        wrong_marker = '<div class="wrong-marker">✗</div>' if not correct else ""
+        truth_cls  = "b-obj"   if s.label    == "process" else "b-cloud"
+        pred_cls   = "b-obj"   if pred.label == "process" else ("b-cloud" if correct else "b-wrong")
+        trig_color = TRIGGER_COLOR.get(pred.trigger, "#888")
+        src        = thumb_b64(s.path)
+        wrong_marker = '<div class="wrong-marker">✗ MISSED</div>' if not correct else ""
+        reason_esc = pred.reason.replace('"', '&quot;')
         cards.append(f"""
-<div class="card {cls}" title="{pred.reason}">
+<div class="card {cls}" title="{reason_esc}">
   {wrong_marker}
-  <img src="{s.path}" loading="lazy">
+  <img src="{src}" loading="lazy">
   <div class="info">
     <div class="fname">{s.path.name}</div>
     <div class="row">
-      <span class="badge {truth_cls}">truth: {s.label}</span>
-      <span class="badge {pred_cls}">pred: {pred.label}</span>
+      <span class="badge {truth_cls}">truth:{s.label}</span>
+      <span class="badge {pred_cls}">pred:{pred.label}</span>
     </div>
     <div class="row">
       <span class="b-trigger" style="background:{trig_color}">{pred.trigger}</span>
-      <span class="dim">h{s.hour_bucket} blob={pred.blob_max_size} r={pred.anomaly_ratio:.2f} nd={pred.new_dark_tiles}</span>
+      <span class="dim">h{s.hour_bucket} r={pred.anomaly_ratio:.2f} nd={pred.new_dark_tiles}</span>
     </div>
   </div>
 </div>""")
@@ -133,16 +151,14 @@ def run() -> None:
         f.write(f"""<header><h1>BirdWatch — cloud-check gallery</h1>
 <div class="stats">{len(rows)} frames &nbsp;·&nbsp;
   TP={tp} FN={fn} FP={fp} TN={tn} &nbsp;·&nbsp;
-  non-cloud recall={nc_recall:.3f} &nbsp;·&nbsp;
-  cloud recall={c_recall:.3f}</div>
+  process recall={proc_recall:.3f} &nbsp;·&nbsp;
+  clouds recall={cloud_recall:.3f} &nbsp;·&nbsp; thumbnails embedded (standalone HTML)</div>
 <div class="legend">{legend}</div></header>\n""")
         f.write('<div class="grid">\n')
         f.writelines(cards)
         f.write("\n</div></body></html>")
 
-    print(f"wrote {out}  ({len(rows)} cards)")
-    print(f"note: images are referenced by absolute path — open via the Flask server:")
-    print(f"  .venv/bin/python serve.py  →  http://localhost:8001/gallery")
+    print(f"wrote {out}  ({len(rows)} cards, self-contained)")
 
 
 if __name__ == "__main__":

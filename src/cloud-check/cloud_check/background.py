@@ -66,3 +66,9 @@ class BackgroundModel:
         need = self.cfg.warmup_frames_per_bucket
         seen = int(self.bucket_seen[b])
         return max(0, need - seen)
+
+    def reset_warmup(self, hour: int) -> None:
+        """Force the bucket back into warmup — used after SCENE_DRIFT to
+        re-bootstrap when the scene has changed significantly."""
+        b = self._idx(hour)
+        self.bucket_seen[b] = 0

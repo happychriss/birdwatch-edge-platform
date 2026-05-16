@@ -9,17 +9,17 @@ DATASET_ROOT = Path(__file__).resolve().parents[3] / "training-data"
 SYNTH_ROOT = Path(__file__).resolve().parents[1] / "synth-data"
 
 # Maps source folder → (binary label, domain tag).
-# "cloud" = empty scene under some lighting (the false-positive class to suppress).
-# "non-cloud" = anything-new in the frame (bird, person, simulated object).
+# "clouds" = empty scene under some lighting (the false-positive class to suppress).
+# "process" = anything-new in the frame (bird, person, simulated object).
 FOLDERS = {
-    "real-data/clouds":               ("cloud",     "real-2026"),
-    "real-data/process-birds-pillow": ("non-cloud", "real-2026"),
-    "real-data/process-people":       ("non-cloud", "real-2026"),
+    "real-data/clouds":               ("clouds",  "real-2026"),
+    "real-data/process-birds-pillow": ("process", "real-2026"),
+    "real-data/process-people":       ("process", "real-2026"),
 }
 
 SYNTH_FOLDERS = {
-    "lighting": ("cloud", "synth"),
-    "birds_paste": ("non-cloud", "synth"),
+    "lighting": ("clouds", "synth"),
+    "birds_paste": ("process", "synth"),
 }
 
 # Folders where the label is encoded in the filename prefix (prefix_YYYYMMDD_HHMMSS.jpg).
@@ -28,9 +28,9 @@ FILENAME_LABELED_FOLDERS = {
     "real-data/wrong_night": "real-2026",
 }
 _FILENAME_LABEL_PREFIX = {
-    "cloud":  "cloud",
-    "person": "non-cloud",
-    "pillow": "non-cloud",
+    "cloud":  "clouds",
+    "person": "process",
+    "pillow": "process",
 }
 
 _TIMESTAMP_RE = re.compile(r"(20\d{6})_(\d{6})")
@@ -39,7 +39,7 @@ _TIMESTAMP_RE = re.compile(r"(20\d{6})_(\d{6})")
 @dataclass(frozen=True)
 class Sample:
     path: Path
-    label: str           # "cloud" or "non-cloud"
+    label: str           # "clouds" or "process"
     domain: str          # "real-2026" or "aux-2025"
     taken_at: datetime | None
 

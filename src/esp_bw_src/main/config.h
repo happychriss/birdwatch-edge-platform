@@ -66,6 +66,13 @@
 // GPIO5 pad latch holds HIGH during light sleep — TPS22918 stays on.
 #define BW_COOLDOWN_SLEEP_US    3000000ULL  // 3 s
 
+// ─── Camera light-mode switching ───────────────────────────────────────────
+// global_mean from the cloud-check QQVGA frame (0-255).  Below this value
+// the firmware switches from PHOTO to PHOTO_LOWLIGHT (longer AEC integration,
+// 32x gain ceiling, no AWB gain push, +2 EV) to improve early-morning and
+// late-afternoon visibility without the green cast.  Tune based on field data.
+#define BW_LOWLIGHT_PHOTO_THRESHOLD  130
+
 // ─── Global mode codes (matches python server reply field) ─────────────────
 typedef enum {
     BW_MODE_ERROR        = -1,

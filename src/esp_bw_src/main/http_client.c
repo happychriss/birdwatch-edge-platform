@@ -111,25 +111,28 @@ bw_mode_t bw_http_upload_image(float       battery_v,
                                const char *trigger,
                                const char *cc_label,
                                const char *cc_stage,
+                               const char *photo_mode,
                                const uint8_t *jpg_buf,
                                size_t         jpg_len)
 {
     static const char *boundary = "----BWBoundary7MA4YWxkTrZu0gW";
 
-    char head[1024];
+    char head[1280];
     int  hl = snprintf(head, sizeof(head),
         "--%s\r\nContent-Disposition: form-data; name=\"battery\"\r\n\r\n%.3f\r\n"
         "--%s\r\nContent-Disposition: form-data; name=\"source\"\r\n\r\n%s\r\n"
         "--%s\r\nContent-Disposition: form-data; name=\"trigger\"\r\n\r\n%s\r\n"
         "--%s\r\nContent-Disposition: form-data; name=\"cc_label\"\r\n\r\n%s\r\n"
         "--%s\r\nContent-Disposition: form-data; name=\"cc_stage\"\r\n\r\n%s\r\n"
+        "--%s\r\nContent-Disposition: form-data; name=\"photo_mode\"\r\n\r\n%s\r\n"
         "--%s\r\nContent-Disposition: form-data; name=\"image\"; filename=\"image.jpg\"\r\n"
         "Content-Type: image/jpeg\r\n\r\n",
         boundary, battery_v,
         boundary, BW_HTTP_SOURCE,
         boundary, trigger,
-        boundary, cc_label ? cc_label : "unknown",
-        boundary, cc_stage ? cc_stage : "unknown",
+        boundary, cc_label   ? cc_label   : "unknown",
+        boundary, cc_stage   ? cc_stage   : "unknown",
+        boundary, photo_mode ? photo_mode : "unknown",
         boundary);
     if (hl <= 0 || hl >= (int)sizeof(head)) {
         ESP_LOGE(TAG, "head buffer too small");

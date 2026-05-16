@@ -47,15 +47,17 @@ class BwPhoto(Base):
     debug      = Column(String)   # freeform debug / trigger info from firmware
     filename   = Column(String)   # saved JPEG filename (no path)
     brightdiff = Column(Float)    # brightness delta (legacy; firmware no longer sends this)
-    cc_label   = Column(String)   # cloud-check decision: "cloud" | "non-cloud"
+    cc_label   = Column(String)   # cloud-check decision: "clouds" | "process"
     cc_stage   = Column(String)   # cloud-check stage: WARMUP | DARK_OBJ | QUIET | SCENE_DRIFT | AMBIGUOUS
+    photo_mode = Column(String)   # camera exposure mode used for the JPEG: "NORMAL" | "LOWLIGHT"
 
 
 def _migrate_columns():
     """Add new columns to an existing table without dropping data."""
     migrations = [
-        ("cc_label", "VARCHAR"),
-        ("cc_stage", "VARCHAR"),
+        ("cc_label",   "VARCHAR"),
+        ("cc_stage",   "VARCHAR"),
+        ("photo_mode", "VARCHAR"),
     ]
     with engine.connect() as conn:
         for col_name, col_type in migrations:

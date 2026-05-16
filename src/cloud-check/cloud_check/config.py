@@ -17,18 +17,21 @@ class Config:
     init_var: float = 256.0            # initial per-tile variance (std=16) — wide but not infinite
 
     # Decision rule. Built around the asymmetry: missing a bird/person is much
-    # worse than uploading a spurious cloud frame. We default to "non-cloud"
+    # worse than uploading a spurious cloud frame. We default to "process"
     # and only suppress when the evidence for "this is just lighting" is clear.
     tile_z_threshold: float = 2.5      # per-tile z-score above which the tile is "anomalous"
     quiet_anomaly_ratio: float = 0.20  # ≤ this fraction of tiles anomalous → essentially identical scene → cloud
-    dark_object_min_delta: float = 30.0  # tile became this much darker than bucket mean → object-like
+    dark_object_min_delta: float = 35.0  # tile became this much darker than bucket mean → object-like
     dark_object_min_tiles: int = 1      # minimum number of such dark tiles required to trigger DARK_OBJ
-    temporal_dark_delta: float = 15.0   # tile must be this much darker than PREVIOUS frame → genuinely new dark event
+    temporal_dark_delta: float = 20.0   # tile must be this much darker than PREVIOUS frame → genuinely new dark event
+    scene_drift_min_tiles: int = 4      # SCENE_DRIFT needs this many persistently-dark tiles (bigger than DARK_OBJ);
+                                        # fewer tiles → falls through to AMBIGUOUS (still uploads)
 
     # Early-operation bias.  Longer warmup turned out to be the single biggest win
     # in the sweep — it catches the visually-invisible birds (ratio≈0 frames)
     # that QUIET would otherwise suppress.
-    warmup_frames_per_bucket: int = 8  # below this many observations the bucket leans non-cloud
+    warmup_frames_per_bucket: int = 0  # Python simulation: steady-state (model already calibrated).
+                                        # C firmware uses CC_WARMUP_FRAMES=8 for actual first-boot via NVS.
 
     # Tile grid.  16×12 at VGA maps to the QQVGA (160×120) lightcheck with
     # 10×10-pixel tiles.  32×24 at VGA maps to QVGA (320×240) with the same
@@ -51,3 +54,17 @@ class Config:
     # a small dark object, so we admit the limitation and upload unconditionally.
     # Sits above night_brightness_threshold; set to 0 to disable.
     indirect_light_threshold: float = 95.0  # global_mean below this (but above night) → INDIRECT_LIGHT
+
+    # Spot-change gate (Stage 4, before QUIET).  Detects small localised dark objects
+    # that DARK_OBJ misses because their per-tile z-score vs the background model is
+    # below the threshold (model not yet calibrated, object too low-contrast, etc.).
+    # Fires when the frame is globally stable compared to the previous capture (sun
+    # angle / cloud cover unchanged) but exactly 1..spot_change_max_tiles tiles
+    # darkened by ≥ spot_change_tile_delta DN.  Also requires that the overall
+    # tile-level churn vs the previous frame is low: if many tiles changed a little
+    # (shadow redistribution pattern) that is cloud, not bird.
+    # Set spot_change_max_tiles to 0 to disable the gate entirely.
+    spot_change_max_tiles: int = 2         # max tiles darkened vs prev for SPOT_CHANGE to fire
+    spot_change_tile_delta: float = 15.0   # DN — tile must darken this much vs prev frame
+    spot_change_global_stability: float = 10.0  # max allowed global_mean shift vs prev frame
+    spot_change_max_noisy_tiles: int = 20  # max tiles with |any| change ≥10 DN (excludes shadow churn)

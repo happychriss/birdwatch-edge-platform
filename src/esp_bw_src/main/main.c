@@ -91,23 +91,33 @@ static void run_normal_cycle(void)
     // Runs on a QQVGA grayscale frame before the main JPEG capture.
     // In debug mode the upload always proceeds; the decision is sent as
     // metadata (cc_label / cc_stage) so the server can display it.
-    // To suppress uploads for cloud frames: check result.label == "cloud".
+    // To suppress uploads for cloud frames: check result.label == "clouds".
     bw_cc_result_t cc;
     if (bw_cc_assess(&cc) != ESP_OK) {
         ESP_LOGW(TAG, "cloud-check failed — proceeding with upload");
-        strcpy(cc.label, "non-cloud");
+        strcpy(cc.label, "process");
         strcpy(cc.stage, "CAM_ERR");
     }
 
     // ── Capture JPEG ───────────────────────────────────────────────────────
-    if (bw_cam_init(BW_CAM_MODE_PHOTO) != ESP_OK) {
+    // Pick photo exposure mode from the ambient brightness the cloud-check
+    // frame already measured — no extra camera cycle needed.
+    bw_cam_mode_t photo_mode = (cc.global_mean < BW_LOWLIGHT_PHOTO_THRESHOLD)
+                               ? BW_CAM_MODE_PHOTO_LOWLIGHT
+                               : BW_CAM_MODE_PHOTO;
+    ESP_LOGI(TAG, "photo mode: %s (cc.global_mean=%u threshold=%d)",
+             photo_mode == BW_CAM_MODE_PHOTO_LOWLIGHT ? "LOWLIGHT" : "NORMAL",
+             cc.global_mean, BW_LOWLIGHT_PHOTO_THRESHOLD);
+
+    if (bw_cam_init(photo_mode) != ESP_OK) {
         ESP_LOGE(TAG, "camera init failed");
         bw_diag_push("CAM_INIT_FAIL");
         bw_blink(BW_BLINK_ERR_CAM_INIT);
         bw_adc_deinit();
         return;
     }
-    bw_cam_discard_frames(6, 100);   // let AE/AGC settle (~10fps, need ≥6 frames to converge)
+    bw_cam_discard_frames(10, 100);  // AEC settle after LIGHTCHECK→PHOTO mode switch;
+                                     // 10 frames at 20 MHz SXGA ≈ 100 ms/frame = ~1 s settle window
     camera_fb_t *fb = bw_cam_capture();
     if (!fb) {
         ESP_LOGE(TAG, "no frame captured — aborting cycle");
@@ -192,7 +202,8 @@ static void run_normal_cycle(void)
             ESP_LOGI(TAG, "WiFi back up");
         }
         ESP_LOGI(TAG, "upload attempt %d/%d", attempt, BW_HTTP_MAX_RETRIES);
-        mode = bw_http_upload_image(battery_v, trigger, cc.label, cc.stage, img, img_len);
+        const char *photo_mode_str = (photo_mode == BW_CAM_MODE_PHOTO_LOWLIGHT) ? "LOWLIGHT" : "NORMAL";
+        mode = bw_http_upload_image(battery_v, trigger, cc.label, cc.stage, photo_mode_str, img, img_len);
         if (mode != BW_MODE_ERROR) break;
     }
     free(img);

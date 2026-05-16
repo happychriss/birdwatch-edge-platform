@@ -65,13 +65,13 @@ def main() -> None:
         print(f"  {d:12s}  n={len(sub):3d}  acc={sum(r.correct for r in sub)/max(len(sub),1):.3f}")
 
     print(f"\n--- Confusion ---")
-    print(f"  bird/person correctly uploaded   (TP) : {cm['tp_non_cloud_correct']}")
+    print(f"  bird/person correctly uploaded   (TP) : {cm['tp_process_correct']}")
     print(f"  bird/person MISSED as cloud      (FN) : {cm['fn_missed_bird_or_person']}")
-    print(f"  cloud spuriously uploaded        (FP) : {cm['fp_cloud_uploaded']}")
-    print(f"  cloud correctly filtered         (TN) : {cm['tn_cloud_filtered']}")
+    print(f"  cloud spuriously uploaded        (FP) : {cm['fp_clouds_uploaded']}")
+    print(f"  cloud correctly filtered         (TN) : {cm['tn_clouds_filtered']}")
     print(f"  accuracy             : {cm['accuracy']:.3f}")
-    print(f"  non-cloud recall     : {cm['non_cloud_recall']:.3f}   (1.0 = never miss a bird)")
-    print(f"  cloud recall         : {cm['cloud_recall']:.3f}   (1.0 = perfectly suppress clouds)")
+    print(f"  process recall       : {cm['process_recall']:.3f}   (1.0 = never miss a bird)")
+    print(f"  clouds recall        : {cm['clouds_recall']:.3f}   (1.0 = perfectly suppress clouds)")
 
     args.report_dir.mkdir(parents=True, exist_ok=True)
     csv_path = args.report_dir / ("eval_oracle.csv" if args.oracle_update else "eval_online.csv")

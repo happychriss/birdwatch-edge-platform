@@ -13,8 +13,9 @@
 #include "esp_camera.h"
 
 typedef enum {
-    BW_CAM_MODE_PHOTO      = 0,
-    BW_CAM_MODE_LIGHTCHECK = 1,
+    BW_CAM_MODE_PHOTO          = 0,
+    BW_CAM_MODE_LIGHTCHECK     = 1,
+    BW_CAM_MODE_PHOTO_LOWLIGHT = 2,  // dusk/dawn: longer AEC integration, no AWB gain push
 } bw_cam_mode_t;
 
 esp_err_t bw_cam_init(bw_cam_mode_t mode);

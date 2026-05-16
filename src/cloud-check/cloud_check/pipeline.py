@@ -3,7 +3,7 @@ background model only on accepted-as-cloud frames, score each prediction
 against the ground truth.
 
 This mirrors how the firmware will operate over time, so the reported numbers
-include the cold-start period (early frames lean toward 'non-cloud' on purpose).
+include the cold-start period (early frames lean toward 'process' on purpose).
 """
 
 from __future__ import annotations
@@ -60,44 +60,42 @@ def run_stream(
         # - online mode:
         #     warmup: fold every frame in (bootstrap).
         #     cloud prediction: fold in (it looks like background).
-        #     SCENE_DRIFT: fold in — the dark tiles were already present in the
-        #       previous frame, so this is a stale-model / scene-change event,
-        #       not a new object.  Updating re-calibrates the model.
+        #     SCENE_DRIFT: dark tiles already in prev frame → stale model → update.
+        #     NIGHT / INDIRECT_LIGHT: upload unconditionally but still fold in so
+        #       the model tracks the dark-scene / side-light baseline (matches C).
         if update_only_on_cloud_prediction:
-            if was_warmup or pred.label == "cloud" or pred.trigger == "SCENE_DRIFT":
+            if was_warmup or pred.label == "clouds" or pred.trigger in (
+                "SCENE_DRIFT", "NIGHT", "INDIRECT_LIGHT"
+            ):
                 model.update(s.hour_bucket, feats["mean"])
+            if pred.trigger == "SCENE_DRIFT":
+                model.reset_warmup(s.hour_bucket)
         else:
-            if s.label == "cloud":
+            if s.label == "clouds":
                 model.update(s.hour_bucket, feats["mean"])
 
         prev_tile_mean[bucket] = feats["mean"]  # always record last frame per bucket
 
-        out.append(
-            StreamResult(
-                sample=s,
-                pred=pred,
-                correct=(pred.label == s.label),
-            )
-        )
+        out.append(StreamResult(sample=s, pred=pred, correct=(pred.label == s.label)))
 
     return out
 
 
 def confusion(results: list[StreamResult]) -> dict:
-    tp = sum(1 for r in results if r.sample.label == "non-cloud" and r.pred.label == "non-cloud")
-    fn = sum(1 for r in results if r.sample.label == "non-cloud" and r.pred.label == "cloud")
-    fp = sum(1 for r in results if r.sample.label == "cloud" and r.pred.label == "non-cloud")
-    tn = sum(1 for r in results if r.sample.label == "cloud" and r.pred.label == "cloud")
+    tp = sum(1 for r in results if r.sample.label == "process" and r.pred.label == "process")
+    fn = sum(1 for r in results if r.sample.label == "process" and r.pred.label == "clouds")
+    fp = sum(1 for r in results if r.sample.label == "clouds"  and r.pred.label == "process")
+    tn = sum(1 for r in results if r.sample.label == "clouds"  and r.pred.label == "clouds")
     total = len(results)
     correct = tp + tn
     return {
-        "tp_non_cloud_correct": tp,
+        "tp_process_correct": tp,
         "fn_missed_bird_or_person": fn,
-        "fp_cloud_uploaded": fp,
-        "tn_cloud_filtered": tn,
+        "fp_clouds_uploaded": fp,
+        "tn_clouds_filtered": tn,
         "accuracy": correct / total if total else 0.0,
-        "non_cloud_recall": tp / (tp + fn) if (tp + fn) else 0.0,
-        "cloud_recall": tn / (tn + fp) if (tn + fp) else 0.0,
+        "process_recall": tp / (tp + fn) if (tp + fn) else 0.0,
+        "clouds_recall": tn / (tn + fp) if (tn + fp) else 0.0,
     }
 
 

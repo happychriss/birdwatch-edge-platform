@@ -46,20 +46,25 @@ static const char *NVS_NS = "cc";
 #define CC_TILE_H     (CC_FRAME_H / CC_TILES_Y)     // 10
 
 // ── Background model parameters ──────────────────────────────────────────────
-// Values found by focused grid search (864 configurations) over the
-// 168-frame real-scene dataset.  Non-cloud recall = 1.000, cloud recall = 0.559.
+// Values found by focused grid search (5184 configurations) over the
+// 172-frame real-scene dataset.  Non-cloud recall = 1.000, cloud recall = 0.516.
 #define CC_EMA_ALPHA        0.15f   // background update speed (lower = slower adaptation)
 #define CC_VAR_FLOOR        36.0f   // minimum tile variance (std ≥ 6); prevents over-confidence
 #define CC_INIT_VAR         256.0f  // variance prior for unseen tiles (std = 16)
 #define CC_INIT_MEAN        128.0f  // mean prior for unseen tiles (mid-scale grey)
 #define CC_Z_THRESHOLD      2.5f    // z-score to flag a tile as anomalous (both bright AND dark)
 #define CC_QUIET_RATIO      0.20f   // ≤20 % anomalous → QUIET → suppress
-#define CC_DARK_DELTA_MODEL 30.0f   // tile must be ≥30 DN darker than model mean (DARK_OBJ check)
-#define CC_DARK_DELTA_PREV  15.0f   // tile must be ≥15 DN darker than previous frame (temporal check)
-#define CC_DARK_MIN_TILES   1       // ≥1 qualifying tile triggers DARK_OBJ / SCENE_DRIFT
+#define CC_DARK_DELTA_MODEL 35.0f   // tile must be ≥35 DN darker than model mean (DARK_OBJ check)
+#define CC_DARK_DELTA_PREV  20.0f   // tile must be ≥20 DN darker than previous frame (temporal check)
+#define CC_DARK_MIN_TILES        1  // ≥1 qualifying dark tile triggers DARK_OBJ
+#define CC_SCENE_DRIFT_MIN_TILES 4  // SCENE_DRIFT needs ≥4 persistently-dark tiles (bigger scene change)
 #define CC_WARMUP_FRAMES    8       // frames before model is considered bootstrapped
 #define CC_NIGHT_THRESHOLD      70  // frame global mean below this → NIGHT → upload (sun is down)
 #define CC_INDIRECT_THRESHOLD   95  // global mean in (NIGHT, INDIRECT) → indirect light → upload
+#define CC_SPOT_MAX_TILES    2      // SPOT_CHANGE: max tiles darkened vs prev (set 0 to disable)
+#define CC_SPOT_TILE_DELTA   15.0f  // SPOT_CHANGE: tile must darken this much vs prev frame
+#define CC_SPOT_GLOBAL_STAB  10.0f  // SPOT_CHANGE: max allowed global_mean shift vs prev frame
+#define CC_SPOT_MAX_NOISY    20     // SPOT_CHANGE: max tiles with |any| change ≥10 DN
 
 // ── NVS key names ─────────────────────────────────────────────────────────────
 // "cc_m"   : tile means     (192 × float  = 768 B)
@@ -76,7 +81,12 @@ static float    s_mean[CC_NUM_TILES];
 static float    s_var[CC_NUM_TILES];
 static uint8_t  s_prev[CC_NUM_TILES];
 static bool     s_prev_valid  = false;
-static uint16_t s_frames_seen = 0;   // mirrors Python's bucket_seen (every frame, not just updates)
+static uint16_t s_frames_seen = 0;   // total non-NIGHT frames processed (mirrors Python bucket_seen
+                                      // for the active time-of-day bucket; NIGHT frames skip this
+                                      // counter because they precede the NIGHT gate and updating the
+                                      // count there would over-inflate warmup — same net effect as
+                                      // Python's per-bucket counters where NIGHT frames go into
+                                      // bucket 0 / the night bucket, not the active daytime bucket)
 
 // ── NVS helpers ───────────────────────────────────────────────────────────────
 
@@ -196,17 +206,22 @@ static void run_pipeline(const uint8_t *means, bw_cc_result_t *out)
     uint32_t gm_sum = 0;
     for (int i = 0; i < CC_NUM_TILES; i++) gm_sum += means[i];
     uint32_t global_mean = gm_sum / CC_NUM_TILES;
+    out->global_mean = (uint8_t)global_mean;
     if (global_mean < CC_NIGHT_THRESHOLD) {
         update_model(means);
         save_model();
         save_prev(means);
-        strcpy(out->label, "non-cloud");
+        strcpy(out->label, "process");
         strcpy(out->stage, "NIGHT");
-        ESP_LOGI(TAG, "NIGHT (global_mean=%" PRIu32 " < %d) → non-cloud", global_mean, CC_NIGHT_THRESHOLD);
+        ESP_LOGI(TAG, "NIGHT (global_mean=%" PRIu32 " < %d) → process", global_mean, CC_NIGHT_THRESHOLD);
         return;
     }
 
-    // Mirror Python's model.observe(): increment BEFORE the warmup check.
+    // Mirror Python's model.observe(): increment for every non-NIGHT frame,
+    // BEFORE the warmup check.  NIGHT frames are excluded (they return above)
+    // for the same reason Python's per-bucket counter is unaffected by NIGHT:
+    // a frame too dark to make a reliable cloud/object call should not advance
+    // the bucket toward confident-suppression mode.
     if (s_frames_seen < 0xFFFF) s_frames_seen++;
 
     // WARMUP — model not yet bootstrapped
@@ -215,9 +230,9 @@ static void run_pipeline(const uint8_t *means, bw_cc_result_t *out)
         update_model(means);
         save_model();
         save_prev(means);
-        strcpy(out->label, "non-cloud");
+        strcpy(out->label, "process");
         strcpy(out->stage, "WARMUP");
-        ESP_LOGI(TAG, "WARMUP (%u frames seen) → non-cloud", s_frames_seen);
+        ESP_LOGI(TAG, "WARMUP (%u frames seen) → process", s_frames_seen);
         return;
     }
 
@@ -241,10 +256,9 @@ static void run_pipeline(const uint8_t *means, bw_cc_result_t *out)
 
         if (z_anom) {
             anomalous++;
-            // Tile darker than model by ≥ 30 DN (dark_tiles in Python)
-            if (m - x >= CC_DARK_DELTA_MODEL) dark_model_tiles++;
-            // Tile darker than previous frame by ≥ 15 DN (new_dark_tiles in Python)
-            if (s_prev_valid && (float)s_prev[i] - x >= CC_DARK_DELTA_PREV) new_dark_tiles++;
+            // Strictly more than threshold — mirrors Python's (delta < -N) which excludes exactly N.
+            if (m - x > CC_DARK_DELTA_MODEL) dark_model_tiles++;
+            if (s_prev_valid && (float)s_prev[i] - x > CC_DARK_DELTA_PREV) new_dark_tiles++;
         }
     }
 
@@ -255,17 +269,17 @@ static void run_pipeline(const uint8_t *means, bw_cc_result_t *out)
     bool dark_obj_cond = (dark_model_tiles >= CC_DARK_MIN_TILES) &&
                          (!s_prev_valid || new_dark_tiles >= CC_DARK_MIN_TILES);
 
-    // stale_condition: dark tiles exist vs model, but none appeared fresh this frame
-    //   dark_tiles >= 1 AND temporal_available AND new_dark_tiles < 1
-    bool stale_cond = (dark_model_tiles >= CC_DARK_MIN_TILES) &&
+    // stale_condition: many tiles persistently dark (≥ CC_SCENE_DRIFT_MIN_TILES) but none newly dark.
+    // Higher threshold than DARK_OBJ — requires a bigger scene change to call it a drift.
+    bool stale_cond = (dark_model_tiles >= CC_SCENE_DRIFT_MIN_TILES) &&
                       s_prev_valid && (new_dark_tiles < CC_DARK_MIN_TILES);
 
     // DARK_OBJ — compact dark object appeared this frame
     if (dark_obj_cond) {
         save_prev(means);
-        strcpy(out->label, "non-cloud");
+        strcpy(out->label, "process");
         strcpy(out->stage, "DARK_OBJ");
-        ESP_LOGI(TAG, "DARK_OBJ (dark_model=%d new_dark=%d ratio=%.0f%%) → non-cloud",
+        ESP_LOGI(TAG, "DARK_OBJ (dark_model=%d new_dark=%d ratio=%.0f%%) → process",
                  dark_model_tiles, new_dark_tiles, ratio * 100.0f);
         return;
     }
@@ -281,11 +295,47 @@ static void run_pipeline(const uint8_t *means, bw_cc_result_t *out)
         update_model(means);
         save_model();
         save_prev(means);
-        strcpy(out->label, "non-cloud");
+        strcpy(out->label, "process");
         strcpy(out->stage, "INDIRECT_LIGHT");
-        ESP_LOGI(TAG, "INDIRECT_LIGHT (global_mean=%" PRIu32 " < %d) → non-cloud",
+        ESP_LOGI(TAG, "INDIRECT_LIGHT (global_mean=%" PRIu32 " < %d) → process",
                  global_mean, CC_INDIRECT_THRESHOLD);
         return;
+    }
+
+    // SPOT_CHANGE — scene globally stable vs previous frame but exactly 1..CC_SPOT_MAX_TILES
+    // tiles darkened significantly.  Safety net for small objects (distant bird, partial
+    // view) whose per-tile z-score vs the background model is below CC_Z_THRESHOLD, so
+    // DARK_OBJ misses them.  Also guards against the case where the model is stale for
+    // a particular tile (recent scene change) but the object is clearly new vs prev.
+    // Requires: prev frame available, global_mean stable, few dark spots, low overall churn.
+    if (CC_SPOT_MAX_TILES > 0 && s_prev_valid) {
+        // Use float division for both sides so g_delta precision matches Python.
+        // global_mean (uint32) was integer-divided; recompute as float here.
+        float cur_gm_f = (float)gm_sum / CC_NUM_TILES;
+        uint32_t prev_gm_sum = 0;
+        for (int i = 0; i < CC_NUM_TILES; i++) prev_gm_sum += s_prev[i];
+        float prev_gm = (float)prev_gm_sum / CC_NUM_TILES;
+        float g_delta = fabsf(cur_gm_f - prev_gm);
+
+        if (g_delta < CC_SPOT_GLOBAL_STAB) {
+            int n_spot_dark = 0;
+            int n_noisy     = 0;
+            for (int i = 0; i < CC_NUM_TILES; i++) {
+                float d = (float)s_prev[i] - (float)means[i];  // positive = darkened
+                if (d > CC_SPOT_TILE_DELTA) n_spot_dark++;  // strict: mirrors Python's (tile-prev < -N)
+                if (d < 0) d = -d;
+                if (d >= 10.0f) n_noisy++;
+            }
+            if (n_spot_dark >= 1 && n_spot_dark <= CC_SPOT_MAX_TILES
+                && n_noisy <= CC_SPOT_MAX_NOISY) {
+                save_prev(means);
+                strcpy(out->label, "process");
+                strcpy(out->stage, "SPOT_CHANGE");
+                ESP_LOGI(TAG, "SPOT_CHANGE (n_spot=%d g_delta=%.1f) → process",
+                         n_spot_dark, g_delta);
+                return;
+            }
+        }
     }
 
     // QUIET — scene essentially unchanged, just a minor lighting fluctuation
@@ -293,9 +343,9 @@ static void run_pipeline(const uint8_t *means, bw_cc_result_t *out)
         update_model(means);
         save_model();
         save_prev(means);
-        strcpy(out->label, "cloud");
+        strcpy(out->label, "clouds");
         strcpy(out->stage, "QUIET");
-        ESP_LOGI(TAG, "QUIET (ratio=%.0f%%) → cloud (suppress)", ratio * 100.0f);
+        ESP_LOGI(TAG, "QUIET (ratio=%.0f%%) → clouds (suppress)", ratio * 100.0f);
         return;
     }
 
@@ -303,20 +353,21 @@ static void run_pipeline(const uint8_t *means, bw_cc_result_t *out)
     // → model is stale (overnight scene change); re-calibrate and upload to be safe
     if (stale_cond) {
         update_model(means);
-        save_model();
+        s_frames_seen = 0;   // reset warmup — scene changed, re-bootstrap before suppressing
+        save_model();        // saves s_frames_seen = 0 via KEY_SEEN
         save_prev(means);
-        strcpy(out->label, "non-cloud");
+        strcpy(out->label, "process");
         strcpy(out->stage, "SCENE_DRIFT");
-        ESP_LOGI(TAG, "SCENE_DRIFT (dark_model=%d new_dark=0) → non-cloud + recalibrate",
+        ESP_LOGI(TAG, "SCENE_DRIFT (dark_model=%d new_dark=0) → process + warmup reset",
                  dark_model_tiles);
         return;
     }
 
     // AMBIGUOUS — default: upload (safety bias, never suppress on doubt)
     save_prev(means);
-    strcpy(out->label, "non-cloud");
+    strcpy(out->label, "process");
     strcpy(out->stage, "AMBIGUOUS");
-    ESP_LOGI(TAG, "AMBIGUOUS (ratio=%.0f%% dark_model=%d new_dark=%d) → non-cloud",
+    ESP_LOGI(TAG, "AMBIGUOUS (ratio=%.0f%% dark_model=%d new_dark=%d) → process",
              ratio * 100.0f, dark_model_tiles, new_dark_tiles);
 }
 
@@ -329,7 +380,7 @@ esp_err_t bw_cc_assess(bw_cc_result_t *out)
     esp_err_t err = bw_cam_init(BW_CAM_MODE_LIGHTCHECK);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "camera init failed: %s", esp_err_to_name(err));
-        strcpy(out->label, "non-cloud");
+        strcpy(out->label, "process");
         strcpy(out->stage, "CAM_ERR");
         return err;
     }
@@ -339,7 +390,7 @@ esp_err_t bw_cc_assess(bw_cc_result_t *out)
         ESP_LOGE(TAG, "no valid frame (len=%u)", fb ? (unsigned)fb->len : 0u);
         if (fb) bw_cam_capture_return(fb);
         bw_cam_deinit();
-        strcpy(out->label, "non-cloud");
+        strcpy(out->label, "process");
         strcpy(out->stage, "CAM_ERR");
         return ESP_FAIL;
     }

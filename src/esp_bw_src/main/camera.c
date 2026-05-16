@@ -62,6 +62,39 @@ static void apply_photo_settings(sensor_t *s)
     ESP_LOGI(TAG, "applied PHOTO sensor settings");
 }
 
+static void apply_lowlight_photo_settings(sensor_t *s)
+{
+    s->set_brightness(s, 2);        // max brightness lift
+    s->set_contrast(s, 2);          // max contrast — separates dark bird from dark foliage
+    s->set_saturation(s, -1);       // reduce saturation to suppress green cast from noisy Bayer
+    s->set_quality(s, 10);
+    s->set_special_effect(s, 0);
+
+    s->set_whitebal(s, 1);
+    s->set_awb_gain(s, 0);          // disable AWB gain — prevents green push at low signal
+    s->set_wb_mode(s, 2);           // Cloudy fixed matrix: consistent colour reference
+
+    s->set_exposure_ctrl(s, 1);
+    s->set_aec2(s, 1);              // longer integration time: AEC stays open more frames
+    s->set_ae_level(s, 2);          // +2 EV (max)
+    s->set_aec_value(s, 800);
+
+    s->set_gain_ctrl(s, 1);
+    s->set_agc_gain(s, 0);
+    s->set_gainceiling(s, (gainceiling_t)5);  // 32x — enough headroom, less noise than 64x
+
+    s->set_bpc(s, 0);
+    s->set_wpc(s, 1);
+    s->set_raw_gma(s, 1);
+    s->set_lenc(s, 1);
+
+    s->set_hmirror(s, 0);
+    s->set_vflip(s, 0);
+    s->set_dcw(s, 0);
+    s->set_colorbar(s, 0);
+    ESP_LOGI(TAG, "applied PHOTO_LOWLIGHT sensor settings");
+}
+
 static void apply_lightcheck_settings(sensor_t *s)
 {
     s->set_brightness(s, 1);
@@ -101,15 +134,14 @@ esp_err_t bw_cam_init(bw_cam_mode_t mode)
         return ESP_ERR_INVALID_STATE;
     }
 
-    pixformat_t fmt   = (mode == BW_CAM_MODE_PHOTO) ? PIXFORMAT_JPEG
-                                                    : PIXFORMAT_GRAYSCALE;
+    bool is_photo = (mode == BW_CAM_MODE_PHOTO || mode == BW_CAM_MODE_PHOTO_LOWLIGHT);
+    pixformat_t fmt   = is_photo ? PIXFORMAT_JPEG      : PIXFORMAT_GRAYSCALE;
     // SXGA (1280x960): 2.56x more pixels than SVGA, comfortable memory budget.
     // Driver allocates fb_size = w*h/5 per buffer in PSRAM (JPEG AUTO mode):
     //   2 FBs = 480 KB, +copy buffer = 720 KB total — well within 8 MB PSRAM.
     // UXGA (1600x1200) is available but the buffer ceiling (375 KB) is too
     // close to what a dense outdoor scene can produce at quality 10.
-    framesize_t size  = (mode == BW_CAM_MODE_PHOTO) ? FRAMESIZE_SXGA
-                                                    : FRAMESIZE_QQVGA;
+    framesize_t size  = is_photo ? FRAMESIZE_SXGA      : FRAMESIZE_QQVGA;
 
     camera_config_t cfg = {
         .pin_pwdn      = CAM_PIN_PWDN,
@@ -128,21 +160,22 @@ esp_err_t bw_cam_init(bw_cam_mode_t mode)
         .pin_vsync     = CAM_PIN_VSYNC,
         .pin_href      = CAM_PIN_HREF,
         .pin_pclk      = CAM_PIN_PCLK,
-        .xclk_freq_hz  = 16000000,
+        .xclk_freq_hz  = 20000000,  // was 16 MHz; 20 MHz is within OV2640 spec and
+                                    // raises SXGA JPEG fps ~5→7 fps, shortening AEC settle time
         .ledc_timer    = LEDC_TIMER_0,
         .ledc_channel  = LEDC_CHANNEL_0,
         .pixel_format  = fmt,
         .frame_size    = size,
-        .jpeg_quality  = (fmt == PIXFORMAT_JPEG) ? 12 : 0,
+        .jpeg_quality  = is_photo ? 12 : 0,
         .fb_count      = 2,
-        .fb_location   = (fmt == PIXFORMAT_JPEG) ? CAMERA_FB_IN_PSRAM
-                                                 : CAMERA_FB_IN_DRAM,
-        .grab_mode     = (fmt == PIXFORMAT_JPEG) ? CAMERA_GRAB_LATEST
-                                                 : CAMERA_GRAB_WHEN_EMPTY,
+        .fb_location   = is_photo ? CAMERA_FB_IN_PSRAM : CAMERA_FB_IN_DRAM,
+        .grab_mode     = is_photo ? CAMERA_GRAB_LATEST : CAMERA_GRAB_WHEN_EMPTY,
     };
 
     ESP_LOGI(TAG, "init mode=%s fmt=%d size=%d",
-             mode == BW_CAM_MODE_PHOTO ? "PHOTO" : "LIGHTCHECK", fmt, size);
+             mode == BW_CAM_MODE_PHOTO          ? "PHOTO" :
+             mode == BW_CAM_MODE_PHOTO_LOWLIGHT ? "PHOTO_LOWLIGHT" : "LIGHTCHECK",
+             fmt, size);
 
     esp_err_t err = esp_camera_init(&cfg);
     if (err != ESP_OK) return bw_log_err(TAG, "esp_camera_init", err);
@@ -156,8 +189,9 @@ esp_err_t bw_cam_init(bw_cam_mode_t mode)
     ESP_LOGI(TAG, "sensor PID=0x%02x VER=0x%02x MIDH=0x%02x MIDL=0x%02x",
              s->id.PID, s->id.VER, s->id.MIDH, s->id.MIDL);
 
-    if (mode == BW_CAM_MODE_PHOTO) apply_photo_settings(s);
-    else                            apply_lightcheck_settings(s);
+    if (mode == BW_CAM_MODE_PHOTO)                apply_photo_settings(s);
+    else if (mode == BW_CAM_MODE_PHOTO_LOWLIGHT) apply_lowlight_photo_settings(s);
+    else                                          apply_lightcheck_settings(s);
 
     // Drain frames for 500 ms while AEC/AGC converges.
     // QQVGA runs at ~70 fps (14 ms/frame); a 100 ms vTaskDelay between fb_get

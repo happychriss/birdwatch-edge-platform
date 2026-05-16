@@ -11,7 +11,7 @@ from .config import Config
 
 @dataclass
 class ClassifierResult:
-    label: str                    # "cloud" or "non-cloud"
+    label: str                    # "clouds" or "process"
     trigger: str                  # rule: WARMUP | DARK_OBJ | QUIET | SCENE_DRIFT | AMBIGUOUS
     anomaly_mask: np.ndarray      # (GRID_H, GRID_W) bool
     blob_max_size: int            # largest connected anomalous region
@@ -30,10 +30,10 @@ def classify(
     cfg: Config | None = None,
     prev_tile_mean: np.ndarray | None = None,
 ) -> ClassifierResult:
-    """Decision rule biased toward 'non-cloud' (upload-anyway).
+    """Decision rule biased toward 'process' (upload-anyway).
 
     Sending one extra photo is cheap; missing a bird/person is the failure
-    we minimise. The only path that returns 'cloud' (and thus suppresses upload)
+    we minimise. The only path that returns 'clouds' (and thus suppresses upload)
     is QUIET: the scene is almost identical to the bucket model. Everything
     else — DARK_OBJ, SCENE_DRIFT, WARMUP, AMBIGUOUS — uploads.
 
@@ -48,7 +48,7 @@ def classify(
     global_mean = float(tile_mean.mean())
     if cfg.night_brightness_threshold > 0 and global_mean < cfg.night_brightness_threshold:
         return ClassifierResult(
-            label="non-cloud",
+            label="process",
             trigger="NIGHT",
             anomaly_mask=np.zeros(tile_mean.shape, dtype=bool),
             blob_max_size=0,
@@ -102,18 +102,18 @@ def classify(
         and (not temporal_available or new_dark_tiles >= cfg.dark_object_min_tiles)
     )
     stale_condition = (
-        dark_tiles >= cfg.dark_object_min_tiles
+        dark_tiles >= cfg.scene_drift_min_tiles
         and temporal_available
         and new_dark_tiles < cfg.dark_object_min_tiles
     )
 
     if warmup:
         trigger = "WARMUP"
-        decision = "non-cloud"
+        decision = "process"
         reason = f"bucket warmup ({model.warmup_remaining(hour)} more obs needed) → lean upload"
     elif dark_obj_condition:
         trigger = "DARK_OBJ"
-        decision = "non-cloud"
+        decision = "process"
         reason = (f"dark object cue (dark_tiles={dark_tiles}, new_dark={new_dark_tiles}, "
                   f"blob={blob_max}, ratio={ratio:.2f})")
     elif cfg.indirect_light_threshold > 0 and global_mean < cfg.indirect_light_threshold:
@@ -123,21 +123,34 @@ def classify(
         # sun/cloud cycling.  We cannot distinguish a cloud shadow from a small
         # dark object, so we admit the limitation and upload unconditionally.
         trigger = "INDIRECT_LIGHT"
-        decision = "non-cloud"
+        decision = "process"
         reason = (f"indirect light zone (global_mean={global_mean:.1f} < "
                   f"{cfg.indirect_light_threshold}) — z-scores unreliable → upload")
+    elif (
+        prev_tile_mean is not None
+        and cfg.spot_change_max_tiles > 0
+        and abs(global_mean - float(prev_tile_mean.mean())) < cfg.spot_change_global_stability
+        and 1 <= int((tile_mean - prev_tile_mean < -cfg.spot_change_tile_delta).sum()) <= cfg.spot_change_max_tiles
+        and int((np.abs(tile_mean - prev_tile_mean) >= 10).sum()) <= cfg.spot_change_max_noisy_tiles
+    ):
+        _n_spot = int((tile_mean - prev_tile_mean < -cfg.spot_change_tile_delta).sum())
+        _g_delta = abs(global_mean - float(prev_tile_mean.mean()))
+        trigger = "SPOT_CHANGE"
+        decision = "process"
+        reason = (f"localised dark spot (n_spot={_n_spot} ≤ {cfg.spot_change_max_tiles}, "
+                  f"global_delta={_g_delta:.1f} < {cfg.spot_change_global_stability})")
     elif ratio <= cfg.quiet_anomaly_ratio:
         trigger = "QUIET"
-        decision = "cloud"
+        decision = "clouds"
         reason = f"scene matches model (ratio={ratio:.3f} ≤ {cfg.quiet_anomaly_ratio})"
     elif stale_condition:
         trigger = "SCENE_DRIFT"
-        decision = "non-cloud"
+        decision = "process"
         reason = (f"persistent scene drift (dark_tiles={dark_tiles}, new_dark=0, "
                   f"ratio={ratio:.2f}) → model stale, upload + re-calibrate")
     else:
         trigger = "AMBIGUOUS"
-        decision = "non-cloud"
+        decision = "process"
         reason = (f"ambiguous → upload (blob={blob_max} ratio={ratio:.2f} "
                   f"compactness={compactness:.2f})")
 

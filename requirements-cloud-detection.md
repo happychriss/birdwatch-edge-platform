@@ -85,19 +85,19 @@ All decisions default to **non-cloud** (upload). A frame is suppressed only when
 #### Stage 1 — WARMUP
 | | |
 |---|---|
-| **Condition** | Bucket has seen fewer than 8 frames since model reset |
-| **Decision** | `non-cloud` — upload |
+| **Condition** | Bucket has seen fewer than N frames since model reset (N=8 on device via NVS; N=0 in Python simulation — steady-state eval) |
+| **Decision** | `process` — upload |
 | **Model update** | Yes — every frame folds into the model (bootstrap) |
 
-The model has too few observations to make a reliable call. Missing a bird during warmup is unacceptable; a few extra cloud uploads are not.
+The model has too few observations to make a reliable call. Missing a bird during warmup is unacceptable; a few extra cloud uploads are not. On the device, the frame counter persists in NVS so warmup only fires on the very first boot per bucket — not on every PIR trigger. SCENE_DRIFT resets the warmup counter so the model re-bootstraps after a detected scene change.
 
 ---
 
 #### Stage 2 — DARK_OBJ
 | | |
 |---|---|
-| **Condition** | ≥ 1 tile satisfies **all three**: z-score > 2.5 AND tile mean dropped ≥ 30 below bucket mean AND tile mean dropped ≥ 15 below **previous frame** |
-| **Decision** | `non-cloud` — upload |
+| **Condition** | ≥ 1 tile satisfies **all three**: z-score > 2.5 AND tile mean dropped ≥ 35 below bucket mean AND tile mean dropped ≥ 20 below **previous frame** |
+| **Decision** | `process` — upload |
 | **Model update** | No |
 
 Dark silhouettes against the bright sky or floor are the primary object cue. The **temporal check** (vs previous frame) is the critical discriminator: if those dark tiles were already present in the prior capture, the model is stale (day-boundary scene change) rather than a new arrival. Skipped on the very first frame when no previous is available.
@@ -115,11 +115,22 @@ Low-angle sun (morning/evening) creates hard directional shadows — **high spat
 
 ---
 
+#### Stage 4 — SPOT_CHANGE
+| | |
+|---|---|
+| **Condition** | `prev_frame` available AND `\|global_mean − prev_global_mean\|` < 10 DN AND 1–2 tiles darkened by ≥ 15 DN vs prev frame AND ≤ 20 tiles changed by ≥ 10 DN in any direction |
+| **Decision** | `process` — upload |
+| **Model update** | No |
+
+Scene is globally stable (global brightness and overall tile-level churn are low) but exactly 1–2 tiles darkened noticeably since the last capture. This is the signature of a small object (distant bird, partial silhouette) that DARK_OBJ misses because its z-score vs the long-term model is below threshold. The frame-to-frame comparison is the only reliable signal. The `max_noisy_tiles` guard prevents shadow redistribution patterns (many tiles shift a little in opposite directions, global cancels out) from triggering this stage.
+
+---
+
 #### Stage 5 — QUIET
 | | |
 |---|---|
 | **Condition** | ≤ 20 % of tiles are anomalous (z-score > 2.5) |
-| **Decision** | `cloud` — suppress upload |
+| **Decision** | `clouds` — suppress upload |
 | **Model update** | Yes |
 
 The scene is essentially identical to the stored model. Nothing happened; the PIR was triggered by a lighting change too subtle to shift more than a handful of tiles.
@@ -129,9 +140,9 @@ The scene is essentially identical to the stored model. Nothing happened; the PI
 #### Stage 6 — SCENE_DRIFT
 | | |
 |---|---|
-| **Condition** | ≥ 1 tile is dark vs the model (same as DARK_OBJ threshold) **but** none of those tiles are newly dark vs the previous frame |
-| **Decision** | `non-cloud` — upload (safety bias) |
-| **Model update** | Yes — re-calibrate the stale model |
+| **Condition** | ≥ 4 tiles are dark vs the model (same as DARK_OBJ threshold) **but** none of those tiles are newly dark vs the previous frame |
+| **Decision** | `process` — upload (safety bias) |
+| **Model update** | Yes — re-calibrate the stale model; warmup counter reset so model re-bootstraps |
 
 The dark tiles were already present in the previous capture — the model is stale (items moved on the balcony, plants grew, sun angle shifted between days). Upload the frame (can't prove it's empty) and update the model so it re-calibrates within a few frames.
 
@@ -141,7 +152,7 @@ The dark tiles were already present in the previous capture — the model is sta
 | | |
 |---|---|
 | **Condition** | None of the above matched |
-| **Decision** | `non-cloud` — upload |
+| **Decision** | `process` — upload |
 | **Model update** | No |
 
 When no rule fires with confidence, lean upload.
@@ -161,6 +172,8 @@ frame arrives
     │
     ├─ global_mean < 95?  ───────────────────────── INDIRECT_LIGHT  → upload + update
     │
+    ├─ global stable + 1-5 tiles dark vs prev? ─── SPOT_CHANGE     → upload
+    │
     ├─ anomaly ratio ≤ 0.20? ────────────────────── QUIET           → suppress + update
     │
     ├─ dark tiles not new vs prev frame? ──────────  SCENE_DRIFT    → upload + update
@@ -174,18 +187,26 @@ frame arrives
 
 ## 5. Performance
 
-Evaluated on 168 labelled real-scene frames, May 2026 (118 cloud, 50 non-cloud, chronological online replay).
-Includes indirect-light morning sequences where cloud/non-cloud frames are luminance-indistinguishable.
+Evaluated on 195 labelled real-scene frames, May 2026 (123 clouds, 72 process, chronological online replay).
+Includes indirect-light morning sequences where clouds/process frames are luminance-indistinguishable.
 
-| Mode | Non-cloud recall | Cloud recall | Missed birds |
-|------|-----------------|--------------|--------------|
-| **Online (self-calibrating, no labels)** | **1.000** | **0.559** | **0** |
+| Mode | Process recall | Clouds recall | Missed birds |
+|------|----------------|---------------|--------------|
+| **Online (self-calibrating, no labels)** | **1.000** | **0.537** | **0** |
 
-Parameters found by focused grid search over 864 configurations (`scripts/sweep.py`, QQVGA grid).
-INDIRECT_LIGHT fires on frames with `70 ≤ global_mean < 95`; those 3–5 frames per session are uploaded
-unconditionally — the algorithm admits it cannot distinguish cloud from object in this zone.
+Parameters found by focused grid search over 5 184 configurations (`scripts/sweep.py`, QQVGA grid, 195 frames).
+INDIRECT_LIGHT fires on frames with `70 ≤ global_mean < 95` — uploaded unconditionally.
+SPOT_CHANGE fires on up to 2 tiles darkening vs prev while global is stable — safety net for small objects.
 
-The key parameter change was lowering `tile_z_threshold` from 3.0 → 2.5: high sky-tile variance in bucket 0 (EMA model std ≈ 36) caused DARK_OBJ to miss dark objects whose z-scores fell just below 3.0 despite absolute deltas exceeding 120 DN. `quiet_anomaly_ratio` rises from 0.05 → 0.20 to compensate (more tiles counted as anomalous at z=2.5). `night_brightness_threshold` dropped from 80 → 70 to avoid model-state side effects from near-twilight photos.
+Key parameter history:
+- `tile_z_threshold` 3.0 → 2.5: high sky-tile variance compressed z-scores below 3.0 for real objects.
+- `quiet_anomaly_ratio` 0.05 → 0.20: compensates for more tiles flagged at lower z threshold.
+- `night_brightness_threshold` 80 → 70: avoids model-state side effects from near-twilight frames.
+- `dark_object_min_delta` 30 → 35: tighter model-delta check reduces cloud shadow false detections.
+- `temporal_dark_delta` 15 → 20: tighter frame-to-frame check pairs with the above.
+- `spot_change_max_tiles` 5 → 2: sweep showed cost/benefit optimum at 2 tiles (TN 63 vs 66 off).
+- `scene_drift_min_tiles` 1 → 4: require bigger persistent change before SCENE_DRIFT fires.
+- SCENE_DRIFT now resets warmup counter so model re-bootstraps after a scene change.
 
 ---
 
@@ -195,9 +216,9 @@ The key parameter change was lowering `tile_z_threshold` from 3.0 → 2.5: high 
 
 | Folder | Count | Label | Notes |
 |--------|-------|-------|-------|
-| `real-data/clouds/` | ~118 | cloud | Empty balcony, varying sun/shadow, 2026-05 |
-| `real-data/process-birds-pillow/` | ~20 | non-cloud | Same scene + small dark pillow as bird stand-in |
-| `real-data/process-people/` | ~30 | non-cloud | Same scene + person visible |
+| `real-data/clouds/` | ~123 | clouds | Empty balcony, varying sun/shadow, 2026-05 |
+| `real-data/process-birds-pillow/` | ~42 | process | Same scene + small dark pillow as bird stand-in |
+| `real-data/process-people/` | ~30 | process | Same scene + person visible |
 
 ---
 
@@ -211,14 +232,16 @@ The cloud-check algorithm is implemented in **three places** that must stay in s
 | `src/esp_bw_src/` | `main/cloud_check.c` | ESP32-S3 C port — production firmware running on device |
 | `src/python_bw_src/` | `templates/index.html`, `templates/browse_results.html` | Home server gallery — displays stage badges received from device |
 
-**When adding or renaming a stage** (e.g. `NIGHT`, `WARMUP`, `DARK_OBJ` …) you must update all three:
+**When adding or renaming a stage** (e.g. `NIGHT`, `WARMUP`, `DARK_OBJ` …) you must update all six:
 
 1. `classifier.py` — add the new trigger string and decision logic
 2. `config.py` — add any new threshold parameter with a sensible default
-3. `cloud_check.c` — add the matching `#define` constant and C logic in `run_pipeline()`
-4. `cloud_check.h` — update the `stage[]` field comment to list the new value
-5. `serve.py` (`src/cloud-check/`) — add the stage colour to `_TRIGGER_COLOR`
-6. Both gallery templates in `src/python_bw_src/templates/` — add the stage colour `{% if stage == '...' %}`
+3. `scripts/sweep.py` — add to `ALL_STAGES` and `classify_inline()`
+4. `cloud_check.c` — add the matching `#define` constant and C logic in `run_pipeline()`
+5. `cloud_check.h` — update the `stage[]` field comment to list the new value
+6. `serve.py` (`src/cloud-check/`) — add the stage colour to `_TRIGGER_COLOR`
+7. `scripts/show_gallery.py` — add the stage colour to `TRIGGER_COLOR`
+8. Both gallery templates in `src/python_bw_src/templates/` — add the stage colour `{% if stage == '...' %}`
 
 **When changing a threshold** — update `config.py` default and the matching `#define` in `cloud_check.c`.
 
@@ -230,7 +253,7 @@ The cloud-check algorithm is implemented in **three places** that must stay in s
 `src/cloud-check/` — full pipeline, confusion matrix, parameter sweep, gallery server, debug inspector.
 
 **Phase 2 — ESP-IDF C port (complete)**  
-`main/cloud_check.c` — all stages ported: NIGHT, WARMUP, DARK_OBJ, QUIET, SCENE_DRIFT, AMBIGUOUS.  
+`main/cloud_check.c` — all stages ported: NIGHT, WARMUP, DARK_OBJ, INDIRECT_LIGHT, SPOT_CHANGE, QUIET, SCENE_DRIFT, AMBIGUOUS.  
 Integer-arithmetic-friendly by design:
 
 | Operation | ESP32-S3 estimate |

@@ -8,7 +8,7 @@ from collections import defaultdict
 import os
 import requests
 import time
-from db import BwPhoto, Session
+from db import BwPhoto, Session, init_schema
 
 
 birdwatch_http = "http://192.168.1.43"
@@ -153,10 +153,11 @@ def process_request_upload_file():
         battery = request.form.get('battery')
         source = request.form.get('source')
         trigger = request.form.get('trigger')
-        cc_label = request.form.get('cc_label')
-        cc_stage = request.form.get('cc_stage')
+        cc_label   = request.form.get('cc_label')
+        cc_stage   = request.form.get('cc_stage')
+        photo_mode = request.form.get('photo_mode')
 
-        print(f"Form data - battery: {battery}, source: {source}, trigger: {trigger}, cc: {cc_label}/{cc_stage}")
+        print(f"Form data - battery: {battery}, source: {source}, trigger: {trigger}, cc: {cc_label}/{cc_stage}, photo_mode: {photo_mode}")
 
         date = datetime.now()
         try:
@@ -166,7 +167,7 @@ def process_request_upload_file():
             return jsonify({'message': 'Invalid battery value'}), 400
 
         new_photo = BwPhoto(source=source, date=date, voltage=battery, debug=trigger, filename=filename,
-                            cc_label=cc_label, cc_stage=cc_stage)
+                            cc_label=cc_label, cc_stage=cc_stage, photo_mode=photo_mode)
         session.add(new_photo)
         session.commit()
 
@@ -271,7 +272,7 @@ def battery():
     for r in photo_rows:
         if r.date:
             hk = r.date.replace(minute=0, second=0, microsecond=0)
-            if r.cc_label == 'cloud':
+            if r.cc_label == 'clouds':
                 cloud_by_hour[hk] += 1
             else:
                 process_by_hour[hk] += 1
@@ -313,6 +314,7 @@ def battery():
 
 
 if __name__ == '__main__':
+    init_schema()
     app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024
     app.run(host='0.0.0.0', port=8000)
 

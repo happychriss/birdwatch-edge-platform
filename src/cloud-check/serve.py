@@ -17,7 +17,7 @@ Endpoints:
 
 ESP integration (future):
     The firmware will POST /assess before deciding whether to upload.
-    If label=="cloud", skip upload. If "non-cloud", upload to main server.
+    If label=="clouds", skip upload. If "process", upload to main server.
 """
 
 from __future__ import annotations
@@ -80,7 +80,7 @@ def assess():
 
     Returns JSON:
         {
-          "label":         "cloud" | "non-cloud",
+          "label":         "clouds" | "process",
           "trigger":       "WARMUP" | "DARK_OBJ" | "QUIET" | "SCENE_DRIFT" | "AMBIGUOUS",
           "reason":        "...",
           "blob_max":      int,
@@ -123,8 +123,10 @@ def assess():
         was_warmup = _model.warmup_remaining(hour) > 0
         _model.observe(hour)
         result = classify(feats["mean"], hour, _model, _cfg, prev_tile_mean=prev)
-        if was_warmup or result.label == "cloud" or result.trigger in ("SCENE_DRIFT", "NIGHT", "INDIRECT_LIGHT"):
+        if was_warmup or result.label == "clouds" or result.trigger in ("SCENE_DRIFT", "NIGHT", "INDIRECT_LIGHT"):
             _model.update(hour, feats["mean"])
+        if result.trigger == "SCENE_DRIFT":
+            _model.reset_warmup(hour)
         _prev_tile_mean[bucket] = feats["mean"]
         _assess_count += 1
 
@@ -136,7 +138,7 @@ def assess():
         anomaly_ratio=round(result.anomaly_ratio, 4),
         compactness=round(result.compactness, 4),
         warmup=result.warmup,
-        action="suppress" if result.label == "cloud" else "upload",
+        action="suppress" if result.label == "clouds" else "upload",
         assessed_at=datetime.now().isoformat(timespec="seconds"),
     )
 
@@ -194,6 +196,7 @@ _TRIGGER_COLOR = {
     "WARMUP":         "#9b59b6",
     "DARK_OBJ":       "#2ecc71",
     "INDIRECT_LIGHT": "#e74c3c",
+    "SPOT_CHANGE":    "#ff6b35",
     "QUIET":          "#3498db",
     "SCENE_DRIFT":    "#f39c12",
     "AMBIGUOUS":      "#e67e22",
@@ -256,8 +259,8 @@ _GALLERY_TEMPLATE = """<!DOCTYPE html>
 <header>
   <h1>BirdWatch — cloud-check gallery</h1>
   <span class="stats">{{ n_total }} frames · TP={{ tp }} FN={{ fn }} FP={{ fp }} TN={{ tn }}
-    · non-cloud recall={{ "%.3f"|format(nc_recall) }}
-    · cloud recall={{ "%.3f"|format(c_recall) }}</span>
+    · process recall={{ "%.3f"|format(nc_recall) }}
+    · clouds recall={{ "%.3f"|format(c_recall) }}</span>
   <div class="legend">
     {% for trigger, color in trigger_colors.items() %}
     <div class="legend-item">
@@ -271,9 +274,9 @@ _GALLERY_TEMPLATE = """<!DOCTYPE html>
 <div class="grid">
 {% for r in results %}
   {% set correct = r.pred.label == r.sample.label %}
-  {% set is_fn = (not correct) and r.sample.label == "non-cloud" %}
-  {% set is_fp = (not correct) and r.sample.label == "cloud" %}
-  {% if correct and r.sample.label == "cloud" %}{% set card_cls = "correct-cloud" %}
+  {% set is_fn = (not correct) and r.sample.label == "process" %}
+  {% set is_fp = (not correct) and r.sample.label == "clouds" %}
+  {% if correct and r.sample.label == "clouds" %}{% set card_cls = "correct-cloud" %}
   {% elif correct %}{% set card_cls = "correct-ncloud" %}
   {% elif is_fn %}{% set card_cls = "fn" %}
   {% else %}{% set card_cls = "fp" %}{% endif %}
@@ -286,10 +289,10 @@ _GALLERY_TEMPLATE = """<!DOCTYPE html>
     <div class="info">
       <div class="filename">{{ r.sample.path.name }}</div>
       <div class="label-row">
-        <span class="badge {{ 'badge-ncloud' if r.sample.label == 'non-cloud' else 'badge-cloud' }}">
+        <span class="badge {{ 'badge-ncloud' if r.sample.label == 'process' else 'badge-cloud' }}">
           truth: {{ r.sample.label }}
         </span>
-        <span class="badge {{ 'badge-ncloud' if r.pred.label == 'non-cloud' else ('badge-cloud' if correct else 'badge-wrong') }}">
+        <span class="badge {{ 'badge-ncloud' if r.pred.label == 'process' else ('badge-cloud' if correct else 'badge-wrong') }}">
           pred: {{ r.pred.label }}
         </span>
       </div>
@@ -334,18 +337,20 @@ def gallery():
         was_warmup = gal_model.warmup_remaining(s.hour_bucket) > 0
         gal_model.observe(s.hour_bucket)
         pred = classify(feats["mean"], s.hour_bucket, gal_model, gal_cfg, prev_tile_mean=prev)
-        if was_warmup or pred.label == "cloud" or pred.trigger in ("SCENE_DRIFT", "NIGHT", "INDIRECT_LIGHT"):
+        if was_warmup or pred.label == "clouds" or pred.trigger in ("SCENE_DRIFT", "NIGHT", "INDIRECT_LIGHT"):
             gal_model.update(s.hour_bucket, feats["mean"])
+        if pred.trigger == "SCENE_DRIFT":
+            gal_model.reset_warmup(s.hour_bucket)
         gal_prev[bucket] = feats["mean"]
         r = R()
         r.sample = s
         r.pred = pred
         results.append(r)
 
-    tp = sum(1 for r in results if r.sample.label == "non-cloud" and r.pred.label == "non-cloud")
-    fn = sum(1 for r in results if r.sample.label == "non-cloud" and r.pred.label == "cloud")
-    fp = sum(1 for r in results if r.sample.label == "cloud"     and r.pred.label == "non-cloud")
-    tn = sum(1 for r in results if r.sample.label == "cloud"     and r.pred.label == "cloud")
+    tp = sum(1 for r in results if r.sample.label == "process" and r.pred.label == "process")
+    fn = sum(1 for r in results if r.sample.label == "process" and r.pred.label == "clouds")
+    fp = sum(1 for r in results if r.sample.label == "clouds"  and r.pred.label == "process")
+    tn = sum(1 for r in results if r.sample.label == "clouds"  and r.pred.label == "clouds")
     nc_recall = tp / (tp + fn) if (tp + fn) else 0.0
     c_recall  = tn / (tn + fp) if (tn + fp) else 0.0
 
