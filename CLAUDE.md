@@ -60,3 +60,15 @@ Any change to the cloud-detection algorithm must be kept in sync across all thre
 - `src/cloud-check/` — Python algorithm package + parity validator. Used by the server.
 - `src/python_bw_src/` — Flask web server + display spec. Runs on the local server.
 
+## Flashing the ESP32
+
+**You cannot flash remotely.** The device spends almost all its time in deep sleep (PIR-triggered), so `/dev/ttyACM0` is not available for flashing except during the brief active window.
+
+Your role: **build and validate only.** The user flashes manually.
+
+Workflow:
+1. Make changes → `idf.py build` (from `/workspace/src/esp_bw_src/`, after `source ~/esp-idf/export.sh`)
+2. Confirm clean build in the last lines of output
+3. Commit + push
+4. Tell the user the binary is ready — they flash with: `idf.py -p /dev/ttyACM0 flash`
+
