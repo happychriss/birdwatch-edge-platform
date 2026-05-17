@@ -71,8 +71,8 @@ static void apply_lowlight_photo_settings(sensor_t *s)
     s->set_special_effect(s, 0);
 
     s->set_whitebal(s, 1);
-    s->set_awb_gain(s, 0);          // disable AWB gain — prevents green push at low signal
-    s->set_wb_mode(s, 2);           // Cloudy fixed matrix: consistent colour reference
+    s->set_awb_gain(s, 1);          // enable AWB gain — auto correction outperforms fixed matrix in dark scenes
+    s->set_wb_mode(s, 0);           // Auto: adapts to actual scene colour temperature
 
     s->set_exposure_ctrl(s, 1);
     s->set_aec2(s, 1);              // longer integration time: AEC stays open more frames

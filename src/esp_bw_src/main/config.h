@@ -71,7 +71,7 @@
 // the firmware switches from PHOTO to PHOTO_LOWLIGHT (longer AEC integration,
 // 32x gain ceiling, no AWB gain push, +2 EV) to improve early-morning and
 // late-afternoon visibility without the green cast.  Tune based on field data.
-#define BW_LOWLIGHT_PHOTO_THRESHOLD  130
+#define BW_LOWLIGHT_PHOTO_THRESHOLD  80
 
 // ─── Global mode codes (matches python server reply field) ─────────────────
 typedef enum {
