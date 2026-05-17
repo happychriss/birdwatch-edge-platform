@@ -83,7 +83,7 @@
 // to correct the OV2640's native green Bayer bias — making the cast worse.
 // Fixed presets (Sunny/Cloudy) apply a known colour matrix and ignore scene
 // content, which is more predictable for a fixed camera installation.
-#define BW_CAM_AWB_GAIN  0
+#define BW_CAM_AWB_GAIN  1
 
 // ─── Global mode codes (matches python server reply field) ─────────────────
 typedef enum {
