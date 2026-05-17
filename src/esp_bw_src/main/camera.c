@@ -39,7 +39,7 @@ static void apply_photo_settings(sensor_t *s)
 
     s->set_whitebal(s, 1);
     s->set_awb_gain(s, 1);
-    s->set_wb_mode(s, 2);       // Cloudy: fixed 6500K matrix, avoids auto-AWB green failure
+    s->set_wb_mode(s, 0);       // Auto AWB: adapts to scene colour temperature
 
     s->set_exposure_ctrl(s, 1);
     s->set_aec2(s, 0);
