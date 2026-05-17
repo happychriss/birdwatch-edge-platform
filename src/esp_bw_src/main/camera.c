@@ -39,8 +39,8 @@ static void apply_photo_settings(sensor_t *s)
     s->set_special_effect(s, 0);
 
     s->set_whitebal(s, 1);
-    s->set_awb_gain(s, 1);
-    s->set_wb_mode(s, 0);       // Auto AWB: adapts to scene colour temperature
+    s->set_awb_gain(s, BW_CAM_AWB_GAIN);
+    s->set_wb_mode(s, 2);       // Cloudy (6500K): overcast/shaded fixed matrix
 
     s->set_exposure_ctrl(s, 1);
     s->set_aec2(s, 0);
@@ -73,7 +73,7 @@ static void apply_bright_photo_settings(sensor_t *s)
     s->set_special_effect(s, 0);
 
     s->set_whitebal(s, 1);
-    s->set_awb_gain(s, 1);
+    s->set_awb_gain(s, BW_CAM_AWB_GAIN);
     s->set_wb_mode(s, 1);       // Sunny (5500K): best for direct outdoor daylight
 
     s->set_exposure_ctrl(s, 1);
@@ -106,8 +106,8 @@ static void apply_lowlight_photo_settings(sensor_t *s)
     s->set_special_effect(s, 0);
 
     s->set_whitebal(s, 1);
-    s->set_awb_gain(s, 1);          // enable AWB gain — auto correction outperforms fixed matrix in dark scenes
-    s->set_wb_mode(s, 0);           // Auto: adapts to actual scene colour temperature
+    s->set_awb_gain(s, BW_CAM_AWB_GAIN);
+    s->set_wb_mode(s, 2);           // Cloudy (6500K): consistent fixed matrix for dusk/dawn
 
     s->set_exposure_ctrl(s, 1);
     s->set_aec2(s, 1);              // longer integration time: AEC stays open more frames

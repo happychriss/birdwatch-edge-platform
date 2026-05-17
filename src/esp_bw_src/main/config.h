@@ -74,6 +74,17 @@
 #define BW_BRIGHT_PHOTO_THRESHOLD    160
 #define BW_LOWLIGHT_PHOTO_THRESHOLD   80
 
+// ─── Camera AWB gain (Auto White Balance adaptive gain) ────────────────────
+// Set to 1 to let the OV2640 adapt gain per-channel based on scene content.
+// Set to 0 to use fixed Kelvin presets only (wb_mode per camera mode).
+//
+// WHY WE DISABLE (0): the installation has prominent green plants in frame.
+// Auto AWB misidentifies the plant green as the neutral reference and fails
+// to correct the OV2640's native green Bayer bias — making the cast worse.
+// Fixed presets (Sunny/Cloudy) apply a known colour matrix and ignore scene
+// content, which is more predictable for a fixed camera installation.
+#define BW_CAM_AWB_GAIN  0
+
 // ─── Global mode codes (matches python server reply field) ─────────────────
 typedef enum {
     BW_MODE_ERROR        = -1,
