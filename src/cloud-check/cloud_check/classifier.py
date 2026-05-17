@@ -13,9 +13,9 @@ from .config import Config
 class ClassifierResult:
     label: str                    # "clouds" or "process"
     trigger: str                  # rule: WARMUP | DARK_OBJ | QUIET | SCENE_DRIFT | AMBIGUOUS
-    anomaly_mask: np.ndarray      # (GRID_H, GRID_W) bool
+    anomaly_mask: np.ndarray      # (GRID_H, GRID_W) bool — tiles with z > threshold AND darker than model
     blob_max_size: int            # largest connected anomalous region
-    anomaly_ratio: float          # fraction of tiles anomalous
+    anomaly_ratio: float          # dark-only anomaly ratio (tiles darker than model / total)
     compactness: float            # blob_max / total_anomalies (0..1, 1 = single solid blob)
     reason: str                   # human-readable explanation
     warmup: bool                  # bucket is still in warmup
@@ -61,26 +61,26 @@ def classify(
         )
 
     z = model.z_scores(hour, tile_mean)
-    mask = z > cfg.tile_z_threshold
-    total_anom = int(mask.sum())
-    ratio = float(mask.mean())
-
-    # Foreground darkening signal: birds/people are typically darker than the
-    # bright sky/floor background. A handful of tiles that dropped a lot below
-    # their bucket mean is a strong object cue even when total_anom is tiny.
     bucket_mean = model.mean[model._idx(hour)]
-    delta = tile_mean - bucket_mean
-    dark_tiles = int(((delta < -cfg.dark_object_min_delta) & mask).sum())
 
-    # Temporal check: which dark tiles are genuinely NEW vs the previous frame?
-    # If they were already dark in the previous frame, the model is stale (scene
-    # changed since last update), not a new object.
+    # anomaly_mask: tiles with z > threshold AND darker than model.
+    # Bright deviations (sky brightening, cloud moving off sun) are intentionally
+    # excluded — they should not prevent QUIET from suppressing.
+    z_mask = z > cfg.tile_z_threshold
+    dark_mask = tile_mean < bucket_mean
+    mask = z_mask & dark_mask          # dark-only anomalous tiles
+    total_anom = int(mask.sum())
+    ratio = float(mask.mean())         # dark-only ratio used for QUIET
+
+    delta = tile_mean - bucket_mean
+    dark_tiles = int(((delta < -cfg.dark_object_min_delta) & z_mask).sum())
+
     if prev_tile_mean is not None:
         temporal_delta = tile_mean - prev_tile_mean
-        new_dark_tiles = int(((temporal_delta < -cfg.temporal_dark_delta) & mask).sum())
+        new_dark_tiles = int(((temporal_delta < -cfg.temporal_dark_delta) & z_mask).sum())
         temporal_available = True
     else:
-        new_dark_tiles = dark_tiles  # no previous frame: trust model-based count
+        new_dark_tiles = dark_tiles
         temporal_available = False
 
     labelled, _ = cc_label(mask)
@@ -94,9 +94,6 @@ def classify(
     compactness = blob_max / total_anom if total_anom > 0 else 0.0
     warmup = model.warmup_remaining(hour) > 0
 
-    # DARK_OBJ fires only when tiles are dark AND newly appeared (or no prev to check).
-    # If the dark tiles were already there in the previous frame, the model is stale —
-    # that becomes SCENE_DRIFT below.
     dark_obj_condition = (
         dark_tiles >= cfg.dark_object_min_tiles
         and (not temporal_available or new_dark_tiles >= cfg.dark_object_min_tiles)
@@ -115,43 +112,20 @@ def classify(
         trigger = "DARK_OBJ"
         decision = "process"
         reason = (f"dark object cue (dark_tiles={dark_tiles}, new_dark={new_dark_tiles}, "
-                  f"blob={blob_max}, ratio={ratio:.2f})")
-    elif cfg.indirect_light_threshold > 0 and global_mean < cfg.indirect_light_threshold:
-        # Indirect-light zone: low-to-moderate brightness + high spatial contrast
-        # (sun at low angle, hard directional shadows).  Background model z-scores
-        # are unreliable here because the model has accumulated high variance from
-        # sun/cloud cycling.  We cannot distinguish a cloud shadow from a small
-        # dark object, so we admit the limitation and upload unconditionally.
-        trigger = "INDIRECT_LIGHT"
-        decision = "process"
-        reason = (f"indirect light zone (global_mean={global_mean:.1f} < "
-                  f"{cfg.indirect_light_threshold}) — z-scores unreliable → upload")
-    elif (
-        prev_tile_mean is not None
-        and cfg.spot_change_max_tiles > 0
-        and abs(global_mean - float(prev_tile_mean.mean())) < cfg.spot_change_global_stability
-        and 1 <= int((tile_mean - prev_tile_mean < -cfg.spot_change_tile_delta).sum()) <= cfg.spot_change_max_tiles
-        and int((np.abs(tile_mean - prev_tile_mean) >= 10).sum()) <= cfg.spot_change_max_noisy_tiles
-    ):
-        _n_spot = int((tile_mean - prev_tile_mean < -cfg.spot_change_tile_delta).sum())
-        _g_delta = abs(global_mean - float(prev_tile_mean.mean()))
-        trigger = "SPOT_CHANGE"
-        decision = "process"
-        reason = (f"localised dark spot (n_spot={_n_spot} ≤ {cfg.spot_change_max_tiles}, "
-                  f"global_delta={_g_delta:.1f} < {cfg.spot_change_global_stability})")
+                  f"blob={blob_max}, dark_ratio={ratio:.2f})")
     elif ratio <= cfg.quiet_anomaly_ratio:
         trigger = "QUIET"
         decision = "clouds"
-        reason = f"scene matches model (ratio={ratio:.3f} ≤ {cfg.quiet_anomaly_ratio})"
+        reason = f"scene matches model (dark_ratio={ratio:.3f} ≤ {cfg.quiet_anomaly_ratio})"
     elif stale_condition:
         trigger = "SCENE_DRIFT"
         decision = "process"
         reason = (f"persistent scene drift (dark_tiles={dark_tiles}, new_dark=0, "
-                  f"ratio={ratio:.2f}) → model stale, upload + re-calibrate")
+                  f"dark_ratio={ratio:.2f}) → model stale, upload + re-calibrate")
     else:
         trigger = "AMBIGUOUS"
         decision = "process"
-        reason = (f"ambiguous → upload (blob={blob_max} ratio={ratio:.2f} "
+        reason = (f"ambiguous → upload (blob={blob_max} dark_ratio={ratio:.2f} "
                   f"compactness={compactness:.2f})")
 
     return ClassifierResult(

@@ -198,8 +198,9 @@ def run(config_path: str | None = None) -> list[dict]:
             # Prefer ESP's own tile_means (identical input → pure logic parity).
             # Fall back to extracting from JPEG (tests extraction + logic).
             esp_tile_means = meta.get('tile_means')
-            if esp_tile_means and isinstance(esp_tile_means, list) and len(esp_tile_means) == 192:
-                tile_mean = np.array(esp_tile_means, dtype=np.float32).reshape(12, 16)
+            expected = py_cfg.grid_h * py_cfg.grid_w
+            if esp_tile_means and isinstance(esp_tile_means, list) and len(esp_tile_means) == expected:
+                tile_mean = np.array(esp_tile_means, dtype=np.float32).reshape(py_cfg.grid_h, py_cfg.grid_w)
             else:
                 url = f"{server_base}/static/{frame.filename}"
                 try:
@@ -213,11 +214,13 @@ def run(config_path: str | None = None) -> list[dict]:
                     feats = extract_tile_features(frame_arr)
                     tile_mean = feats['mean']
                 except Exception as exc:
+                    fetch_err = {'key': '_fetch', 'esp_val': None,
+                                 'py_val': None, 'delta': str(exc), 'match': False}
                     results.append({
                         'frame_id': frame.id,
                         'captured_at': str(frame.captured_at),
-                        'mismatches': [{'key': '_fetch', 'esp_val': None,
-                                        'py_val': None, 'delta': str(exc)}],
+                        'checks': [fetch_err],
+                        'mismatches': [fetch_err],
                     })
                     continue
 
@@ -228,7 +231,7 @@ def run(config_path: str | None = None) -> list[dict]:
             # Update model (mirrors pipeline.py update policy)
             was_warmup = model.warmup_remaining(hour) > 0
             if was_warmup or py_result.label == 'clouds' or py_result.trigger in (
-                'SCENE_DRIFT', 'NIGHT', 'INDIRECT_LIGHT'
+                'SCENE_DRIFT', 'NIGHT'
             ):
                 model.update(hour, tile_mean)
             if py_result.trigger == 'SCENE_DRIFT':

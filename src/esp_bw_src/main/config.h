@@ -25,7 +25,7 @@
 
 // ─── Server endpoint ─────────────────────────────────────────────────────────
 // TARGET_ZO -> use second WiFi/server pair, otherwise primary.
-#define BW_TARGET_ZO 0
+#define BW_TARGET_ZO 1
 #if BW_TARGET_ZO
   #define BW_SERVER_HOST "192.168.1.110"
 #else

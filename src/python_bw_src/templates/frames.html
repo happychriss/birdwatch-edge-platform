@@ -182,7 +182,7 @@
       <div class="no-photo">no image</div>
     {% endif %}
     <div class="info">
-      <div class="date-text">{{ entry.captured_at.strftime("%d.%m.%y %H:%M") if entry.captured_at else '—' }}</div>
+      <div class="date-text" {% if entry.captured_at %}data-utc="{{ entry.captured_at.strftime('%Y-%m-%dT%H:%M:%S') }}Z"{% endif %}>{{ entry.captured_at.strftime("%d.%m.%y %H:%M") if entry.captured_at else '—' }}</div>
       <div class="row">
         {{ render_badges(meta, spec, order) }}
       </div>
@@ -222,6 +222,14 @@ function openPhoto(url) {
 function closePhoto() { document.getElementById('lightbox').classList.remove('open'); }
 document.getElementById('lightbox').addEventListener('click', function(e){ if (e.target===this) closePhoto(); });
 document.addEventListener('keydown', function(e){ if (e.key==='Escape') closePhoto(); });
+
+// Convert UTC timestamps to local time
+document.querySelectorAll('.date-text[data-utc]').forEach(function(el) {
+  const d = new Date(el.dataset.utc);
+  if (isNaN(d)) return;
+  const pad = n => String(n).padStart(2, '0');
+  el.textContent = `${pad(d.getDate())}.${pad(d.getMonth()+1)}.${String(d.getFullYear()).slice(-2)} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+});
 
 let refreshSecs = 300;
 const countdownEl = document.getElementById('countdown');

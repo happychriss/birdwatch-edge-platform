@@ -2,16 +2,18 @@
 //
 // Algorithm matches src/cloud-check/ exactly.  Decision stages (priority order):
 //
-//   NIGHT          — frame too dark for reliable detection → upload (sun is down)
-//   WARMUP         — model not yet bootstrapped; upload always (can't risk missing a bird)
-//   DARK_OBJ       — tiles newly dark vs both model AND previous frame → real object → upload
-//   INDIRECT_LIGHT — low-to-moderate brightness + high contrast (sun from side); z-scores
-//                    unreliable → admit limitation, upload unconditionally
-//   QUIET          — ≤20 % tiles anomalous → scene matches model → suppress
-//   SCENE_DRIFT    — tiles dark vs model but NOT newly dark vs prev → stale model → upload + re-calibrate
-//   AMBIGUOUS      — default → upload
+//   NIGHT       — frame too dark for reliable detection → upload (sun is down)
+//   WARMUP      — model not yet bootstrapped; upload always (can't risk missing a bird)
+//   DARK_OBJ    — tiles newly dark vs both model AND previous frame → real object → upload
+//   QUIET       — ≤25 % dark-anomalous tiles → scene matches model → suppress
+//   SCENE_DRIFT — tiles dark vs model but NOT newly dark vs prev → stale model → upload + re-calibrate
+//   AMBIGUOUS   — default → upload
 //
-// Uses QQVGA (160×120) grayscale, 16×12 tile grid (10×10 px per tile, 192 tiles total).
+// QUIET uses dark-only anomaly ratio: only tiles DARKER than the model count.
+// Bright deviations (sky brightening, cloud moving off sun) are ignored so PIR
+// triggers caused by illumination increase don't prevent suppression.
+//
+// Uses QQVGA (160×120) grayscale, 20×15 tile grid (8×8 px per tile, 300 tiles total).
 // Background model (mean + variance per tile) and previous-frame tile means persist in NVS
 // under namespace "cc" so state survives power-off between PIR events.
 //
@@ -36,42 +38,39 @@ static const char *TAG    = "CC";
 static const char *NVS_NS = "cc";
 
 // ── Frame / grid layout ──────────────────────────────────────────────────────
-// QQVGA: 160×120.  16×12 grid gives 10×10 px tiles — same tile count (192) as
-// the Python simulation running on 640×480 with 40×40 tiles.
+// QQVGA: 160×120.  20×15 grid gives 8×8 px tiles (300 tiles total).
+// Smaller tiles improve detection of small/distant birds vs the old 16×12 grid.
 #define CC_FRAME_W    160
 #define CC_FRAME_H    120
-#define CC_TILES_X    16
-#define CC_TILES_Y    12
-#define CC_NUM_TILES  (CC_TILES_X * CC_TILES_Y)     // 192
-#define CC_TILE_W     (CC_FRAME_W / CC_TILES_X)     // 10
-#define CC_TILE_H     (CC_FRAME_H / CC_TILES_Y)     // 10
+#define CC_TILES_X    20
+#define CC_TILES_Y    15
+#define CC_NUM_TILES  (CC_TILES_X * CC_TILES_Y)     // 300
+#define CC_TILE_W     (CC_FRAME_W / CC_TILES_X)     // 8
+#define CC_TILE_H     (CC_FRAME_H / CC_TILES_Y)     // 8
 
 // ── Background model parameters ──────────────────────────────────────────────
-// Values found by focused grid search (5184 configurations) over the
-// 172-frame real-scene dataset.  Non-cloud recall = 1.000, cloud recall = 0.516.
+// Values found by parameter sweep over 195-frame real-scene dataset.
+// nc_recall=1.000, c_recall=0.618 (20×15, dark-only QUIET).
 #define CC_EMA_ALPHA        0.15f   // background update speed (lower = slower adaptation)
 #define CC_VAR_FLOOR        36.0f   // minimum tile variance (std ≥ 6); prevents over-confidence
 #define CC_INIT_VAR         256.0f  // variance prior for unseen tiles (std = 16)
 #define CC_INIT_MEAN        128.0f  // mean prior for unseen tiles (mid-scale grey)
-#define CC_Z_THRESHOLD      2.5f    // z-score to flag a tile as anomalous (both bright AND dark)
-#define CC_QUIET_RATIO      0.20f   // ≤20 % anomalous → QUIET → suppress
+#define CC_Z_THRESHOLD      3.0f    // z-score to flag a tile as anomalous
+#define CC_QUIET_RATIO      0.25f   // ≤25 % dark-anomalous tiles → QUIET → suppress
 #define CC_DARK_DELTA_MODEL 35.0f   // tile must be ≥35 DN darker than model mean (DARK_OBJ check)
 #define CC_DARK_DELTA_PREV  20.0f   // tile must be ≥20 DN darker than previous frame (temporal check)
 #define CC_DARK_MIN_TILES        1  // ≥1 qualifying dark tile triggers DARK_OBJ
-#define CC_SCENE_DRIFT_MIN_TILES 4  // SCENE_DRIFT needs ≥4 persistently-dark tiles (bigger scene change)
-#define CC_WARMUP_FRAMES    8       // frames before model is considered bootstrapped
-#define CC_NIGHT_THRESHOLD      70  // frame global mean below this → NIGHT → upload (sun is down)
-#define CC_INDIRECT_THRESHOLD   95  // global mean in (NIGHT, INDIRECT) → indirect light → upload
-#define CC_SPOT_MAX_TILES    2      // SPOT_CHANGE: max tiles darkened vs prev (set 0 to disable)
-#define CC_SPOT_TILE_DELTA   15.0f  // SPOT_CHANGE: tile must darken this much vs prev frame
-#define CC_SPOT_GLOBAL_STAB  10.0f  // SPOT_CHANGE: max allowed global_mean shift vs prev frame
-#define CC_SPOT_MAX_NOISY    20     // SPOT_CHANGE: max tiles with |any| change ≥10 DN
+#define CC_SCENE_DRIFT_MIN_TILES 4  // SCENE_DRIFT needs ≥4 persistently-dark tiles
+#define CC_WARMUP_FRAMES    4       // frames before model is considered bootstrapped
+#define CC_NIGHT_THRESHOLD  70      // frame global mean below this → NIGHT → upload (sun is down)
 
 // ── NVS key names ─────────────────────────────────────────────────────────────
-// "cc_m"   : tile means     (192 × float  = 768 B)
-// "cc_v"   : tile variances (192 × float  = 768 B)
-// "cc_p"   : previous-frame tile means (192 × uint8 = 192 B)
+// "cc_m"   : tile means     (300 × float  = 1200 B)
+// "cc_v"   : tile variances (300 × float  = 1200 B)
+// "cc_p"   : previous-frame tile means (300 × uint8 = 300 B)
 // "cc_seen": total frames observed this bucket (uint16)
+// NOTE: blob size change (192→300 tiles) is detected on load — mismatched blobs
+// are silently discarded and the model re-initialises from the prior.
 static const char *KEY_MEAN  = "cc_m";
 static const char *KEY_VAR   = "cc_v";
 static const char *KEY_PREV  = "cc_p";
@@ -246,11 +245,12 @@ static void run_pipeline(const uint8_t *means, bw_cc_result_t *out)
     }
 
     // Per-tile anomaly analysis
-    // z = |model_mean - tile_mean| / std  (absolute — matches Python np.abs())
-    // dark_model_tiles: anomalous AND darker than model by ≥ CC_DARK_DELTA_MODEL
-    // new_dark_tiles  : anomalous AND darker than previous frame by ≥ CC_DARK_DELTA_PREV
-    // These two sets are independent (a tile can be in one but not the other).
-    int anomalous        = 0;
+    // z = |model_mean - tile_mean| / std
+    // dark_anomalous  : z > threshold AND tile darker than model (used for QUIET ratio)
+    // dark_model_tiles: z > threshold AND tile ≥ CC_DARK_DELTA_MODEL darker than model (DARK_OBJ)
+    // new_dark_tiles  : z > threshold AND tile ≥ CC_DARK_DELTA_PREV darker than prev frame (DARK_OBJ)
+    // QUIET uses dark-only ratio: bright deviations (sky brightening) are ignored.
+    int dark_anomalous   = 0;
     int dark_model_tiles = 0;
     int new_dark_tiles   = 0;
 
@@ -259,20 +259,18 @@ static void run_pipeline(const uint8_t *means, bw_cc_result_t *out)
         float m   = s_mean[i];
         float std = sqrtf(s_var[i]);
 
-        // Absolute z-score: bright AND dark deviations both count as anomalous.
         float z = fabsf(m - x) / std;
         bool z_anom = (z > CC_Z_THRESHOLD);
 
         if (z_anom) {
-            anomalous++;
-            // Strictly more than threshold — mirrors Python's (delta < -N) which excludes exactly N.
+            if (x < m) dark_anomalous++;   // only darker-than-model tiles count toward QUIET ratio
             if (m - x > CC_DARK_DELTA_MODEL) dark_model_tiles++;
             if (s_prev_valid && (float)s_prev[i] - x > CC_DARK_DELTA_PREV) new_dark_tiles++;
         }
     }
 
-    float ratio = (float)anomalous / CC_NUM_TILES;
-    bw_tele_i("anomalous",      (long)anomalous);
+    float ratio = (float)dark_anomalous / CC_NUM_TILES;
+    bw_tele_i("dark_anomalous", (long)dark_anomalous);
     bw_tele_f("ratio",          (double)ratio);
     bw_tele_i("dark_tiles",     (long)dark_model_tiles);
     bw_tele_i("new_dark_tiles", (long)new_dark_tiles);
@@ -300,65 +298,7 @@ static void run_pipeline(const uint8_t *means, bw_cc_result_t *out)
         return;
     }
 
-    // INDIRECT_LIGHT — low-to-moderate brightness with high spatial contrast.
-    // Low-angle sun (morning/evening) creates hard directional shadows that cause
-    // PIR false triggers.  In this brightness zone the background model accumulates
-    // high variance from sun/cloud cycling, making z-scores unreliable: even a
-    // 100 DN object delta can produce z < 2.5.  We cannot distinguish a cloud
-    // shadow from a small dark object, so we admit the limitation and upload.
-    // Model is updated so it tracks the indirect-light baseline.
-    if (global_mean < CC_INDIRECT_THRESHOLD) {
-        update_model(means);
-        save_model();
-        save_prev(means);
-        strcpy(out->label, "process");
-        strcpy(out->stage, "INDIRECT_LIGHT");
-        bw_tele_s("result", "process");
-        bw_tele_s("stage",  "INDIRECT_LIGHT");
-        ESP_LOGI(TAG, "INDIRECT_LIGHT (global_mean=%" PRIu32 " < %d) → process",
-                 global_mean, CC_INDIRECT_THRESHOLD);
-        return;
-    }
-
-    // SPOT_CHANGE — scene globally stable vs previous frame but exactly 1..CC_SPOT_MAX_TILES
-    // tiles darkened significantly.  Safety net for small objects (distant bird, partial
-    // view) whose per-tile z-score vs the background model is below CC_Z_THRESHOLD, so
-    // DARK_OBJ misses them.  Also guards against the case where the model is stale for
-    // a particular tile (recent scene change) but the object is clearly new vs prev.
-    // Requires: prev frame available, global_mean stable, few dark spots, low overall churn.
-    if (CC_SPOT_MAX_TILES > 0 && s_prev_valid) {
-        // Use float division for both sides so g_delta precision matches Python.
-        // global_mean (uint32) was integer-divided; recompute as float here.
-        float cur_gm_f = (float)gm_sum / CC_NUM_TILES;
-        uint32_t prev_gm_sum = 0;
-        for (int i = 0; i < CC_NUM_TILES; i++) prev_gm_sum += s_prev[i];
-        float prev_gm = (float)prev_gm_sum / CC_NUM_TILES;
-        float g_delta = fabsf(cur_gm_f - prev_gm);
-
-        if (g_delta < CC_SPOT_GLOBAL_STAB) {
-            int n_spot_dark = 0;
-            int n_noisy     = 0;
-            for (int i = 0; i < CC_NUM_TILES; i++) {
-                float d = (float)s_prev[i] - (float)means[i];  // positive = darkened
-                if (d > CC_SPOT_TILE_DELTA) n_spot_dark++;  // strict: mirrors Python's (tile-prev < -N)
-                if (d < 0) d = -d;
-                if (d >= 10.0f) n_noisy++;
-            }
-            if (n_spot_dark >= 1 && n_spot_dark <= CC_SPOT_MAX_TILES
-                && n_noisy <= CC_SPOT_MAX_NOISY) {
-                save_prev(means);
-                strcpy(out->label, "process");
-                strcpy(out->stage, "SPOT_CHANGE");
-                bw_tele_s("result", "process");
-                bw_tele_s("stage",  "SPOT_CHANGE");
-                ESP_LOGI(TAG, "SPOT_CHANGE (n_spot=%d g_delta=%.1f) → process",
-                         n_spot_dark, g_delta);
-                return;
-            }
-        }
-    }
-
-    // QUIET — scene essentially unchanged, just a minor lighting fluctuation
+    // QUIET — dark-anomalous ratio low → scene matches model → suppress
     if (ratio <= CC_QUIET_RATIO) {
         update_model(means);
         save_model();
@@ -393,7 +333,7 @@ static void run_pipeline(const uint8_t *means, bw_cc_result_t *out)
     strcpy(out->stage, "AMBIGUOUS");
     bw_tele_s("result", "process");
     bw_tele_s("stage",  "AMBIGUOUS");
-    ESP_LOGI(TAG, "AMBIGUOUS (ratio=%.0f%% dark_model=%d new_dark=%d) → process",
+    ESP_LOGI(TAG, "AMBIGUOUS (dark_ratio=%.0f%% dark_model=%d new_dark=%d) → process",
              ratio * 100.0f, dark_model_tiles, new_dark_tiles);
 }
 

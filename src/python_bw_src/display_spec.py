@@ -60,7 +60,7 @@ DISPLAY_SPEC: dict = {
     # Numeric intermediates — shown as plain numbers, no badge.
     "global_mean":   {"type": "numeric"},
     "ratio":         {"type": "format_val", "format": "{:.3f}"},
-    "anomalous":     {"type": "numeric"},
+    "dark_anomalous": {"type": "numeric"},
     "dark_tiles":    {"type": "numeric"},
     "new_dark_tiles": {"type": "numeric"},
     "warmup":        {"type": "numeric"},

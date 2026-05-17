@@ -9,10 +9,10 @@ from PIL import Image
 FRAME_W = 640
 FRAME_H = 480
 
-# Default tile grid: 16×12 = 192 tiles of 40×40 px.
-# Matches QQVGA (160×120) lightcheck with 10×10-pixel tiles on device.
-GRID_W = 16
-GRID_H = 12
+# Default tile grid: 20×15 = 300 tiles of 32×32 px.
+# Matches QQVGA (160×120) lightcheck with 8×8-pixel tiles on device.
+GRID_W = 20
+GRID_H = 15
 TILE_W = FRAME_W // GRID_W
 TILE_H = FRAME_H // GRID_H
 
