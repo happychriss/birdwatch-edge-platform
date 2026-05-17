@@ -52,5 +52,5 @@ def extract_tile_features(
     return {
         "mean": mean,
         "std": std,
-        "global_mean": float(f.mean()),
+        "global_mean": int(f.mean()),  # truncate, matches ESP integer division
     }

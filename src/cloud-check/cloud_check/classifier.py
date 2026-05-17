@@ -45,7 +45,7 @@ def classify(
     cfg = cfg or model.cfg
 
     # Stage 0 — NIGHT: frame too dark for reliable anomaly detection → upload.
-    global_mean = float(tile_mean.mean())
+    global_mean = int(tile_mean.mean())  # truncate, matches ESP integer division (gm_sum / CC_NUM_TILES)
     if cfg.night_brightness_threshold > 0 and global_mean < cfg.night_brightness_threshold:
         return ClassifierResult(
             label="process",
@@ -54,7 +54,7 @@ def classify(
             blob_max_size=0,
             anomaly_ratio=0.0,
             compactness=0.0,
-            reason=f"scene too dark (global_mean={global_mean:.1f} < {cfg.night_brightness_threshold})",
+            reason=f"scene too dark (global_mean={global_mean} < {cfg.night_brightness_threshold})",
             warmup=model.warmup_remaining(hour) > 0,
             new_dark_tiles=0,
             temporal_available=prev_tile_mean is not None,
