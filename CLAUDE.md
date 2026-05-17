@@ -42,3 +42,21 @@ Key constraints that must not be broken:
 
 See `skills/wifi-esp32s3.md` for the full design rationale and timing budget.
 
+## Three-Project Consistency Rule
+
+Any change to the cloud-detection algorithm must be kept in sync across all three projects.
+**Before implementing, confirm with the user which projects need updating.**
+
+| Parameter / behaviour | ESP firmware | Python simulation | Validator config |
+|---|---|---|---|
+| Grid size | `cloud_check.c` `CC_TILES_X/Y` | `config.py` `grid_w/h`, `features.py` `GRID_W/H` | `validate_config.json` (implicit via config) |
+| Thresholds (z, quiet ratio, warmup, deltas) | `cloud_check.c` `#define` | `config.py` defaults | `validate_config.json` `python_config` |
+| Decision stages | `cloud_check.c` stage blocks | `classifier.py` branches | `validate_config.json` `checks` array |
+| Telemetry field names | `bw_tele_*(name, …)` in `cloud_check.c` | `ClassifierResult` field names | `validate_config.json` `esp_key` / `py_field` |
+| Field display names | `bw_tele_*` name | — | `display_spec.py` keys |
+
+**Projects:**
+- `src/esp_bw_src/` — ESP32-S3 firmware (C). Needs a flash to take effect.
+- `src/cloud-check/` — Python algorithm package + parity validator. Used by the server.
+- `src/python_bw_src/` — Flask web server + display spec. Runs on the local server.
+
