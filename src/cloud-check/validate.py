@@ -113,7 +113,7 @@ def _get_py_field(result: ClassifierResult, py_field: str, tile_mean: np.ndarray
     'global_mean' is not a ClassifierResult field; compute it from tile_mean.
     """
     if py_field == 'global_mean':
-        return int(round(float(tile_mean.mean())))
+        return int(float(tile_mean.mean()))  # truncate, matches ESP integer division (gm_sum / CC_NUM_TILES)
     return getattr(result, py_field, None)
 
 
