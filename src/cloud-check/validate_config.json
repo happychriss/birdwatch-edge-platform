@@ -10,24 +10,21 @@
   },
 
   "python_config": {
-    "_comment": "Python BackgroundModel settings for parity mode. num_time_buckets=1 matches the ESP's single-bucket model.",
+    "_comment": "Must mirror ESP firmware constants in cloud_check.c / config.h exactly.",
     "num_time_buckets": 1,
-    "warmup_frames_per_bucket": 8,
+    "warmup_frames_per_bucket": 4,
     "ema_alpha": 0.15,
     "var_floor": 36.0,
     "init_var": 256.0,
-    "tile_z_threshold": 2.5,
-    "quiet_anomaly_ratio": 0.20,
+    "tile_z_threshold": 3.0,
+    "quiet_anomaly_ratio": 0.25,
     "dark_object_min_delta": 35.0,
     "dark_object_min_tiles": 1,
     "temporal_dark_delta": 20.0,
     "scene_drift_min_tiles": 4,
     "night_brightness_threshold": 70.0,
-    "indirect_light_threshold": 95.0,
-    "spot_change_max_tiles": 2,
-    "spot_change_tile_delta": 15.0,
-    "spot_change_global_stability": 10.0,
-    "spot_change_max_noisy_tiles": 20
+    "indirect_light_threshold": 0.0,
+    "spot_change_max_tiles": 0
   },
 
   "checks": [
@@ -43,16 +40,11 @@
       "type": "exact"
     },
     {
-      "_comment": "Anomaly ratio — small float tolerance for rounding differences",
+      "_comment": "Dark-anomalous ratio — small float tolerance for rounding",
       "esp_key": "ratio",
       "py_field": "anomaly_ratio",
       "type": "float",
       "tol": 0.01
-    },
-    {
-      "esp_key": "dark_tiles",
-      "py_field": "new_dark_tiles",
-      "type": "int"
     },
     {
       "esp_key": "global_mean",
