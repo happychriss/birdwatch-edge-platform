@@ -14,9 +14,12 @@ Full spec: [`requirements-cloud-detection.md`](../../requirements-cloud-detectio
 
 | Stage | Fires when | Decision | Updates model |
 |-------|-----------|----------|---------------|
-| WARMUP | < 8 frames seen in bucket | upload | yes (bootstrap) |
+| NIGHT | global mean < 70 | upload | yes |
+| WARMUP | < 8 frames seen | upload | yes (bootstrap) |
 | DARK_OBJ | tiles newly darker than model AND previous frame | upload | no |
-| QUIET | ≤ 5 % tiles anomalous | suppress | yes |
+| INDIRECT_LIGHT | global mean 70–95 (low-angle sun) | upload | yes |
+| SPOT_CHANGE | 1–2 tiles darkened vs prev, scene globally stable | upload | no |
+| QUIET | ≤ 20 % tiles anomalous | suppress | yes |
 | SCENE_DRIFT | tiles dark vs model but NOT vs previous frame | upload | yes (re-calibrate) |
 | AMBIGUOUS | default | upload | no |
 
@@ -61,6 +64,40 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 # Inspect one frame
 .venv/bin/python -m scripts.inspect 20260515_110118.jpg
 ```
+
+## Parity validator
+
+`validate.py` replays captured frames from the home server database against the Python classifier and diffs every configured value against what the ESP reported in its telemetry.
+
+**Configure checks** in `validate_config.json` — one line per value, no code change:
+```json
+{
+  "time_frame": { "from": "-24h", "to": "now" },
+  "checks": [
+    { "esp_key": "result",     "py_field": "label",        "type": "exact" },
+    { "esp_key": "stage",      "py_field": "trigger",       "type": "exact" },
+    { "esp_key": "dark_tiles", "py_field": "dark_tiles",    "type": "int"   },
+    { "esp_key": "ratio",      "py_field": "anomaly_ratio", "type": "float", "tol": 0.001 }
+  ]
+}
+```
+
+`type` is `exact`, `int`, `float`, or `bool`. `float` accepts an optional `tol` tolerance.  
+`time_frame` accepts ISO timestamps, `"now"`, `"-24h"`, `"-7d"`.
+
+**Input source:** the validator queries `bw_frames` in the home server DB and pulls each JPEG over HTTP — no filesystem mount needed.
+
+**Flash anchor:** if a `fresh_flash` marker is present in any frame's meta, the Python `BackgroundModel` is reset at that point. This ensures the Python and ESP models start from identical priors after every firmware flash, making parity meaningful from frame 1.
+
+**Run from command line:**
+```bash
+cd src/cloud-check
+.venv/bin/python validate.py                        # human-readable output
+.venv/bin/python validate.py validate_config.json --json   # JSON for Flask
+```
+
+**Run from web UI:** `GET /validate` → Run validation button.  
+Results show every checked value per frame: **green** = match, **red** = mismatch.
 
 ## Why not ML?
 

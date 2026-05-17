@@ -13,6 +13,7 @@ Connection is configured via environment variables (see .env.example):
 import os
 from dotenv import load_dotenv
 from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, text
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.engine import URL
 from sqlalchemy.orm import DeclarativeBase, sessionmaker
 
@@ -52,6 +53,24 @@ class BwPhoto(Base):
     photo_mode = Column(String)   # camera exposure mode used for the JPEG: "NORMAL" | "LOWLIGHT"
 
 
+class BwFrame(Base):
+    """One row per ESP capture cycle — new schema-less telemetry table.
+
+    Only captured_at and result are promoted to columns for fast filtering/charting.
+    Everything else (battery, trigger, photo_mode, cloud-check intermediates, …)
+    lives in the meta JSONB column.  Adding a new ESP telemetry key requires no
+    schema change — it just appears in meta automatically.
+    """
+
+    __tablename__ = "bw_frames"
+
+    id          = Column(Integer, primary_key=True, autoincrement=True)
+    captured_at = Column(DateTime, index=True)  # from meta["captured_at"] or server receive-time
+    result      = Column(String, index=True)    # promoted from meta["result"] for fast queries
+    filename    = Column(String)                # saved JPEG filename (no path)
+    meta        = Column(JSONB)                 # all ESP telemetry keys verbatim
+
+
 def _migrate_columns():
     """Add new columns to an existing table without dropping data."""
     migrations = [
@@ -70,10 +89,14 @@ def _migrate_columns():
 
 
 def init_schema():
-    """Create bw_photos if it does not already exist, then apply any missing column migrations."""
+    """Create tables if they do not exist, then apply any missing column migrations.
+
+    bw_photos — existing table, never altered (data preserved).
+    bw_frames  — new schema-less telemetry table, created on first run.
+    """
     Base.metadata.create_all(engine, checkfirst=True)
     _migrate_columns()
-    print("bw_photos: schema verified / created.")
+    print("schema verified / created (bw_photos + bw_frames).")
 
 
 if __name__ == "__main__":

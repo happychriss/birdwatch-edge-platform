@@ -1,0 +1,144 @@
+{# ── Shared meta-rendering macros ────────────────────────────────────────────
+   Renders a meta dict according to DISPLAY_SPEC.
+   Import in templates with:
+     {% from '_meta_render.html' import render_badges, render_rows %}
+#}
+
+{% macro _badge(text, bg, fg) %}
+  <span class="badge" style="background:{{ bg }};color:{{ fg }}">{{ text }}</span>
+{% endmacro %}
+
+{# Render the "important" fields as inline badges for the card view.
+   Only fields with badge/stage_badge/badge_if/format_val types are shown here.
+   detail_only and hide_values fields are skipped. #}
+{% macro render_badges(meta, spec, order) %}
+  {# Build ordered key list: ordered keys first, then remaining #}
+  {% set seen = namespace(keys=[]) %}
+  {% for k in order %}
+    {% if k in meta %}
+      {% set seen.keys = seen.keys + [k] %}
+      {% set rule = spec.get(k, {}) %}
+      {% set rtype = rule.get('type', 'plain') %}
+      {% set val = meta[k] %}
+      {% if rtype == 'badge' %}
+        {% set colors = rule.get('colors', {}) %}
+        {% if val in colors %}
+          {% set bg = colors[val][0] %}{% set fg = colors[val][1] %}
+        {% else %}
+          {% set fb = rule.get('fallback', ('#eee', '#778')) %}
+          {% set bg = fb[0] %}{% set fg = fb[1] %}
+        {% endif %}
+        <span class="badge" style="background:{{ bg }};color:{{ fg }}">{{ val }}</span>
+      {% elif rtype == 'stage_badge' %}
+        {% set pal = rule.get('palette', {}) %}
+        {% set col = pal.get(val, rule.get('fallback', '#aab')) %}
+        <span class="badge" style="background:{{ col }};color:#fff">{{ val }}</span>
+      {% elif rtype == 'badge_if' %}
+        {% if val == rule.get('match_value') %}
+          <span class="badge" style="background:{{ rule.get('color','#aaa') }};color:{{ rule.get('text_color','#fff') }}">{{ rule.get('label', val) }}</span>
+        {% endif %}
+      {% elif rtype == 'format_val' %}
+        {% set fmt = rule.get('format', '{}') %}
+        {% set warn = rule.get('warn_below') %}
+        {% if warn is not none and val is number and val < warn %}
+          <span class="badge" style="background:#fde8e8;color:#c0392b;border:1px solid #f5c6cb">{{ fmt.format(val) }}</span>
+        {% else %}
+          <span class="badge" style="background:#f4f6f7;color:#556;border:1px solid #dce">{{ fmt.format(val) }}</span>
+        {% endif %}
+      {% elif rtype not in ('detail_only', 'hide_values') %}
+        {# plain numeric/bool #}
+        {% if val is not none %}
+          <span class="badge" style="background:#f4f6f7;color:#556;border:1px solid #dce">{{ k }}: {{ val }}</span>
+        {% endif %}
+      {% endif %}
+    {% endif %}
+  {% endfor %}
+  {# append unlisted keys as plain badges #}
+  {% for k, val in meta.items() %}
+    {% if k not in seen.keys and k not in spec %}
+      {% if val is not none and val.__class__.__name__ != 'list' %}
+        <span class="badge" style="background:#f4f6f7;color:#556;border:1px solid #dce">{{ k }}: {{ val }}</span>
+      {% endif %}
+    {% endif %}
+  {% endfor %}
+{% endmacro %}
+
+{# Render ALL fields as a table of rows for the detail view. #}
+{% macro render_rows(meta, spec, order) %}
+  {% set shown = namespace(keys=[]) %}
+  {% for k in order %}
+    {% if k in meta %}
+      {% set shown.keys = shown.keys + [k] %}
+      {{ _row(k, meta[k], spec) }}
+    {% endif %}
+  {% endfor %}
+  {% for k, val in meta.items() %}
+    {% if k not in shown.keys %}
+      {{ _row(k, val, spec) }}
+    {% endif %}
+  {% endfor %}
+{% endmacro %}
+
+{% macro _row(k, val, spec) %}
+  {% set rule = spec.get(k, {}) %}
+  {% set rtype = rule.get('type', 'plain') %}
+  {% if rtype == 'hide_values' and val in rule.get('hide_values', []) %}
+    {# suppressed #}
+  {% elif rtype == 'detail_only' %}
+    {# tile_means etc — render as collapsed/monospace block #}
+    <tr>
+      <td class="meta-key">{{ k }}</td>
+      <td class="meta-val"><details><summary>{{ val.__class__.__name__ }}[{{ val | length if val is iterable else '' }}]</summary><code>{{ val }}</code></details></td>
+    </tr>
+  {% elif rtype == 'badge' %}
+    {% set colors = rule.get('colors', {}) %}
+    {% if val in colors %}
+      {% set bg = colors[val][0] %}{% set fg = colors[val][1] %}
+    {% else %}
+      {% set fb = rule.get('fallback', ('#eee', '#778')) %}
+      {% set bg = fb[0] %}{% set fg = fb[1] %}
+    {% endif %}
+    <tr>
+      <td class="meta-key">{{ k }}</td>
+      <td class="meta-val"><span class="badge" style="background:{{ bg }};color:{{ fg }}">{{ val }}</span></td>
+    </tr>
+  {% elif rtype == 'stage_badge' %}
+    {% set pal = rule.get('palette', {}) %}
+    {% set col = pal.get(val, rule.get('fallback', '#aab')) %}
+    <tr>
+      <td class="meta-key">{{ k }}</td>
+      <td class="meta-val"><span class="badge" style="background:{{ col }};color:#fff">{{ val }}</span></td>
+    </tr>
+  {% elif rtype == 'badge_if' %}
+    <tr>
+      <td class="meta-key">{{ k }}</td>
+      <td class="meta-val">
+        {% if val == rule.get('match_value') %}
+          <span class="badge" style="background:{{ rule.get('color','#aaa') }};color:{{ rule.get('text_color','#fff') }}">{{ rule.get('label', val) }}</span>
+        {% else %}
+          {{ val }}
+        {% endif %}
+      </td>
+    </tr>
+  {% elif rtype == 'format_val' %}
+    {% set fmt = rule.get('format', '{}') %}
+    {% set warn = rule.get('warn_below') %}
+    <tr>
+      <td class="meta-key">{{ k }}</td>
+      <td class="meta-val">
+        {% if warn is not none and val is number and val < warn %}
+          <span style="color:#c0392b;font-weight:700">{{ fmt.format(val) }}</span>
+        {% else %}
+          {{ fmt.format(val) }}
+        {% endif %}
+      </td>
+    </tr>
+  {% else %}
+    {% if val is not none %}
+    <tr>
+      <td class="meta-key">{{ k }}</td>
+      <td class="meta-val">{{ val }}</td>
+    </tr>
+    {% endif %}
+  {% endif %}
+{% endmacro %}

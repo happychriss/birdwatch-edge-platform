@@ -107,35 +107,24 @@ static int parse_global_status(const char *body, int body_len)
     return rc;
 }
 
-bw_mode_t bw_http_upload_image(float       battery_v,
-                               const char *trigger,
-                               const char *cc_label,
-                               const char *cc_stage,
-                               const char *photo_mode,
+bw_mode_t bw_http_upload_image(const char    *meta_json,
                                const uint8_t *jpg_buf,
                                size_t         jpg_len)
 {
     static const char *boundary = "----BWBoundary7MA4YWxkTrZu0gW";
+    const char *meta = (meta_json && meta_json[0]) ? meta_json : "{}";
 
-    char head[1280];
+    // Two multipart parts: meta (JSON string) + image (JPEG binary).
+    // Adding or removing telemetry keys never changes this builder.
+    char head[2048];
     int  hl = snprintf(head, sizeof(head),
-        "--%s\r\nContent-Disposition: form-data; name=\"battery\"\r\n\r\n%.3f\r\n"
-        "--%s\r\nContent-Disposition: form-data; name=\"source\"\r\n\r\n%s\r\n"
-        "--%s\r\nContent-Disposition: form-data; name=\"trigger\"\r\n\r\n%s\r\n"
-        "--%s\r\nContent-Disposition: form-data; name=\"cc_label\"\r\n\r\n%s\r\n"
-        "--%s\r\nContent-Disposition: form-data; name=\"cc_stage\"\r\n\r\n%s\r\n"
-        "--%s\r\nContent-Disposition: form-data; name=\"photo_mode\"\r\n\r\n%s\r\n"
+        "--%s\r\nContent-Disposition: form-data; name=\"meta\"\r\n\r\n%s\r\n"
         "--%s\r\nContent-Disposition: form-data; name=\"image\"; filename=\"image.jpg\"\r\n"
         "Content-Type: image/jpeg\r\n\r\n",
-        boundary, battery_v,
-        boundary, BW_HTTP_SOURCE,
-        boundary, trigger,
-        boundary, cc_label   ? cc_label   : "unknown",
-        boundary, cc_stage   ? cc_stage   : "unknown",
-        boundary, photo_mode ? photo_mode : "unknown",
+        boundary, meta,
         boundary);
     if (hl <= 0 || hl >= (int)sizeof(head)) {
-        ESP_LOGE(TAG, "head buffer too small");
+        ESP_LOGE(TAG, "head buffer too small (meta_len=%u)", (unsigned)strlen(meta));
         return BW_MODE_ERROR;
     }
 

@@ -1,0 +1,68 @@
+{
+  "_comment": "ESP-vs-Python parity validator config. Edit this file to change what is checked — no code change needed.",
+
+  "server_base": "http://192.168.1.110:8000",
+
+  "time_frame": {
+    "from": "-24h",
+    "_comment_from": "ISO datetime OR relative: '-Nh' (last N hours), '-Nd' (last N days), 'now'",
+    "to": "now"
+  },
+
+  "python_config": {
+    "_comment": "Python BackgroundModel settings for parity mode. num_time_buckets=1 matches the ESP's single-bucket model.",
+    "num_time_buckets": 1,
+    "warmup_frames_per_bucket": 8,
+    "ema_alpha": 0.15,
+    "var_floor": 36.0,
+    "init_var": 256.0,
+    "tile_z_threshold": 2.5,
+    "quiet_anomaly_ratio": 0.20,
+    "dark_object_min_delta": 35.0,
+    "dark_object_min_tiles": 1,
+    "temporal_dark_delta": 20.0,
+    "scene_drift_min_tiles": 4,
+    "night_brightness_threshold": 70.0,
+    "indirect_light_threshold": 95.0,
+    "spot_change_max_tiles": 2,
+    "spot_change_tile_delta": 15.0,
+    "spot_change_global_stability": 10.0,
+    "spot_change_max_noisy_tiles": 20
+  },
+
+  "checks": [
+    {
+      "_comment": "Final decision — most important check",
+      "esp_key": "result",
+      "py_field": "label",
+      "type": "exact"
+    },
+    {
+      "esp_key": "stage",
+      "py_field": "trigger",
+      "type": "exact"
+    },
+    {
+      "_comment": "Anomaly ratio — small float tolerance for rounding differences",
+      "esp_key": "ratio",
+      "py_field": "anomaly_ratio",
+      "type": "float",
+      "tol": 0.01
+    },
+    {
+      "esp_key": "dark_tiles",
+      "py_field": "new_dark_tiles",
+      "type": "int"
+    },
+    {
+      "esp_key": "global_mean",
+      "py_field": "global_mean",
+      "type": "int"
+    },
+    {
+      "esp_key": "warmup",
+      "py_field": "warmup",
+      "type": "bool"
+    }
+  ]
+}

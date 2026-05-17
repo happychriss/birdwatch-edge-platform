@@ -58,6 +58,93 @@ See [`src/cloud-check/`](src/cloud-check/README.md) for the Python simulation an
 
 ---
 
+## Telemetry pipeline & parity validation
+
+The second major subsystem adds **schema-less per-frame telemetry** so any intermediate value computed on the ESP can be observed without changing the server or database schema.
+
+### How it works
+
+```
+ESP  bw_tele_f("battery", v);          ← one-liner to add any value
+     bw_tele_s("stage", "DARK_OBJ");
+     bw_tele_arr_u8("tile_means", …);
+       │
+       ▼  multipart POST /frame   (image=JPEG  +  meta=<json>)
+Flask /frame  ──► parse meta; store in bw_frames.meta (JSONB)
+       │
+       ├──► Gallery  — generic renderer, one display_spec.py entry per styled field
+       └──► Validator — replays frames, diffs ESP values against Python classifier
+```
+
+**Adding a new observable value is a one-liner on the ESP.** It appears automatically in the database and web UI as a plain row. One entry in `display_spec.py` gives it a colour, badge, or format — no server or schema change.
+
+### Database (`bw_frames`)
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `id` | integer | primary key |
+| `captured_at` | timestamp | from meta or server receive-time |
+| `result` | varchar | promoted from `meta.result` for fast queries |
+| `filename` | varchar | saved JPEG |
+| `meta` | JSONB | all ESP telemetry keys verbatim |
+
+The `bw_photos` table (legacy `/upload` path) is untouched.  
+Run `python3 db.py` once after pulling to create `bw_frames`.
+
+### Parity validator
+
+Validates that the ESP's intermediate values exactly match a Python replay of the same classifier on the same inputs.
+
+**Configuration** — `src/cloud-check/validate_config.json`:
+```json
+{
+  "time_frame": { "from": "-24h", "to": "now" },
+  "checks": [
+    { "esp_key": "result",      "py_field": "label",         "type": "exact" },
+    { "esp_key": "stage",       "py_field": "trigger",        "type": "exact" },
+    { "esp_key": "dark_tiles",  "py_field": "dark_tiles",     "type": "int"   },
+    { "esp_key": "ratio",       "py_field": "anomaly_ratio",  "type": "float", "tol": 0.001 }
+  ]
+}
+```
+
+Add or remove a checked value by editing `checks` — no code change.  
+`time_frame` accepts ISO timestamps, `now`, `-24h`, `-7d`.
+
+**Running:**
+```bash
+# From the web UI: Battery → Validate → Run validation
+# Or from the command line:
+cd src/cloud-check
+.venv/bin/python validate.py [validate_config.json]
+.venv/bin/python validate.py validate_config.json --json   # machine-readable
+```
+
+The validator automatically detects the most recent firmware flash (`fresh_flash` in meta) and starts its Python `BackgroundModel` from that point — ensuring both sides start from the same initial state.
+
+**Results page** shows every checked value per frame: green = match, red = mismatch.
+
+### Firmware flash detection
+
+On every boot the firmware hashes its own build timestamp and compares against a value stored in NVS (`bw_meta/fw_hash`). On a new build:
+1. Erases the NVS background model (`cc` namespace) so the ESP starts from the same clean priors as the Python validator
+2. Emits `fresh_flash: true` + `fw_build: "..."` in the first frame's meta
+
+This ensures parity validation agrees from frame 1 after every flash.
+
+### Web UI
+
+| Page | URL | Notes |
+|------|-----|-------|
+| Frame gallery | `/` | Main page — cards with badges, grid + list view |
+| Frame detail | `/frame_detail?id=N` | Photo + collapsible meta table; **Tiles button** overlays the 16×12 tile grid on the photo, coloured by deviation from global mean |
+| Battery | `/battery` | Hourly voltage chart + daily table |
+| Validate | `/validate` | Run parity check; green/red per-value result table |
+
+The frame detail **tile overlay** uses the same thresholds as the ESP firmware constants (`CC_DARK_DELTA_MODEL = 35`, `CC_DARK_DELTA_PREV = 20`): red tiles are dark-object candidates, orange is moderately dark, blue is anomalously bright. Values printed on each tile. Toggle with the **Tiles** button or `T` key.
+
+---
+
 ## Platform vision
 
 The current release covers the full capture-filter-upload loop. Planned extensions:

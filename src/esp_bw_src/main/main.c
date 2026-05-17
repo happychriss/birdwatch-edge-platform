@@ -55,8 +55,13 @@
 #include "http_client.h"
 #include "camera_server.h"
 #include "diag.h"
+#include "telemetry.h"
 
 static const char *TAG = "MAIN";
+
+// Compile-time build fingerprint — unique per rebuild (changes __DATE__/__TIME__).
+static const char   s_fw_build[]  = __DATE__ " " __TIME__;
+static bool         s_fresh_flash = false;   // set once in app_main when new firmware detected
 
 static const char *wakeup_to_trigger(uint32_t causes)
 {
@@ -202,7 +207,17 @@ static void run_normal_cycle(void)
         }
         ESP_LOGI(TAG, "upload attempt %d/%d", attempt, BW_HTTP_MAX_RETRIES);
         const char *photo_mode_str = (photo_mode == BW_CAM_MODE_PHOTO_LOWLIGHT) ? "LOWLIGHT" : "NORMAL";
-        mode = bw_http_upload_image(battery_v, trigger, cc.label, cc.stage, photo_mode_str, img, img_len);
+        // Append per-cycle values that are only known after cc assess completes.
+        // Cloud-check values (result, stage, global_mean, ratio, tile_means, …) were
+        // already added inside bw_cc_assess().  These three are added once here.
+        bw_tele_f("battery",    (double)battery_v);
+        bw_tele_s("trigger",    trigger);
+        bw_tele_s("photo_mode", photo_mode_str);
+        if (s_fresh_flash) {
+            bw_tele_b("fresh_flash", true);
+            bw_tele_s("fw_build",   s_fw_build);
+        }
+        mode = bw_http_upload_image(bw_tele_json(), img, img_len);
         if (mode != BW_MODE_ERROR) break;
     }
     free(img);
@@ -267,6 +282,30 @@ void app_main(void)
         ESP_ERROR_CHECK(nvs);
     }
     bw_diag_init();
+
+    // ── Firmware-update detection ────────────────────────────────────────────
+    // FNV-1a hash of the compile-time build string.  On a change (new flash):
+    //   • erase the NVS background model so the ESP starts from the same
+    //     CC_INIT_MEAN / CC_INIT_VAR priors as a fresh Python validator run
+    //   • set s_fresh_flash so the first upload carries fresh_flash=true,
+    //     which the server records as a BwFlashEvent (anchor for the validator)
+    {
+        uint32_t h = 2166136261u;  // FNV offset basis
+        for (const char *p = s_fw_build; *p; p++) { h ^= (uint8_t)*p; h *= 16777619u; }
+        nvs_handle_t hm;
+        if (nvs_open("bw_meta", NVS_READWRITE, &hm) == ESP_OK) {
+            uint32_t stored = 0;
+            nvs_get_u32(hm, "fw_hash", &stored);
+            if (stored != h) {
+                ESP_LOGI(TAG, "new firmware detected (%s) — resetting background model", s_fw_build);
+                bw_cc_reset();
+                nvs_set_u32(hm, "fw_hash", h);
+                nvs_commit(hm);
+                s_fresh_flash = true;
+            }
+            nvs_close(hm);
+        }
+    }
 
     bw_watchdog_start(BW_CYCLE_TIMEOUT_MS);
     run_normal_cycle();

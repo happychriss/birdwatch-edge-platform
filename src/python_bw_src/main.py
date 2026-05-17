@@ -1,14 +1,12 @@
-# This is a sample Python script.
-
-# Press Shift+F10 to execute it or replace it with your code.
-# Press Double Shift to search everywhere for classes, files, tool windows, actions, and settings.
 from flask import Flask, request, jsonify, render_template, redirect
 from datetime import datetime, timedelta
 from collections import defaultdict
+import json
 import os
 import requests
 import time
-from db import BwPhoto, Session
+from db import BwPhoto, BwFrame, Session
+from display_spec import DISPLAY_SPEC, DISPLAY_ORDER
 
 
 birdwatch_http = "http://192.168.1.43"
@@ -19,7 +17,7 @@ app = Flask(__name__, static_folder=os.getenv('JPG_FOLDER_PATH'), static_url_pat
 print(os.getenv('JPG_FOLDER_PATH'))
 
 
-@app.route('/')
+@app.route('/legacy')
 def index():
     # Pagination parameters
     page = request.args.get('page', 1, type=int)
@@ -313,8 +311,214 @@ def battery():
     return render_template('battery.html', hourly=hourly, daily_rows=daily_rows)
 
 
+# ─────────────────────────────── /frame (new telemetry upload) ───────────────
+
+@app.route('/frame', methods=['POST'])
+def process_frame_upload():
+    """Generic upload endpoint for the new schema-less telemetry pipeline.
+
+    Accepts multipart/form-data with:
+        meta  — JSON string produced by bw_tele_json() on the ESP
+        image — JPEG binary
+
+    All telemetry keys land in bw_frames.meta (JSONB).  Only 'result' and
+    'captured_at' are promoted to columns for fast filtering.
+    """
+    global global_status
+    try:
+        image = request.files.get('image')
+        if not image:
+            return jsonify({'message': 'No image in request'}), 400
+
+        filename = datetime.now().strftime('%Y%m%d_%H%M%S') + '.jpg'
+        file_path = os.path.join(os.getenv('JPG_FOLDER_PATH', '/tmp'), filename)
+
+        with open(file_path, 'wb') as f:
+            image_length = int(request.headers.get('Image-Length', 0))
+            content_length = request.content_length
+            chunk_size = 2048
+            total_size = 0
+            wait_count = 0
+            while True:
+                chunk = image.stream.read(chunk_size)
+                if chunk:
+                    f.write(chunk)
+                    total_size += len(chunk)
+                else:
+                    if image_length and total_size >= image_length:
+                        break
+                    elif not image_length and total_size > 0:
+                        break
+                    else:
+                        wait_count += 1
+                        time.sleep(0.5)
+                        if wait_count > 20:
+                            return jsonify({'message': 'Timeout waiting for image data'}), 408
+
+        meta_raw = request.form.get('meta', '{}')
+        try:
+            meta = json.loads(meta_raw)
+        except (json.JSONDecodeError, ValueError):
+            meta = {}
+
+        captured_at_str = meta.get('captured_at')
+        if captured_at_str:
+            try:
+                captured_at = datetime.fromisoformat(captured_at_str.replace('Z', '+00:00'))
+            except ValueError:
+                captured_at = datetime.now()
+        else:
+            captured_at = datetime.now()
+
+        result = meta.get('result')
+
+        frame = BwFrame(
+            captured_at=captured_at,
+            result=result,
+            filename=filename,
+            meta=meta,
+        )
+        session.add(frame)
+
+        session.commit()
+
+        return jsonify({
+            'message': 'frame uploaded',
+            'global_status': global_status,
+        }), 200
+
+    except Exception as e:
+        print(f"Exception in /frame: {e}")
+        return jsonify({'message': 'Server error'}), 500
+
+
+# ─────────────────────────────── /frames gallery ─────────────────────────────
+
+@app.route('/')
+@app.route('/frames')
+def frames_index():
+    page = request.args.get('page', 1, type=int)
+    per_page = 100
+    offset = (page - 1) * per_page
+
+    total = session.query(BwFrame).count()
+    total_pages = max(1, (total + per_page - 1) // per_page)
+    entries = (session.query(BwFrame)
+               .order_by(BwFrame.captured_at.desc())
+               .offset(offset).limit(per_page).all())
+
+    latest = (session.query(BwFrame)
+              .filter(BwFrame.filename.isnot(None))
+              .order_by(BwFrame.captured_at.desc()).first())
+    last_seen = last_seen_detail = None
+    if latest and latest.captured_at:
+        s = int((datetime.now() - latest.captured_at).total_seconds())
+        if s < 60:    last_seen = f"{s}s ago"
+        elif s < 3600: last_seen = f"{s // 60}m {s % 60}s ago"
+        elif s < 86400: last_seen = f"{s // 3600}h {(s % 3600) // 60}m ago"
+        else:          last_seen = f"{s // 86400}d ago"
+        last_seen_detail = latest.captured_at.strftime("%d.%m.%y %H:%M:%S")
+
+    return render_template('frames.html',
+                           status=global_status,
+                           entries=entries,
+                           page=page,
+                           total_pages=total_pages,
+                           last_seen=last_seen,
+                           last_seen_detail=last_seen_detail,
+                           spec=DISPLAY_SPEC,
+                           order=DISPLAY_ORDER)
+
+
+@app.route('/frame_detail')
+def frame_detail():
+    entry_id = request.args.get('id', type=int)
+    if entry_id is None:
+        return redirect('/frames')
+
+    entry = session.query(BwFrame).filter(BwFrame.id == entry_id).first()
+    if not entry:
+        return "Not found", 404
+
+    prev_entry = (session.query(BwFrame)
+                  .filter(BwFrame.id < entry_id)
+                  .order_by(BwFrame.id.desc()).first())
+    next_entry = (session.query(BwFrame)
+                  .filter(BwFrame.id > entry_id)
+                  .order_by(BwFrame.id.asc()).first())
+
+    time_diff = None
+    if prev_entry and entry.captured_at and prev_entry.captured_at:
+        s = (entry.captured_at - prev_entry.captured_at).total_seconds()
+        if s < 60:    time_diff = f"{int(s)}s"
+        elif s < 3600: time_diff = f"{int(s / 60)}m {int(s % 60)}s"
+        else:          time_diff = f"{int(s / 3600)}h {int((s % 3600) / 60)}m"
+
+    return render_template('frame_detail.html',
+                           entry=entry,
+                           prev_id=prev_entry.id if prev_entry else None,
+                           next_id=next_entry.id if next_entry else None,
+                           time_diff=time_diff,
+                           spec=DISPLAY_SPEC,
+                           order=DISPLAY_ORDER)
+
+
+# ─────────────────────────────── /validate ───────────────────────────────────
+
+_validate_results: list = []   # last run results held in-process (dev/admin use)
+_validate_running: bool = False
+
+
+@app.route('/validate/run', methods=['POST'])
+def validate_run():
+    """Run validate.py via its own venv (cloud-check has numpy/Pillow/scipy).
+
+    validate.py is called as a subprocess; results are returned as JSON on stdout.
+    Runs in a background thread so the HTTP response returns immediately.
+    """
+    global _validate_results, _validate_running
+    if _validate_running:
+        return jsonify({'status': 'already running'}), 409
+
+    import threading
+    import subprocess
+
+    def _run():
+        global _validate_results, _validate_running
+        _validate_running = True
+        try:
+            here = os.path.dirname(os.path.abspath(__file__))
+            cc_dir = os.path.join(here, '..', 'cloud-check')
+            # Use the cloud-check venv python which has numpy/Pillow/scipy
+            venv_py = os.path.join(cc_dir, '.venv', 'bin', 'python')
+            if not os.path.exists(venv_py):
+                venv_py = 'python3'   # fallback: hope numpy is available
+            validate_script = os.path.join(cc_dir, 'validate.py')
+            config_path = os.path.join(cc_dir, 'validate_config.json')
+            proc = subprocess.run(
+                [venv_py, validate_script, config_path, '--json'],
+                capture_output=True, text=True, timeout=120,
+            )
+            if proc.returncode != 0:
+                _validate_results = [{'error': proc.stderr.strip() or 'validate.py exited with error'}]
+            else:
+                _validate_results = json.loads(proc.stdout)
+        except Exception as exc:
+            _validate_results = [{'error': str(exc)}]
+        finally:
+            _validate_running = False
+
+    threading.Thread(target=_run, daemon=True).start()
+    return jsonify({'status': 'started'}), 202
+
+
+@app.route('/validate')
+def validate_view():
+    return render_template('validate.html',
+                           results=_validate_results,
+                           running=_validate_running)
+
+
 if __name__ == '__main__':
     app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024
     app.run(host='0.0.0.0', port=8000)
-
-# See PyCharm help at https://www.jetbrains.com/help/pycharm/

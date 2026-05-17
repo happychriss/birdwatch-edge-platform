@@ -25,3 +25,8 @@ typedef struct {
 // On camera error the result is {label="process", stage="CAM_ERR"} so
 // the upload always proceeds — misidentification beats a missed bird.
 esp_err_t bw_cc_assess(bw_cc_result_t *out);
+
+// Erase the NVS background model (all cc_* keys).  Call on firmware update
+// so the first run after flash starts from the same clean prior as the
+// Python validator — enabling exact parity from frame 1.
+void bw_cc_reset(void);

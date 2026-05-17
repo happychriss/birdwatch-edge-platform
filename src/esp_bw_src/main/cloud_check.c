@@ -21,6 +21,7 @@
 #include "cloud_check.h"
 #include "camera.h"
 #include "debug.h"
+#include "telemetry.h"
 
 #include <string.h>
 #include <math.h>
@@ -207,12 +208,17 @@ static void run_pipeline(const uint8_t *means, bw_cc_result_t *out)
     for (int i = 0; i < CC_NUM_TILES; i++) gm_sum += means[i];
     uint32_t global_mean = gm_sum / CC_NUM_TILES;
     out->global_mean = (uint8_t)global_mean;
+    bw_tele_i("global_mean", (long)global_mean);
+    bw_tele_arr_u8("tile_means", means, CC_NUM_TILES);
+
     if (global_mean < CC_NIGHT_THRESHOLD) {
         update_model(means);
         save_model();
         save_prev(means);
         strcpy(out->label, "process");
         strcpy(out->stage, "NIGHT");
+        bw_tele_s("result", "process");
+        bw_tele_s("stage",  "NIGHT");
         ESP_LOGI(TAG, "NIGHT (global_mean=%" PRIu32 " < %d) → process", global_mean, CC_NIGHT_THRESHOLD);
         return;
     }
@@ -226,12 +232,15 @@ static void run_pipeline(const uint8_t *means, bw_cc_result_t *out)
 
     // WARMUP — model not yet bootstrapped
     bool warmup = (s_frames_seen < CC_WARMUP_FRAMES);
+    bw_tele_b("warmup", warmup);
     if (warmup) {
         update_model(means);
         save_model();
         save_prev(means);
         strcpy(out->label, "process");
         strcpy(out->stage, "WARMUP");
+        bw_tele_s("result", "process");
+        bw_tele_s("stage",  "WARMUP");
         ESP_LOGI(TAG, "WARMUP (%u frames seen) → process", s_frames_seen);
         return;
     }
@@ -263,6 +272,11 @@ static void run_pipeline(const uint8_t *means, bw_cc_result_t *out)
     }
 
     float ratio = (float)anomalous / CC_NUM_TILES;
+    bw_tele_i("anomalous",      (long)anomalous);
+    bw_tele_f("ratio",          (double)ratio);
+    bw_tele_i("dark_tiles",     (long)dark_model_tiles);
+    bw_tele_i("new_dark_tiles", (long)new_dark_tiles);
+    bw_tele_b("prev_valid",     s_prev_valid);
 
     // dark_obj_condition matches Python exactly:
     //   dark_tiles >= 1 AND (no temporal OR new_dark_tiles >= 1)
@@ -279,6 +293,8 @@ static void run_pipeline(const uint8_t *means, bw_cc_result_t *out)
         save_prev(means);
         strcpy(out->label, "process");
         strcpy(out->stage, "DARK_OBJ");
+        bw_tele_s("result", "process");
+        bw_tele_s("stage",  "DARK_OBJ");
         ESP_LOGI(TAG, "DARK_OBJ (dark_model=%d new_dark=%d ratio=%.0f%%) → process",
                  dark_model_tiles, new_dark_tiles, ratio * 100.0f);
         return;
@@ -297,6 +313,8 @@ static void run_pipeline(const uint8_t *means, bw_cc_result_t *out)
         save_prev(means);
         strcpy(out->label, "process");
         strcpy(out->stage, "INDIRECT_LIGHT");
+        bw_tele_s("result", "process");
+        bw_tele_s("stage",  "INDIRECT_LIGHT");
         ESP_LOGI(TAG, "INDIRECT_LIGHT (global_mean=%" PRIu32 " < %d) → process",
                  global_mean, CC_INDIRECT_THRESHOLD);
         return;
@@ -331,6 +349,8 @@ static void run_pipeline(const uint8_t *means, bw_cc_result_t *out)
                 save_prev(means);
                 strcpy(out->label, "process");
                 strcpy(out->stage, "SPOT_CHANGE");
+                bw_tele_s("result", "process");
+                bw_tele_s("stage",  "SPOT_CHANGE");
                 ESP_LOGI(TAG, "SPOT_CHANGE (n_spot=%d g_delta=%.1f) → process",
                          n_spot_dark, g_delta);
                 return;
@@ -345,6 +365,8 @@ static void run_pipeline(const uint8_t *means, bw_cc_result_t *out)
         save_prev(means);
         strcpy(out->label, "clouds");
         strcpy(out->stage, "QUIET");
+        bw_tele_s("result", "clouds");
+        bw_tele_s("stage",  "QUIET");
         ESP_LOGI(TAG, "QUIET (ratio=%.0f%%) → clouds (suppress)", ratio * 100.0f);
         return;
     }
@@ -358,6 +380,8 @@ static void run_pipeline(const uint8_t *means, bw_cc_result_t *out)
         save_prev(means);
         strcpy(out->label, "process");
         strcpy(out->stage, "SCENE_DRIFT");
+        bw_tele_s("result", "process");
+        bw_tele_s("stage",  "SCENE_DRIFT");
         ESP_LOGI(TAG, "SCENE_DRIFT (dark_model=%d new_dark=0) → process + warmup reset",
                  dark_model_tiles);
         return;
@@ -367,21 +391,42 @@ static void run_pipeline(const uint8_t *means, bw_cc_result_t *out)
     save_prev(means);
     strcpy(out->label, "process");
     strcpy(out->stage, "AMBIGUOUS");
+    bw_tele_s("result", "process");
+    bw_tele_s("stage",  "AMBIGUOUS");
     ESP_LOGI(TAG, "AMBIGUOUS (ratio=%.0f%% dark_model=%d new_dark=%d) → process",
              ratio * 100.0f, dark_model_tiles, new_dark_tiles);
 }
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
+void bw_cc_reset(void)
+{
+    nvs_handle_t h;
+    if (nvs_open(NVS_NS, NVS_READWRITE, &h) != ESP_OK) {
+        ESP_LOGW(TAG, "cc_reset: nvs_open failed");
+        return;
+    }
+    nvs_erase_key(h, KEY_MEAN);
+    nvs_erase_key(h, KEY_VAR);
+    nvs_erase_key(h, KEY_PREV);
+    nvs_erase_key(h, KEY_SEEN);
+    nvs_commit(h);
+    nvs_close(h);
+    ESP_LOGI(TAG, "background model cleared (firmware update)");
+}
+
 esp_err_t bw_cc_assess(bw_cc_result_t *out)
 {
     memset(out, 0, sizeof(*out));
+    bw_tele_reset();   // fresh telemetry object for this capture cycle
 
     esp_err_t err = bw_cam_init(BW_CAM_MODE_LIGHTCHECK);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "camera init failed: %s", esp_err_to_name(err));
         strcpy(out->label, "process");
         strcpy(out->stage, "CAM_ERR");
+        bw_tele_s("result", "process");
+        bw_tele_s("stage",  "CAM_ERR");
         return err;
     }
 
@@ -392,6 +437,8 @@ esp_err_t bw_cc_assess(bw_cc_result_t *out)
         bw_cam_deinit();
         strcpy(out->label, "process");
         strcpy(out->stage, "CAM_ERR");
+        bw_tele_s("result", "process");
+        bw_tele_s("stage",  "CAM_ERR");
         return ESP_FAIL;
     }
 

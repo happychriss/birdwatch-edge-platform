@@ -6,6 +6,7 @@ idf_component_register(
         "adc_sense.c"
         "wifi_sta.c"
         "camera.c"
+        "telemetry.c"
         "cloud_check.c"
         "http_client.c"
         "camera_server.c"

@@ -25,14 +25,14 @@
 
 // ─── Server endpoint ─────────────────────────────────────────────────────────
 // TARGET_ZO -> use second WiFi/server pair, otherwise primary.
-#define BW_TARGET_ZO 1
+#define BW_TARGET_ZO 0
 #if BW_TARGET_ZO
   #define BW_SERVER_HOST "192.168.1.110"
 #else
   #define BW_SERVER_HOST "192.168.1.100"
 #endif
 #define BW_SERVER_BASE "http://" BW_SERVER_HOST ":8000"
-#define BW_UPLOAD_URL  BW_SERVER_BASE "/upload"
+#define BW_UPLOAD_URL  BW_SERVER_BASE "/frame"
 #define BW_STATUS_URL  BW_SERVER_BASE "/status"
 // ─── HTTP client retry ──────────────────────────────────────────────────────
 #define BW_HTTP_TIMEOUT_MS    20000

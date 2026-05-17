@@ -1,0 +1,238 @@
+{% from '_meta_render.html' import render_badges %}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BirdWatch</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: #eef2f7; color: #2c3e50; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; font-size: 14px; }
+
+  /* ── Header ── */
+  header {
+    background: linear-gradient(135deg, #1a6fa8 0%, #2980b9 100%);
+    color: #fff; padding: 12px 18px;
+    display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+  }
+  header h1 { font-size: 18px; font-weight: 700; letter-spacing: 0.3px; }
+  .nav-link {
+    color: rgba(255,255,255,0.9); text-decoration: none;
+    font-size: 14px; font-weight: 600;
+    padding: 6px 12px; border-radius: 6px;
+    background: rgba(255,255,255,0.12);
+    transition: background 0.15s;
+    white-space: nowrap;
+  }
+  .nav-link:hover { background: rgba(255,255,255,0.22); color: #fff; }
+  .header-mode { margin-left: auto; font-size: 13px; opacity: 0.8; white-space: nowrap; }
+
+  /* ── Last-seen banner ── */
+  .last-seen-bar {
+    background: #1a6fa8; color: #fff;
+    text-align: center; padding: 10px 18px 12px;
+    border-bottom: 1px solid rgba(0,0,0,0.08);
+  }
+  .last-seen-bar .ls-label  { font-size: 11px; opacity: 0.75; text-transform: uppercase; letter-spacing: 0.6px; }
+  .last-seen-bar .ls-time   { font-size: 24px; font-weight: 700; margin-top: 1px; }
+  .last-seen-bar .ls-detail { font-size: 11px; opacity: 0.7; margin-top: 2px; }
+  .last-seen-bar.stale      { background: #7c6200; }
+
+  /* ── Controls bar ── */
+  .controls {
+    background: #fff; border-bottom: 1px solid #dce8f0;
+    padding: 10px 18px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  }
+  .btn {
+    padding: 8px 16px; border: 1px solid #b0c8e0; border-radius: 6px;
+    cursor: pointer; font-size: 14px; font-weight: 600; text-decoration: none;
+    background: #f0f6fc; color: #1a6fa8; transition: background 0.15s;
+    min-height: 40px; display: inline-flex; align-items: center;
+  }
+  .btn:hover { background: #daeaf7; }
+  .btn-pir { background: #e8f5e9; border-color: #a5d6a7; color: #2e7d32; }
+  .btn-pir:hover { background: #c8e6c9; }
+  .view-toggle { margin-left: auto; display: flex; gap: 6px; }
+  .view-btn {
+    padding: 8px 12px; border: 1px solid #b0c8e0; border-radius: 6px;
+    cursor: pointer; background: #f0f6fc; color: #1a6fa8; font-size: 16px;
+    min-height: 40px; display: inline-flex; align-items: center;
+  }
+  .view-btn.active { background: #1a6fa8; color: #fff; border-color: #1a6fa8; }
+
+  /* ── Card grid ── */
+  .grid { display: flex; flex-wrap: wrap; gap: 10px; padding: 14px 18px; }
+
+  .card {
+    width: 200px; border-radius: 7px; overflow: hidden;
+    background: #fff; position: relative; cursor: pointer;
+    box-shadow: 0 1px 4px rgba(41,128,185,0.10);
+    border-top: 8px solid #b0c8e0;
+    transition: box-shadow 0.15s, transform 0.1s;
+  }
+  .card:hover { box-shadow: 0 4px 14px rgba(41,128,185,0.18); transform: translateY(-2px); }
+  .card.result-clouds   { border-top-color: #2980b9; }
+  .card.result-process  { border-top-color: #27ae60; }
+  .card.result-unknown  { border-top-color: #aab; }
+
+  .card img { width: 100%; display: block; }
+  .no-photo { width: 100%; height: 70px; background: #eef2f7; display: flex;
+              align-items: center; justify-content: center; color: #aab; font-size: 11px; }
+
+  .info { padding: 7px 9px; font-size: 11px; line-height: 1.7; }
+  .date-text { color: #556; font-size: 10px; }
+  .row { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; margin: 2px 0; }
+
+  .badge {
+    padding: 1px 7px; border-radius: 10px; font-size: 10px;
+    font-weight: 700; letter-spacing: 0.3px; text-transform: uppercase;
+  }
+
+  /* ── List view ── */
+  .grid.list-view { flex-direction: column; gap: 4px; }
+  .grid.list-view .card {
+    width: 100%; display: flex; flex-direction: row;
+    border-top: none; border-left: 8px solid #b0c8e0; border-radius: 5px;
+  }
+  .grid.list-view .card.result-clouds   { border-left-color: #2980b9; }
+  .grid.list-view .card.result-process  { border-left-color: #27ae60; }
+  .grid.list-view .card.result-unknown  { border-left-color: #aab; }
+  .grid.list-view .card img      { width: 72px; height: 54px; object-fit: cover; flex-shrink: 0; }
+  .grid.list-view .no-photo      { width: 72px; height: 54px; flex-shrink: 0; }
+  .grid.list-view .info          { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 5px 10px; }
+  .grid.list-view .date-text     { min-width: 110px; }
+
+  /* ── Lightbox ── */
+  #lightbox {
+    display: none; position: fixed; inset: 0;
+    background: rgba(20,40,60,0.82); z-index: 999;
+    align-items: center; justify-content: center;
+  }
+  #lightbox.open { display: flex; }
+  #lightbox img  { max-width: 95vw; max-height: 92vh; border-radius: 6px;
+                   box-shadow: 0 8px 40px rgba(0,0,0,0.5); }
+  #lightbox-close {
+    position: absolute; top: 14px; right: 18px; font-size: 32px;
+    color: #fff; cursor: pointer; background: none; border: none; opacity: 0.85;
+    padding: 8px;
+  }
+
+  /* ── Pagination ── */
+  .pagination {
+    padding: 16px 18px; display: flex; gap: 10px;
+    align-items: center; justify-content: center; flex-wrap: wrap;
+  }
+  .pagination a {
+    padding: 8px 18px; background: #fff; color: #1a6fa8;
+    text-decoration: none; border-radius: 6px; font-size: 14px;
+    border: 1px solid #b0c8e0; min-height: 40px; display: inline-flex; align-items: center;
+  }
+  .pagination a:hover { background: #daeaf7; }
+  .pagination .current { color: #556; font-size: 13px; }
+</style>
+</head>
+<body>
+
+<!-- ── Header ── -->
+<header>
+  <h1>🐦 BirdWatch</h1>
+  <a class="nav-link" href="/battery">Battery</a>
+  <a class="nav-link" href="/validate">Validate</a>
+  <span class="header-mode">{{ status }} &nbsp;·&nbsp; <span id="countdown">5:00</span></span>
+</header>
+
+<!-- ── Last-seen banner ── -->
+{% if last_seen %}
+  {% set is_stale = 'h' in last_seen or 'd' in last_seen %}
+<div class="last-seen-bar {{ 'stale' if is_stale }}" title="{{ last_seen_detail }}">
+  <div class="ls-label">last frame</div>
+  <div class="ls-time">{{ last_seen }}</div>
+  {% if last_seen_detail %}<div class="ls-detail">{{ last_seen_detail }}</div>{% endif %}
+</div>
+{% else %}
+<div class="last-seen-bar">
+  <div class="ls-label">last frame</div>
+  <div class="ls-time">—</div>
+</div>
+{% endif %}
+
+<!-- ── Controls ── -->
+<div class="controls">
+  <button class="btn btn-pir" onclick="location.href='/set_status?status=PIR_Sensor'">PIR Sensor</button>
+  <div class="view-toggle">
+    <button class="view-btn active" id="btn-grid" onclick="setView('grid')" title="Grid view">⊞</button>
+    <button class="view-btn"        id="btn-list" onclick="setView('list')" title="List view">☰</button>
+  </div>
+</div>
+
+<!-- ── Photo grid ── -->
+<div class="grid" id="photo-grid">
+{% for entry in entries %}
+  {% set meta = entry.meta or {} %}
+  {% set result = meta.get('result', 'unknown') %}
+  {% set card_cls = 'result-' + result if result in ('clouds', 'process') else 'result-unknown' %}
+
+  <div class="card {{ card_cls }}"
+       ondblclick="openPhoto('{{ url_for('static', filename=entry.filename) if entry.filename else '' }}')">
+    {% if entry.filename %}
+      <a href="/frame_detail?id={{ entry.id }}">
+        <img src="{{ url_for('static', filename=entry.filename) }}" loading="lazy" alt="frame">
+      </a>
+    {% else %}
+      <div class="no-photo">no image</div>
+    {% endif %}
+    <div class="info">
+      <div class="date-text">{{ entry.captured_at.strftime("%d.%m.%y %H:%M") if entry.captured_at else '—' }}</div>
+      <div class="row">
+        {{ render_badges(meta, spec, order) }}
+      </div>
+    </div>
+  </div>
+{% endfor %}
+</div>
+
+<!-- ── Pagination ── -->
+<div class="pagination">
+  {% if page > 1 %}<a href="/?page={{ page - 1 }}">← prev</a>{% endif %}
+  <span class="current">page {{ page }} of {{ total_pages }}</span>
+  {% if page < total_pages %}<a href="/?page={{ page + 1 }}">next →</a>{% endif %}
+</div>
+
+<!-- ── Lightbox ── -->
+<div id="lightbox">
+  <button id="lightbox-close" onclick="closePhoto()">✕</button>
+  <img id="lightbox-img" src="" alt="">
+</div>
+
+<script>
+function setView(v) {
+  const grid = document.getElementById('photo-grid');
+  const bg = document.getElementById('btn-grid'), bl = document.getElementById('btn-list');
+  if (v === 'list') { grid.classList.add('list-view'); bl.classList.add('active'); bg.classList.remove('active'); }
+  else              { grid.classList.remove('list-view'); bg.classList.add('active'); bl.classList.remove('active'); }
+  localStorage.setItem('bw_view', v);
+}
+(function(){ const s = localStorage.getItem('bw_view'); if (s === 'list') setView('list'); })();
+
+function openPhoto(url) {
+  if (!url) return;
+  document.getElementById('lightbox-img').src = url;
+  document.getElementById('lightbox').classList.add('open');
+}
+function closePhoto() { document.getElementById('lightbox').classList.remove('open'); }
+document.getElementById('lightbox').addEventListener('click', function(e){ if (e.target===this) closePhoto(); });
+document.addEventListener('keydown', function(e){ if (e.key==='Escape') closePhoto(); });
+
+let refreshSecs = 300;
+const countdownEl = document.getElementById('countdown');
+const ticker = setInterval(function() {
+  if (document.getElementById('lightbox').classList.contains('open')) return;
+  refreshSecs--;
+  if (refreshSecs <= 0) { clearInterval(ticker); location.reload(); return; }
+  const m = Math.floor(refreshSecs/60), s = refreshSecs%60;
+  countdownEl.textContent = m+':'+String(s).padStart(2,'0');
+}, 1000);
+</script>
+
+</body>
+</html>
