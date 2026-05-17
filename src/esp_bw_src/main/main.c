@@ -107,12 +107,15 @@ static void run_normal_cycle(void)
     // ── Capture JPEG ───────────────────────────────────────────────────────
     // Pick photo exposure mode from the ambient brightness the cloud-check
     // frame already measured — no extra camera cycle needed.
-    bw_cam_mode_t photo_mode = (cc.global_mean < BW_LOWLIGHT_PHOTO_THRESHOLD)
-                               ? BW_CAM_MODE_PHOTO_LOWLIGHT
-                               : BW_CAM_MODE_PHOTO;
-    ESP_LOGI(TAG, "photo mode: %s (cc.global_mean=%u threshold=%d)",
-             photo_mode == BW_CAM_MODE_PHOTO_LOWLIGHT ? "LOWLIGHT" : "NORMAL",
-             cc.global_mean, BW_LOWLIGHT_PHOTO_THRESHOLD);
+    bw_cam_mode_t photo_mode;
+    if      (cc.global_mean >= BW_BRIGHT_PHOTO_THRESHOLD)   photo_mode = BW_CAM_MODE_PHOTO_BRIGHT;
+    else if (cc.global_mean >= BW_LOWLIGHT_PHOTO_THRESHOLD) photo_mode = BW_CAM_MODE_PHOTO;
+    else                                                     photo_mode = BW_CAM_MODE_PHOTO_LOWLIGHT;
+    const char *photo_mode_str = (photo_mode == BW_CAM_MODE_PHOTO_BRIGHT)   ? "BRIGHT"   :
+                                 (photo_mode == BW_CAM_MODE_PHOTO_LOWLIGHT) ? "LOWLIGHT" : "NORMAL";
+    ESP_LOGI(TAG, "photo mode: %s (global_mean=%u bright>=%d normal>=%d)",
+             photo_mode_str, cc.global_mean,
+             BW_BRIGHT_PHOTO_THRESHOLD, BW_LOWLIGHT_PHOTO_THRESHOLD);
 
     if (bw_cam_init(photo_mode) != ESP_OK) {
         ESP_LOGE(TAG, "camera init failed");
@@ -206,7 +209,7 @@ static void run_normal_cycle(void)
             ESP_LOGI(TAG, "WiFi back up");
         }
         ESP_LOGI(TAG, "upload attempt %d/%d", attempt, BW_HTTP_MAX_RETRIES);
-        const char *photo_mode_str = (photo_mode == BW_CAM_MODE_PHOTO_LOWLIGHT) ? "LOWLIGHT" : "NORMAL";
+        // photo_mode_str already set above
         // Append per-cycle values that are only known after cc assess completes.
         // Cloud-check values (result, stage, global_mean, ratio, tile_means, …) were
         // already added inside bw_cc_assess().  These three are added once here.

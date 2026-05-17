@@ -67,11 +67,12 @@
 #define BW_COOLDOWN_SLEEP_US    3000000ULL  // 3 s
 
 // ─── Camera light-mode switching ───────────────────────────────────────────
-// global_mean from the cloud-check QQVGA frame (0-255).  Below this value
-// the firmware switches from PHOTO to PHOTO_LOWLIGHT (longer AEC integration,
-// 32x gain ceiling, no AWB gain push, +2 EV) to improve early-morning and
-// late-afternoon visibility without the green cast.  Tune based on field data.
-#define BW_LOWLIGHT_PHOTO_THRESHOLD  80
+// global_mean from the cloud-check QQVGA frame (0-255).  Three modes:
+//   BRIGHT    global_mean ≥ BW_BRIGHT_THRESHOLD  : full sun, protect sky from overexposure
+//   NORMAL    BW_LOWLIGHT_THRESHOLD ≤ mean < BW_BRIGHT_THRESHOLD : typical daylight / overcast
+//   LOWLIGHT  global_mean < BW_LOWLIGHT_THRESHOLD : dusk / dawn / dim interior
+#define BW_BRIGHT_PHOTO_THRESHOLD    160
+#define BW_LOWLIGHT_PHOTO_THRESHOLD   80
 
 // ─── Global mode codes (matches python server reply field) ─────────────────
 typedef enum {

@@ -31,6 +31,7 @@ static bool s_inited;
 
 static void apply_photo_settings(sensor_t *s)
 {
+    // NORMAL mode: overcast / shaded indoor-looking-out / typical daylight
     s->set_brightness(s, 1);
     s->set_contrast(s, 1);
     s->set_saturation(s, 0);
@@ -48,7 +49,7 @@ static void apply_photo_settings(sensor_t *s)
 
     s->set_gain_ctrl(s, 1);
     s->set_agc_gain(s, 0);
-    s->set_gainceiling(s, (gainceiling_t)4);
+    s->set_gainceiling(s, (gainceiling_t)4);  // 32x
 
     s->set_bpc(s, 0);
     s->set_wpc(s, 1);
@@ -59,7 +60,41 @@ static void apply_photo_settings(sensor_t *s)
     s->set_vflip(s, 0);
     s->set_dcw(s, 0);
     s->set_colorbar(s, 0);
-    ESP_LOGI(TAG, "applied PHOTO sensor settings");
+    ESP_LOGI(TAG, "applied PHOTO (NORMAL) sensor settings");
+}
+
+static void apply_bright_photo_settings(sensor_t *s)
+{
+    // BRIGHT mode: full sun — pull back EV to protect sky, Sunny WB, lower gain
+    s->set_brightness(s, 0);
+    s->set_contrast(s, 2);      // higher contrast: better separation of sky vs foreground
+    s->set_saturation(s, -1);   // reduce green Bayer bias amplified by bright light
+    s->set_quality(s, 10);
+    s->set_special_effect(s, 0);
+
+    s->set_whitebal(s, 1);
+    s->set_awb_gain(s, 1);
+    s->set_wb_mode(s, 1);       // Sunny (5500K): best for direct outdoor daylight
+
+    s->set_exposure_ctrl(s, 1);
+    s->set_aec2(s, 0);
+    s->set_ae_level(s, -1);     // -1 EV: prevent sky overexposure
+    s->set_aec_value(s, 200);
+
+    s->set_gain_ctrl(s, 1);
+    s->set_agc_gain(s, 0);
+    s->set_gainceiling(s, (gainceiling_t)2);  // 8x: plenty in full sun, less noise
+
+    s->set_bpc(s, 1);
+    s->set_wpc(s, 1);
+    s->set_raw_gma(s, 1);
+    s->set_lenc(s, 1);
+
+    s->set_hmirror(s, 0);
+    s->set_vflip(s, 0);
+    s->set_dcw(s, 0);
+    s->set_colorbar(s, 0);
+    ESP_LOGI(TAG, "applied PHOTO_BRIGHT sensor settings");
 }
 
 static void apply_lowlight_photo_settings(sensor_t *s)
@@ -134,7 +169,7 @@ esp_err_t bw_cam_init(bw_cam_mode_t mode)
         return ESP_ERR_INVALID_STATE;
     }
 
-    bool is_photo = (mode == BW_CAM_MODE_PHOTO || mode == BW_CAM_MODE_PHOTO_LOWLIGHT);
+    bool is_photo = (mode == BW_CAM_MODE_PHOTO || mode == BW_CAM_MODE_PHOTO_LOWLIGHT || mode == BW_CAM_MODE_PHOTO_BRIGHT);
     pixformat_t fmt   = is_photo ? PIXFORMAT_JPEG      : PIXFORMAT_GRAYSCALE;
     // SXGA (1280x960): 2.56x more pixels than SVGA, comfortable memory budget.
     // Driver allocates fb_size = w*h/5 per buffer in PSRAM (JPEG AUTO mode):
@@ -189,6 +224,7 @@ esp_err_t bw_cam_init(bw_cam_mode_t mode)
              s->id.PID, s->id.VER, s->id.MIDH, s->id.MIDL);
 
     if (mode == BW_CAM_MODE_PHOTO)                apply_photo_settings(s);
+    else if (mode == BW_CAM_MODE_PHOTO_BRIGHT)   apply_bright_photo_settings(s);
     else if (mode == BW_CAM_MODE_PHOTO_LOWLIGHT) apply_lowlight_photo_settings(s);
     else                                          apply_lightcheck_settings(s);
 

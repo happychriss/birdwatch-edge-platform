@@ -48,10 +48,13 @@ DISPLAY_SPEC: dict = {
         "warn_below": 3.6,   # adds red tint when value < threshold
     },
     "photo_mode": {
-        "type": "badge_if",
-        "match_value": "LOWLIGHT",
-        "color": "#f39c12",
-        "text_color": "#fff",
+        "type": "badge",
+        "colors": {
+            "BRIGHT":   ("#fff3cd", "#856404"),
+            "NORMAL":   ("#d5f5e3", "#1e8449"),
+            "LOWLIGHT": ("#fdebd0", "#d35400"),
+        },
+        "fallback": ("#eee", "#778"),
     },
     "trigger": {
         "type": "hide_values",
