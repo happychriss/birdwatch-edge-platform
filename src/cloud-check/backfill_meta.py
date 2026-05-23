@@ -129,10 +129,10 @@ def run_backfill(dry_run: bool = False) -> None:
         )
 
         hour = frame.captured_at.hour if frame.captured_at else 12
-        bucket = bg_model._idx(hour)
+        bucket = bg_model.bucket_for(tile_mean)
         bg_prev = prev_tile_mean_by_bucket.get(bucket)
-        was_warmup = bg_model.warmup_remaining(hour) > 0
-        bg_model.observe(hour)
+        was_warmup = bg_model.warmup_remaining(bucket) > 0
+        bg_model.observe(bucket)
 
         # Snapshot model means BEFORE any update — what z-scores were computed from
         model_means_flat: list[int] = bg_model.mean[bucket].flatten().round().astype(int).tolist()
@@ -146,9 +146,9 @@ def run_backfill(dry_run: bool = False) -> None:
             result = bg_pred.label
             stage = bg_pred.trigger
             if was_warmup or bg_pred.label == 'clouds' or bg_pred.trigger in ('SCENE_DRIFT', 'NIGHT'):
-                bg_model.update(hour, tile_mean)
+                bg_model.update(bucket, tile_mean)
             if bg_pred.trigger == 'SCENE_DRIFT':
-                bg_model.reset_warmup(hour)
+                bg_model.reset_warmup(bucket)
             prev_tile_mean_by_bucket[bucket] = tile_mean
 
         # Advance burst state for next iteration
@@ -179,7 +179,8 @@ def run_backfill(dry_run: bool = False) -> None:
             new_fields['ratio']           = round(float(bg_pred.anomaly_ratio), 3)
             new_fields['new_dark_tiles']  = int(bg_pred.new_dark_tiles)
             new_fields['dark_anomalous']  = int(bg_pred.anomaly_mask.sum())
-            new_fields['dark_tiles']      = int(getattr(bg_pred, 'dark_model_tiles', 0))
+            new_fields['dark_tiles']      = int(bg_pred.dark_tiles)
+            new_fields['scene_bucket']    = int(bg_pred.scene_bucket)
         else:
             # Burst-suppressed: no bg model output, zero out the bg-only stats
             new_fields['ratio']          = 0.0

@@ -140,7 +140,7 @@ def assess():
 
         if burst.label == "suppress":
             # Also advance background-model prev so temporal check stays valid
-            bucket = _model._idx(hour)
+            bucket = _model.bucket_for(feats["mean"])
             _prev_tile_mean[bucket] = feats["mean"]
             _assess_count += 1
             return jsonify(
@@ -155,15 +155,15 @@ def assess():
             )
 
         # ── Background-model pipeline ─────────────────────────────────────────
-        bucket = _model._idx(hour)
+        bucket = _model.bucket_for(feats["mean"])
         prev = _prev_tile_mean.get(bucket)
-        was_warmup = _model.warmup_remaining(hour) > 0
-        _model.observe(hour)
+        was_warmup = _model.warmup_remaining(bucket) > 0
+        _model.observe(bucket)
         result = classify(feats["mean"], hour, _model, _cfg, prev_tile_mean=prev)
         if was_warmup or result.label == "clouds" or result.trigger in ("SCENE_DRIFT", "NIGHT", "INDIRECT_LIGHT"):
-            _model.update(hour, feats["mean"])
+            _model.update(bucket, feats["mean"])
         if result.trigger == "SCENE_DRIFT":
-            _model.reset_warmup(hour)
+            _model.reset_warmup(bucket)
         _prev_tile_mean[bucket] = feats["mean"]
         _assess_count += 1
 
@@ -195,14 +195,11 @@ def serve_image(rel: str):
 def model_status():
     with _model_lock:
         bucket_info = []
-        for b in range(_cfg.num_time_buckets):
-            start_h = _cfg.day_start_hour + b * ((_cfg.day_end_hour - _cfg.day_start_hour) // _cfg.num_time_buckets)
-            end_h = start_h + ((_cfg.day_end_hour - _cfg.day_start_hour) // _cfg.num_time_buckets)
+        for b in range(_model.mean.shape[0]):
             bucket_info.append({
                 "bucket": b,
-                "hours": f"{start_h:02d}–{end_h:02d}",
                 "observations": int(_model.bucket_seen[b]),
-                "warmup_remaining": _model.warmup_remaining(start_h),
+                "warmup_remaining": _model.warmup_remaining(b),
                 "tile_mean_avg": round(float(_model.mean[b].mean()), 1),
                 "tile_var_avg": round(float(_model.var[b].mean()), 1),
             })

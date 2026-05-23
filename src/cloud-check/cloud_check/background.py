@@ -4,30 +4,46 @@ import numpy as np
 
 from .config import Config
 from .dataset import time_bucket
-class BackgroundModel:
-    """Per-tile running statistics, bucketed by day-period.
+from . import scene_buckets
 
-    Layout mirrors the planned on-device NVS blob:
+
+class BackgroundModel:
+    """Per-tile running statistics, bucketed by lighting scenario.
+
+    Layout mirrors the on-device NVS blob:
         mean   : (num_buckets, grid_h, grid_w) float32
         var    : (num_buckets, grid_h, grid_w) float32
         count  : (num_buckets, grid_h, grid_w) uint16
         bucket_seen : (num_buckets,) uint16  — total frames observed in this bucket
 
-    Storage for 4 buckets × cfg.grid_h × cfg.grid_w tiles:
-        QQVGA (16×12=192 tiles): 4 × 192 × 10 bytes ≈ 7 700 bytes
-        QVGA  (32×24=768 tiles): 4 × 768 × 10 bytes ≈ 30 700 bytes
+    Bucket assignment uses nearest-centroid on the full tile_mean vector.
+    The K=4 centroids encode 4 canonical lighting scenarios computed offline.
+    Call bucket_for(tile_mean) to get the bucket index before calling other methods.
     """
 
     def __init__(self, cfg: Config | None = None) -> None:
         self.cfg = cfg or Config()
-        n = self.cfg.num_time_buckets
+        n = self.cfg.num_time_buckets   # still controls array shape (default 4 = K)
         shape = (n, self.cfg.grid_h, self.cfg.grid_w)
         self.mean = np.full(shape, 128.0, dtype=np.float32)
         self.var = np.full(shape, self.cfg.init_var, dtype=np.float32)
         self.count = np.zeros(shape, dtype=np.uint16)
         self.bucket_seen = np.zeros(n, dtype=np.uint16)
 
+    # ── Bucket selection ──────────────────────────────────────────────────────
+
+    def bucket_for(self, tile_mean: np.ndarray) -> int:
+        """Return the scene-lighting bucket index (0-indexed) for a frame.
+
+        Uses nearest-centroid on the full 300-element tile_mean vector.
+        Falls back to time-bucket 0 if centroids are unavailable (e.g. K≠4).
+        """
+        if self.mean.shape[0] == scene_buckets.K:
+            return scene_buckets.bucket_for(tile_mean)
+        return 0
+
     def _idx(self, hour: int) -> int:
+        """Legacy time-based bucket index. Used by analysis scripts only."""
         return time_bucket(
             int(hour),
             self.cfg.num_time_buckets,
@@ -35,40 +51,39 @@ class BackgroundModel:
             self.cfg.day_end_hour,
         )
 
-    def observe(self, hour: int) -> None:
-        """Record that we processed a frame in this bucket, regardless of how
-        we classified it. Used to count down warmup faster than the EMA does."""
-        b = self._idx(hour)
-        if self.bucket_seen[b] < 65535:
-            self.bucket_seen[b] = self.bucket_seen[b] + 1
+    # ── Model update ──────────────────────────────────────────────────────────
 
-    def update(self, hour: int, tile_mean: np.ndarray) -> None:
-        """Fold a new accepted-as-cloud frame into the model."""
-        b = self._idx(hour)
+    def observe(self, bucket: int) -> None:
+        """Record that a frame was processed in this bucket, regardless of result.
+        Counts down warmup faster than the EMA does."""
+        if self.bucket_seen[bucket] < 65535:
+            self.bucket_seen[bucket] = self.bucket_seen[bucket] + 1
+
+    def update(self, bucket: int, tile_mean: np.ndarray) -> None:
+        """Fold a new accepted-as-background frame into the model."""
         alpha = self.cfg.ema_alpha
-        prev_mean = self.mean[b]
+        prev_mean = self.mean[bucket]
         new_mean = (1.0 - alpha) * prev_mean + alpha * tile_mean
         residual = tile_mean - new_mean
-        new_var = (1.0 - alpha) * self.var[b] + alpha * (residual * residual)
-        self.mean[b] = new_mean
-        self.var[b] = np.maximum(new_var, self.cfg.var_floor)
-        cnt = self.count[b].astype(np.int32) + 1
-        self.count[b] = np.clip(cnt, 0, 65535).astype(np.uint16)
+        new_var = (1.0 - alpha) * self.var[bucket] + alpha * (residual * residual)
+        self.mean[bucket] = new_mean
+        self.var[bucket] = np.maximum(new_var, self.cfg.var_floor)
+        cnt = self.count[bucket].astype(np.int32) + 1
+        self.count[bucket] = np.clip(cnt, 0, 65535).astype(np.uint16)
 
-    def z_scores(self, hour: int, tile_mean: np.ndarray) -> np.ndarray:
-        b = self._idx(hour)
-        std = np.sqrt(self.var[b])
-        return np.abs(tile_mean - self.mean[b]) / std
+    # ── Queries ───────────────────────────────────────────────────────────────
 
-    def warmup_remaining(self, hour: int) -> int:
-        """How many more *observations* the bucket needs before strict mode."""
-        b = self._idx(hour)
+    def z_scores(self, bucket: int, tile_mean: np.ndarray) -> np.ndarray:
+        std = np.sqrt(self.var[bucket])
+        return np.abs(tile_mean - self.mean[bucket]) / std
+
+    def warmup_remaining(self, bucket: int) -> int:
+        """Observations still needed before this bucket leaves warmup mode."""
         need = self.cfg.warmup_frames_per_bucket
-        seen = int(self.bucket_seen[b])
+        seen = int(self.bucket_seen[bucket])
         return max(0, need - seen)
 
-    def reset_warmup(self, hour: int) -> None:
+    def reset_warmup(self, bucket: int) -> None:
         """Force the bucket back into warmup — used after SCENE_DRIFT to
         re-bootstrap when the scene has changed significantly."""
-        b = self._idx(hour)
-        self.bucket_seen[b] = 0
+        self.bucket_seen[bucket] = 0

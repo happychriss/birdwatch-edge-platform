@@ -285,17 +285,18 @@ def run(config_path: str | None = None) -> list[dict]:
                 prev_tile_mean = tile_mean
             else:
                 # ── Background model ──────────────────────────────────────
-                model.observe(hour)
+                bucket = model.bucket_for(tile_mean)
+                model.observe(bucket)
                 py_result = classify(tile_mean, hour, model, py_cfg, prev_tile_mean=prev_tile_mean)
 
                 # Update model (mirrors pipeline.py update policy)
-                was_warmup = model.warmup_remaining(hour) > 0
+                was_warmup = model.warmup_remaining(bucket) > 0
                 if was_warmup or py_result.label == 'clouds' or py_result.trigger in (
                     'SCENE_DRIFT', 'NIGHT'
                 ):
-                    model.update(hour, tile_mean)
+                    model.update(bucket, tile_mean)
                 if py_result.trigger == 'SCENE_DRIFT':
-                    model.reset_warmup(hour)
+                    model.reset_warmup(bucket)
 
                 prev_tile_mean = tile_mean
 

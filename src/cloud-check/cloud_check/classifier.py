@@ -21,12 +21,13 @@ class ClassifierResult:
     warmup: bool                  # bucket is still in warmup
     new_dark_tiles: int           # tiles newly dark vs previous frame (dark_tiles if no prev)
     temporal_available: bool      # whether prev_tile_mean was provided
-    dark_tiles: int = 0           # tiles ≥ dark_object_min_delta darker than model AND z-anomalous
+    dark_tiles: int = 0           # tiles ≥ dark_object_min_delta darker than model (no z-gate)
+    scene_bucket: int = 0         # which lighting-scenario bucket was selected
 
 
 def classify(
     tile_mean: np.ndarray,
-    hour: int,
+    hour: int,                    # kept for backward-compat; ignored (bucket from tile_mean)
     model: BackgroundModel,
     cfg: Config | None = None,
     prev_tile_mean: np.ndarray | None = None,
@@ -38,15 +39,23 @@ def classify(
     is QUIET: the scene is almost identical to the bucket model. Everything
     else — DARK_OBJ, SCENE_DRIFT, WARMUP, AMBIGUOUS — uploads.
 
-    (A previous DIFFUSE rule for "global lighting shift" was removed: the grid
-    sweep in scripts/sweep.py showed it never fires on real data, because such
-    shifts always also create dark tiles → caught by DARK_OBJ or SCENE_DRIFT.)
+    Bucket selection: nearest-centroid on tile_mean (lighting-scenario buckets),
+    not time-of-day. This keeps per-bucket variance low and makes DARK_OBJ
+    sensitive enough to catch small birds without a z-gate.
+
+    Change from prior version: dark_tiles and new_dark_tiles are computed from
+    the absolute Δm threshold ONLY — the z-gate is removed. This catches birds
+    that are 35-90 DN darker than the model but below z=3. The QUIET ratio
+    mask retains the z-gate so that ambient illumination shifts don't suppress.
     """
 
     cfg = cfg or model.cfg
 
+    # Scene-lighting bucket from nearest centroid on tile_mean vector.
+    b = model.bucket_for(tile_mean)
+
     # Stage 0 — NIGHT: frame too dark for reliable anomaly detection → upload.
-    global_mean = int(tile_mean.mean())  # truncate, matches ESP integer division (gm_sum / CC_NUM_TILES)
+    global_mean = int(tile_mean.mean())  # truncate, matches ESP integer division
     if cfg.night_brightness_threshold > 0 and global_mean < cfg.night_brightness_threshold:
         return ClassifierResult(
             label="process",
@@ -56,30 +65,33 @@ def classify(
             anomaly_ratio=0.0,
             compactness=0.0,
             reason=f"scene too dark (global_mean={global_mean} < {cfg.night_brightness_threshold})",
-            warmup=model.warmup_remaining(hour) > 0,
+            warmup=model.warmup_remaining(b) > 0,
             new_dark_tiles=0,
             temporal_available=prev_tile_mean is not None,
             dark_tiles=0,
+            scene_bucket=b,
         )
 
-    z = model.z_scores(hour, tile_mean)
-    bucket_mean = model.mean[model._idx(hour)]
+    z = model.z_scores(b, tile_mean)
+    bucket_mean = model.mean[b]
 
     # anomaly_mask: tiles with z > threshold AND darker than model.
     # Bright deviations (sky brightening, cloud moving off sun) are intentionally
     # excluded — they should not prevent QUIET from suppressing.
     z_mask = z > cfg.tile_z_threshold
     dark_mask = tile_mean < bucket_mean
-    mask = z_mask & dark_mask          # dark-only anomalous tiles
+    mask = z_mask & dark_mask          # dark-only z-anomalous tiles (QUIET ratio)
     total_anom = int(mask.sum())
-    ratio = float(mask.mean())         # dark-only ratio used for QUIET
+    ratio = float(mask.mean())
 
     delta = tile_mean - bucket_mean
-    dark_tiles = int(((delta < -cfg.dark_object_min_delta) & z_mask).sum())
+    # No z-gate on dark_tiles — just absolute delta. Catches birds at 35-90 DN
+    # that fall below z=3 even with tighter scene buckets (std≈28 DN).
+    dark_tiles = int((delta < -cfg.dark_object_min_delta).sum())
 
     if prev_tile_mean is not None:
         temporal_delta = tile_mean - prev_tile_mean
-        new_dark_tiles = int(((temporal_delta < -cfg.temporal_dark_delta) & z_mask).sum())
+        new_dark_tiles = int((temporal_delta < -cfg.temporal_dark_delta).sum())
         temporal_available = True
     else:
         new_dark_tiles = dark_tiles
@@ -94,7 +106,7 @@ def classify(
         blob_max = int(sizes.max())
 
     compactness = blob_max / total_anom if total_anom > 0 else 0.0
-    warmup = model.warmup_remaining(hour) > 0
+    warmup = model.warmup_remaining(b) > 0
 
     dark_obj_condition = (
         dark_tiles >= cfg.dark_object_min_tiles
@@ -109,16 +121,16 @@ def classify(
     if warmup:
         trigger = "WARMUP"
         decision = "process"
-        reason = f"bucket warmup ({model.warmup_remaining(hour)} more obs needed) → lean upload"
+        reason = f"bucket warmup ({model.warmup_remaining(b)} more obs needed) → lean upload"
     elif dark_obj_condition:
         trigger = "DARK_OBJ"
         decision = "process"
         reason = (f"dark object cue (dark_tiles={dark_tiles}, new_dark={new_dark_tiles}, "
-                  f"blob={blob_max}, dark_ratio={ratio:.2f})")
+                  f"blob={blob_max}, dark_ratio={ratio:.2f}, bucket={b})")
     elif ratio <= cfg.quiet_anomaly_ratio:
         trigger = "QUIET"
         decision = "clouds"
-        reason = f"scene matches model (dark_ratio={ratio:.3f} ≤ {cfg.quiet_anomaly_ratio})"
+        reason = f"scene matches model (dark_ratio={ratio:.3f} ≤ {cfg.quiet_anomaly_ratio}, bucket={b})"
     elif stale_condition:
         trigger = "SCENE_DRIFT"
         decision = "process"
@@ -128,7 +140,7 @@ def classify(
         trigger = "AMBIGUOUS"
         decision = "process"
         reason = (f"ambiguous → upload (blob={blob_max} dark_ratio={ratio:.2f} "
-                  f"compactness={compactness:.2f})")
+                  f"compactness={compactness:.2f}, bucket={b})")
 
     return ClassifierResult(
         label=decision,
@@ -141,4 +153,6 @@ def classify(
         warmup=warmup,
         new_dark_tiles=new_dark_tiles,
         temporal_available=temporal_available,
+        dark_tiles=dark_tiles,
+        scene_bucket=b,
     )

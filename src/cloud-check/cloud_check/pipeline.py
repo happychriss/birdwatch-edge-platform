@@ -44,15 +44,15 @@ def run_stream(
     for s in samples:
         frame = load_gray_vga(s.path)
         feats = extract_tile_features(frame)
-        bucket = model._idx(s.hour_bucket)
+        bucket = model.bucket_for(feats["mean"])
         prev = prev_tile_mean.get(bucket)
 
         # Snapshot the warmup state BEFORE we observe this frame — we want
         # the predicate to reflect the model that was used for prediction.
-        was_warmup = model.warmup_remaining(s.hour_bucket) > 0
+        was_warmup = model.warmup_remaining(bucket) > 0
         # Count every observation toward the bucket's warmup, even before we
         # have a verdict — otherwise low-traffic buckets stay in warmup forever.
-        model.observe(s.hour_bucket)
+        model.observe(bucket)
         pred = classify(feats["mean"], s.hour_bucket, model, cfg, prev_tile_mean=prev)
 
         # Background update policy:
@@ -61,18 +61,18 @@ def run_stream(
         #     warmup: fold every frame in (bootstrap).
         #     cloud prediction: fold in (it looks like background).
         #     SCENE_DRIFT: dark tiles already in prev frame → stale model → update.
-        #     NIGHT / INDIRECT_LIGHT: upload unconditionally but still fold in so
-        #       the model tracks the dark-scene / side-light baseline (matches C).
+        #     NIGHT: upload unconditionally but still fold in so the model tracks
+        #       the dark-scene baseline (matches C).
         if update_only_on_cloud_prediction:
             if was_warmup or pred.label == "clouds" or pred.trigger in (
-                "SCENE_DRIFT", "NIGHT", "INDIRECT_LIGHT"
+                "SCENE_DRIFT", "NIGHT"
             ):
-                model.update(s.hour_bucket, feats["mean"])
+                model.update(bucket, feats["mean"])
             if pred.trigger == "SCENE_DRIFT":
-                model.reset_warmup(s.hour_bucket)
+                model.reset_warmup(bucket)
         else:
             if s.label == "clouds":
-                model.update(s.hour_bucket, feats["mean"])
+                model.update(bucket, feats["mean"])
 
         prev_tile_mean[bucket] = feats["mean"]  # always record last frame per bucket
 
