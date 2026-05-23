@@ -433,13 +433,13 @@ document.addEventListener('keydown', function(e) {
 
   if (e.key === ' ') {
     e.preventDefault();
-    setLabel('bird', _goNext);
+    setLabel('bird');
   } else if (e.key === 's' || e.key === 'S') {
     e.preventDefault();
-    setLabel('special', _goNext);
+    setLabel('special');
   } else if (e.key === 'Delete' || e.key === 'Backspace') {
     e.preventDefault();
-    setLabel('ignore', _goNext);
+    setLabel('ignore');
   } else if (e.key === 'c' || e.key === 'C') {
     setLabel(null);
   }
