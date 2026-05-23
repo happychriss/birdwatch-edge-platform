@@ -69,6 +69,7 @@ class BwFrame(Base):
     result      = Column(String, index=True)    # promoted from meta["result"] for fast queries
     filename    = Column(String)                # saved JPEG filename (no path)
     meta        = Column(JSONB)                 # all ESP telemetry keys verbatim
+    # label and downloaded_at live inside meta["label"] / meta["downloaded_at"] — no column needed
 
 
 def _migrate_columns():

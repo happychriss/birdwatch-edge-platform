@@ -132,46 +132,89 @@ Power down: camera deinit, remote log flush, WiFi off, GPIO5 LOW
 
 ## 4. False-Trigger Filtering
 
-PIR sensors are sensitive to rapid infrared changes caused by moving shadows or cloud cover. The scene's sky region and moving plant/railing shadows on the tile floor are the dominant sources of false triggers.
+PIR sensors are sensitive to rapid infrared changes caused by moving shadows or cloud cover. Two complementary filters are applied in sequence, both implemented on-device (C) and mirrored in Python for server-side validation.
 
-### 4.1 Cloud-Check Filter
+### 4.1 Burst-Mode Sequence Filter (pre-filter, runs first)
+
+> **Python reference:** `src/cloud-check/cloud_check/burst_filter.py`  
+> **Evaluation:** `src/cloud-check/validate_burst.py`  
+> **Status:** Implemented in ESP firmware (`cloud_check.c`) and Python server (`serve.py`). Validated 2026-05-23.
+
+Compares each PIR event's QQVGA frame directly to the **previous captured frame** (stored in NVS as `cc_p` / `cc_pgm`). Suppresses PIR re-fires on the same sun/cloud transition before the background model runs.
+
+**Decision pipeline (in order, no ML):**
+
+| Stage | Condition | Decision |
+|-------|-----------|----------|
+| FIRST | no previous frame in NVS | process |
+| BRIGHTNESS_SHIFT | \|gm_diff\| > 12 DN | process (whole-scene shift — bird could coincide) |
+| DUPLICATE | n_changed ≤ 0 tiles | suppress (pixel-identical re-fire) |
+| BRIGHT_STABLE | gm > 160 AND n_dark < 35 | suppress (bright scene, no shadow-casting object) |
+| DIFFUSE | n_dark ≥ 60 tiles | suppress (cloud shadow sweeping entire scene) |
+| SAFE | default | process (safety bias) |
+
+Note: FAST_SHIFT and ISOLATED stages (from `burst_filter.py`) require `dt_seconds` which is unavailable on-device before WiFi/SNTP — omitted from firmware; validated offline via `validate_burst.py`.
+
+**Results on training data (224 sun frames, 90 process frames, 2026-05-23):**
+- Sun suppressed: **103/224 (46%)** — 0 errors
+- Birds/pillow suppressed: **0/44** — 0 errors ✓
+- People suppressed: 5/46 (acceptable; large body shadows exceed diffuse threshold)
+
+### 4.2 Background-Model Pipeline (runs after burst filter passes)
 
 > **Full specification:** [`requirements-cloud-detection.md`](requirements-cloud-detection.md)  
-> **Python simulation:** [`src/cloud-check/`](src/cloud-check/README.md) — Phase 1 complete.
+> **Python simulation:** [`src/cloud-check/`](src/cloud-check/README.md)
 
-Binary on-device classifier: **"cloud"** (suppress upload) vs **"non-cloud"** (bird/person/anything-new → upload).
+Per-tile EMA background model with z-score anomaly detection.
 
-**Approach:** classical per-tile signal processing against an adaptive background model. Not ML — no weights, no training, pure integer arithmetic. Runs in < 10 ms on the ESP32-S3 once ported to C.
-
-**Current results on 147 labelled real-scene frames (online, self-calibrating):**
+**Results on 147 labelled frames (online, self-calibrating):**
 
 | Metric | Value |
 |--------|-------|
 | Non-cloud recall (birds/people) | **1.000** — zero misses |
-| Cloud recall (false-trigger suppression) | **0.606** — 61 % of cloud frames filtered |
+| Cloud recall (false-trigger suppression) | **0.606** |
 
-**Decision pipeline (5 stages in priority order):**
+**Decision pipeline (in priority order):**
+1. **NIGHT** — frame too dark (gm < 70) → process
+2. **WARMUP** — < 4 frames seen → process
+3. **DARK_OBJ** — tiles newly darker than both model and previous frame → process
+4. **QUIET** — ≤ 25% dark-anomalous tiles → suppress
+5. **SCENE_DRIFT** — dark vs model but not vs previous frame → process + re-calibrate
+6. **AMBIGUOUS** — default → process
 
-1. **WARMUP** — bucket has < 8 observations → upload (model not yet reliable)
-2. **DARK_OBJ** — tiles newly darker than both model and previous frame → upload (object arrived)
-3. **QUIET** — ≤ 5 % of tiles anomalous → suppress (scene matches model)
-4. **SCENE_DRIFT** — tiles dark vs model but not vs previous frame → upload + re-calibrate model (stale baseline)
-5. **AMBIGUOUS** — default → upload
+### 4.3 Full Pipeline Reference Table
 
-See [`requirements-cloud-detection.md`](requirements-cloud-detection.md) for full algorithm and parameter rationale.
+Complete decision pipeline in execution order. Steps 1–6 are the burst pre-filter (compares to previous frame); steps 7–12 are the background-model pipeline, only reached when step 6 passes.
 
-### 4.2 Training Data
+| # | Stage | Condition | Values / thresholds | Variable definitions | `result` | `stage` |
+|---|---|---|---|---|---|---|
+| 1 | **FIRST** | no previous frame in NVS | — | — | process | FIRST |
+| 2 | **BRIGHTNESS_SHIFT** | `\|gm_diff\|` > 12 DN | 0–12 → continue; **> 12 → fires** | `gm_diff`: \|current frame mean − previous frame mean\| | process | BRIGHTNESS_SHIFT |
+| 3 | **DUPLICATE** | `n_changed` == 0 | 0 → fires | `n_changed`: tiles where \|current − prev\| > 12 DN (any direction) | clouds | DUPLICATE |
+| 4 | **BRIGHT_STABLE** | `gm` > 160 **and** `n_dark` < 35 | gm > 160 DN; n_dark 0–34 | `gm`: mean brightness of current frame (mean of 300 tiles); `n_dark`: tiles that got *darker* by > 12 DN vs prev | clouds | BRIGHT_STABLE |
+| 5 | **DIFFUSE** | `n_dark` ≥ 60 | ≥ 60/300 tiles | `n_dark`: same as above | clouds | DIFFUSE |
+| 6 | **SAFE** | default burst pass | n_dark 1–59, or gm ≤ 160 | — | → bg model | SAFE |
+| 7 | **NIGHT** | `global_mean` < 70 | 0–69 DN | `global_mean`: mean of all 300 tile means (= `gm`) | process | NIGHT |
+| 8 | **WARMUP** | `frames_seen` < 4 | 0–3 | `frames_seen`: non-NIGHT frames processed since last flash/reset | process | WARMUP |
+| 9 | **DARK_OBJ** | `dark_tiles` ≥ 1 **and** `new_dark_tiles` ≥ 1 | both ≥ 1 | `dark_tiles`: tiles with z > 3.0 AND ≥ 35 DN below model mean; `new_dark_tiles`: tiles with z > 3.0 AND ≥ 20 DN below prev frame | process | DARK_OBJ |
+| 10 | **QUIET** | `ratio` ≤ 0.25 | ≤ 75/300 tiles | `ratio`: (tiles darker than model with z > 3.0) / 300 | clouds | QUIET |
+| 11 | **SCENE_DRIFT** | `dark_tiles` ≥ 4 **and** `new_dark_tiles` == 0 | dark_tiles 4–300; new_dark = 0 | `dark_tiles`: same as row 9; `new_dark_tiles`: same as row 9 | process | SCENE_DRIFT |
+| 12 | **AMBIGUOUS** | default | — | — | process | AMBIGUOUS |
+
+### 4.4 Training Data
 
 `/workspace/training-data/` (not committed beyond folder structure):
 
 | Folder | Count | Label | Notes |
 |--------|-------|-------|-------|
-| `real-data/sun/` | 109 | cloud | Empty balcony, varying sun/shadow, 2026-05 scene |
-| `real-data/birds-simu/` | 11 | non-cloud | Same scene + small dark object as bird stand-in |
-| `real-data/people/` | 27 | non-cloud | Same scene + person legs/hand in frame |
-| `with-birds/` | 31 | non-cloud (aux) | 2025-07 scene, different camera angle and lighting — held out for cross-domain check, not mixed into training |
+| `ignore-sun_shining/` | 224 | suppress | Noon sun false-triggers; burst filter target |
+| `process-birds-pillow/` | 26 | process | Toy bird + pillow as proxy objects |
+| `process-real-birds/` | 18 | process | Real bird captures (2026-05-21) |
+| `process-people/` | 46 | process | Person legs/body in frame |
+| `process-dark/` | 0 | process | Reserved for night/low-light captures |
+| `duplicates/` | 36 | — | Byte-identical PIR triplets moved here; originals preserved |
 
-All images are 1600×1200 SXGA JPEG, downsampled to 640×480 grayscale inside the pipeline to match the on-device filter input.
+All images are SXGA JPEG (from server), downsampled to 640×480 grayscale for burst filter evaluation, or 160×120 QQVGA for on-device processing.
 
 ---
 

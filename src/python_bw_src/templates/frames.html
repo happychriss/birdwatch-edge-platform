@@ -52,6 +52,24 @@
   .btn:hover { background: #daeaf7; }
   .btn-pir { background: #e8f5e9; border-color: #a5d6a7; color: #2e7d32; }
   .btn-pir:hover { background: #c8e6c9; }
+  .btn-backfill { background: #fef9e7; border-color: #f9ca24; color: #7d6608; }
+  .btn-backfill:hover { background: #fdebd0; }
+  .btn-backfill:disabled { opacity: 0.5; cursor: default; }
+  .btn-download { background: #e8f5e9; border-color: #a5d6a7; color: #1e8449; }
+  .btn-download:hover { background: #c8e6c9; }
+  .btn-download:disabled { opacity: 0.5; cursor: default; }
+
+  /* ── Label flag on card image ── */
+  .label-flag {
+    position: absolute; top: 10px; left: 6px; z-index: 2;
+    padding: 2px 7px; border-radius: 8px;
+    font-size: 9px; font-weight: 700; text-transform: uppercase;
+    letter-spacing: 0.4px; pointer-events: none;
+  }
+  .flag-bird    { background: #27ae60; color: #fff; }
+  .flag-special { background: #f39c12; color: #fff; }
+  .flag-ignore  { background: #7f8c8d; color: #fff; }
+  .flag-saved   { background: #2980b9; color: #fff; position: absolute; top: 10px; right: 6px; left: auto; }
   .view-toggle { margin-left: auto; display: flex; gap: 6px; }
   .view-btn {
     padding: 8px 12px; border: 1px solid #b0c8e0; border-radius: 6px;
@@ -159,6 +177,10 @@
 <!-- ── Controls ── -->
 <div class="controls">
   <button class="btn btn-pir" onclick="location.href='/set_status?status=PIR_Sensor'">PIR Sensor</button>
+  <button class="btn btn-backfill" id="btn-backfill" onclick="runBackfill(false)" title="Simulate burst+bg pipeline on old frames">Backfill old</button>
+  <span id="backfill-status" style="font-size:12px;color:#556;"></span>
+  <button class="btn btn-download" id="btn-download" onclick="runDownload()" title="Copy labeled images to download folder">Download</button>
+  <span id="download-status" style="font-size:12px;color:#556;"></span>
   <div class="view-toggle">
     <button class="view-btn active" id="btn-grid" onclick="setView('grid')" title="Grid view">⊞</button>
     <button class="view-btn"        id="btn-list" onclick="setView('list')" title="List view">☰</button>
@@ -175,8 +197,12 @@
   <div class="card {{ card_cls }}"
        ondblclick="openPhoto('{{ url_for('static', filename=entry.filename) if entry.filename else '' }}')">
     {% if entry.filename %}
-      <a href="/frame_detail?id={{ entry.id }}">
+      {% set lbl = meta.get('label') %}
+      {% set dl  = meta.get('downloaded_at') %}
+      <a href="/frame_detail?id={{ entry.id }}" style="position:relative;display:block;">
         <img src="{{ url_for('static', filename=entry.filename) }}" loading="lazy" alt="frame">
+        {% if lbl %}<span class="label-flag flag-{{ lbl }}">{{ lbl }}</span>{% endif %}
+        {% if dl %}<span class="label-flag flag-saved">saved</span>{% endif %}
       </a>
     {% else %}
       <div class="no-photo">no image</div>
@@ -222,6 +248,60 @@ function openPhoto(url) {
 function closePhoto() { document.getElementById('lightbox').classList.remove('open'); }
 document.getElementById('lightbox').addEventListener('click', function(e){ if (e.target===this) closePhoto(); });
 document.addEventListener('keydown', function(e){ if (e.key==='Escape') closePhoto(); });
+
+function runBackfill(force) {
+  const btn = document.getElementById('btn-backfill');
+  const status = document.getElementById('backfill-status');
+  btn.disabled = true;
+  status.textContent = 'Running…';
+  fetch('/admin/backfill', {method:'POST', headers:{'Content-Type':'application/json'},
+                            body: JSON.stringify({force: force})})
+    .then(r => r.json())
+    .then(() => pollBackfill())
+    .catch(e => { status.textContent = 'Error: ' + e; btn.disabled = false; });
+}
+
+function pollBackfill() {
+  fetch('/admin/backfill').then(r => r.json()).then(data => {
+    const status = document.getElementById('backfill-status');
+    const btn = document.getElementById('btn-backfill');
+    if (data.running) {
+      status.textContent = 'Running…';
+      setTimeout(pollBackfill, 1500);
+    } else {
+      const lines = (data.log || '').trim().split('\n');
+      status.textContent = lines[lines.length - 1] || 'Done';
+      btn.disabled = false;
+    }
+  });
+}
+
+function runDownload() {
+  const btn = document.getElementById('btn-download');
+  const status = document.getElementById('download-status');
+  btn.disabled = true;
+  status.textContent = 'Copying…';
+  fetch('/admin/download', {method: 'POST'})
+    .then(r => r.json())
+    .then(data => {
+      if (data.error) {
+        status.textContent = 'Error: ' + data.error;
+      } else {
+        status.textContent = `Saved ${data.copied} → ${data.folder}`;
+        if (data.copied > 0) setTimeout(() => location.reload(), 1200);
+      }
+      btn.disabled = false;
+    })
+    .catch(e => { status.textContent = 'Error: ' + e; btn.disabled = false; });
+}
+
+// Show pending download count on page load
+(function() {
+  fetch('/admin/download/stats').then(r => r.json()).then(data => {
+    const btn = document.getElementById('btn-download');
+    if (data.total_new > 0) btn.textContent = `Download (${data.total_new} new)`;
+  }).catch(() => {});
+})();
 
 let refreshSecs = 300;
 const countdownEl = document.getElementById('countdown');

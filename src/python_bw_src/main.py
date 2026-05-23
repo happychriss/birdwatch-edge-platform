@@ -4,12 +4,18 @@ from collections import defaultdict
 import json
 import os
 import requests
+import shutil
+import subprocess
+import threading
 import time
+from pathlib import Path
+from sqlalchemy.orm.attributes import flag_modified
 from db import BwPhoto, BwFrame, Session
 from display_spec import DISPLAY_SPEC, DISPLAY_ORDER
 
 
 birdwatch_http = "http://192.168.1.43"
+DOWNLOAD_FOLDER = os.getenv('DOWNLOAD_FOLDER_PATH', '')
 global_status = "PIR_Sensor"
 session = Session()
 
@@ -468,6 +474,153 @@ def frame_detail():
 _validate_results: list = []   # last run results held in-process (dev/admin use)
 _validate_running: bool = False
 
+_backfill_log: str = ''
+_backfill_running: bool = False
+
+
+# ─────────────────────────────── /frame/<id>/label ───────────────────────────
+
+_VALID_LABELS = {'bird', 'ignore', 'special'}
+
+
+@app.route('/frame/<int:frame_id>/label', methods=['POST'])
+def set_label(frame_id: int):
+    data = request.get_json(silent=True) or {}
+    label = data.get('label')
+    if label is not None and label not in _VALID_LABELS:
+        return jsonify({'error': f'invalid label; use one of {sorted(_VALID_LABELS)}'}), 400
+
+    frame = session.query(BwFrame).filter(BwFrame.id == frame_id).first()
+    if not frame:
+        return jsonify({'error': 'not found'}), 404
+
+    meta = dict(frame.meta or {})
+    if label is None:
+        meta.pop('label', None)
+    else:
+        meta['label'] = label
+    frame.meta = meta
+    flag_modified(frame, 'meta')
+    session.commit()
+    return jsonify({'id': frame_id, 'label': label}), 200
+
+
+# ─────────────────────────────── /admin/download ─────────────────────────────
+
+@app.route('/admin/download/stats')
+def download_stats():
+    counts = {}
+    for lbl in _VALID_LABELS:
+        counts[lbl] = session.query(BwFrame).filter(
+            BwFrame.meta['label'].astext == lbl,
+            BwFrame.meta['downloaded_at'].is_(None),
+        ).count()
+    counts['total_new'] = sum(counts.values())
+    counts['download_folder'] = DOWNLOAD_FOLDER or '(not configured)'
+    return jsonify(counts)
+
+
+@app.route('/admin/download', methods=['POST'])
+def admin_download():
+    """Copy all newly-labeled frames to DOWNLOAD_FOLDER_PATH and mark as downloaded.
+
+    Folder structure inside DOWNLOAD_FOLDER_PATH:
+        all_images/
+        bird_images/
+        ignore_images/
+        special_images/
+
+    Returns JSON with stats.  If DOWNLOAD_FOLDER_PATH is empty, returns 400.
+    """
+    if not DOWNLOAD_FOLDER:
+        return jsonify({'error': 'DOWNLOAD_FOLDER_PATH env var not set'}), 400
+
+    dl_root = Path(DOWNLOAD_FOLDER)
+    jpg_src = Path(os.getenv('JPG_FOLDER_PATH', '/tmp'))
+    now = datetime.now().isoformat()
+
+    # Fetch frames that have a label but haven't been downloaded yet
+    frames = (session.query(BwFrame)
+              .filter(BwFrame.meta['label'].astext.isnot(None),
+                      BwFrame.meta['downloaded_at'].is_(None))
+              .order_by(BwFrame.captured_at.asc())
+              .all())
+
+    stats: dict = {'copied': 0, 'missing': 0, 'by_label': {}}
+
+    for lbl in _VALID_LABELS:
+        (dl_root / 'all_images').mkdir(parents=True, exist_ok=True)
+        (dl_root / f'{lbl}_images').mkdir(parents=True, exist_ok=True)
+
+    for frame in frames:
+        if not frame.filename:
+            continue
+        label = (frame.meta or {}).get('label')
+        if not label:
+            continue
+        src = jpg_src / frame.filename
+        if not src.exists():
+            stats['missing'] += 1
+            continue
+        shutil.copy2(src, dl_root / 'all_images' / frame.filename)
+        shutil.copy2(src, dl_root / f'{label}_images' / frame.filename)
+        meta = dict(frame.meta)
+        meta['downloaded_at'] = now
+        frame.meta = meta
+        flag_modified(frame, 'meta')
+        stats['copied'] += 1
+        stats['by_label'][label] = stats['by_label'].get(label, 0) + 1
+
+    session.commit()
+    stats['folder'] = str(dl_root)
+    return jsonify(stats), 200
+
+
+@app.route('/admin/download', methods=['GET'])
+def download_page():
+    return redirect('/')
+
+
+@app.route('/admin/backfill', methods=['GET'])
+def backfill_status():
+    return jsonify({'running': _backfill_running, 'log': _backfill_log})
+
+
+@app.route('/admin/backfill', methods=['POST'])
+def backfill_run():
+    global _backfill_log, _backfill_running
+    if _backfill_running:
+        return jsonify({'status': 'already running'}), 409
+
+    force = (request.json or {}).get('force', False)
+
+    def _run():
+        global _backfill_log, _backfill_running
+        _backfill_running = True
+        try:
+            here = os.path.dirname(os.path.abspath(__file__))
+            cc_dir = os.path.join(here, '..', 'cloud-check')
+            venv_py = os.path.join(cc_dir, '.venv', 'bin', 'python')
+            if not os.path.exists(venv_py):
+                venv_py = 'python3'
+            script = os.path.join(cc_dir, 'backfill_meta.py')
+            args = [venv_py, script]
+            if force:
+                args.append('--force')
+            proc = subprocess.run(args, capture_output=True, text=True, timeout=600)
+            _backfill_log = proc.stdout
+            if proc.stderr:
+                _backfill_log += '\n--- stderr ---\n' + proc.stderr
+            if proc.returncode != 0:
+                _backfill_log = f'ERROR (exit {proc.returncode}):\n' + _backfill_log
+        except Exception as exc:
+            _backfill_log = f'Exception: {exc}'
+        finally:
+            _backfill_running = False
+
+    threading.Thread(target=_run, daemon=True).start()
+    return jsonify({'status': 'started'}), 202
+
 
 @app.route('/validate/run', methods=['POST'])
 def validate_run():
@@ -479,9 +632,6 @@ def validate_run():
     global _validate_results, _validate_running
     if _validate_running:
         return jsonify({'status': 'already running'}), 409
-
-    import threading
-    import subprocess
 
     def _run():
         global _validate_results, _validate_running

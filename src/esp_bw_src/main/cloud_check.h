@@ -14,7 +14,8 @@
 
 typedef struct {
     char    label[16];      // "process" or "clouds"
-    char    stage[16];      // "NIGHT" | "WARMUP" | "DARK_OBJ" | "INDIRECT_LIGHT" | "SPOT_CHANGE" | "QUIET" | "SCENE_DRIFT" | "AMBIGUOUS" | "CAM_ERR"
+    char    stage[20];      // burst: "FIRST"|"BRIGHTNESS_SHIFT"|"DUPLICATE"|"BRIGHT_STABLE"|"DIFFUSE"|"SAFE"
+                            // bg-model: "NIGHT"|"WARMUP"|"DARK_OBJ"|"QUIET"|"SCENE_DRIFT"|"AMBIGUOUS"|"CAM_ERR"
     uint8_t global_mean;    // 0-255 ambient brightness from the QQVGA frame (0 on CAM_ERR)
 } bw_cc_result_t;
 

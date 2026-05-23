@@ -47,9 +47,23 @@ See `skills/wifi-esp32s3.md` for the full design rationale and timing budget.
 Any change to the cloud-detection algorithm must be kept in sync across all three projects.
 **Before implementing, confirm with the user which projects need updating.**
 
+Two filter layers, both synced:
+
+### Burst-mode sequence filter (compares frame N to frame N-1)
+
+| Parameter / behaviour | ESP firmware | Python reference | Validator |
+|---|---|---|---|
+| Burst thresholds | `cloud_check.c` `CC_BURST_*` `#define` | `BurstConfig` defaults in `burst_filter.py` | `validate.py` `_BURST_SUPPRESS_STAGES` |
+| Stage logic | `run_pipeline()` burst block | `burst_classify()` in `burst_filter.py` | `validate.py` burst-aware comparison |
+| NVS state | `cc_p` (tile means uint8) + `cc_pgm` (global mean uint8) | `prev_tile_mean`, `prev_gm` in-RAM | loaded from ESP `tile_means` telemetry |
+| Telemetry fields | `burst_trigger`, `burst_label`, `burst_gm_diff`, `burst_n_changed`, `burst_n_dark` | `BurstResult` fields | `_get_py_field_burst()` in `validate.py` |
+| dt-based stages (FAST_SHIFT, ISOLATED) | **omitted** — no wall clock before WiFi | present in `burst_filter.py` | skipped in validator (fall through to BG model) |
+
+### Background-model pipeline (z-score vs long-term EMA model)
+
 | Parameter / behaviour | ESP firmware | Python simulation | Validator config |
 |---|---|---|---|
-| Grid size | `cloud_check.c` `CC_TILES_X/Y` | `config.py` `grid_w/h`, `features.py` `GRID_W/H` | `validate_config.json` (implicit via config) |
+| Grid size | `cloud_check.c` `CC_TILES_X/Y` | `config.py` `grid_w/h`, `features.py` `GRID_W/H` | `validate_config.json` (implicit) |
 | Thresholds (z, quiet ratio, warmup, deltas) | `cloud_check.c` `#define` | `config.py` defaults | `validate_config.json` `python_config` |
 | Decision stages | `cloud_check.c` stage blocks | `classifier.py` branches | `validate_config.json` `checks` array |
 | Telemetry field names | `bw_tele_*(name, …)` in `cloud_check.c` | `ClassifierResult` field names | `validate_config.json` `esp_key` / `py_field` |
@@ -71,4 +85,14 @@ Workflow:
 2. Confirm clean build in the last lines of output
 3. Commit + push
 4. Tell the user the binary is ready — they flash with: `idf.py -p /dev/ttyACM0 flash`
+
+**IDF version: v6** — lives inside the container at `/home/ubuntu/esp-idf/` (= `~/esp-idf/` as user `ubuntu`).
+
+Claude Code runs on the host machine (`donald`, user `development`). The host has only IDF v5.5 at `/home/development/esp/esp-idf-v5.5/` and `/home/development/esp/esp-v5.5-dev/`. **Never source those paths and build** — doing so produces a v5.5 build directory at `project/src/esp_bw_src/build/` which, because the folder is bind-mounted as `/workspace/src/esp_bw_src/`, is immediately visible inside the container and breaks the v6 build until removed (`rm -rf project/src/esp_bw_src/build/`).
+
+Always build inside the container shell (where `~/esp-idf/` is v6).
+
+## Database Schema Rule
+
+**Never propose adding columns to `bw_frames`.** The `meta` JSONB column stores all per-frame data — new fields go into `meta` as keys, no `ALTER TABLE` needed. The only promoted columns are `id`, `captured_at`, `result`, `filename`, `meta`. The `bw_photos` table (legacy) may still receive column migrations, but `bw_frames` must not.
 

@@ -64,24 +64,42 @@ static const char *NVS_NS = "cc";
 #define CC_WARMUP_FRAMES    4       // frames before model is considered bootstrapped
 #define CC_NIGHT_THRESHOLD  70      // frame global mean below this → NIGHT → upload (sun is down)
 
+// ── Burst pre-filter parameters ───────────────────────────────────────────────
+// Matches BurstConfig() defaults in burst_filter.py exactly.
+// Applied BEFORE the background-model pipeline to suppress PIR re-fires on
+// cloud/sun transitions.  Does NOT implement FAST_SHIFT or ISOLATED — those
+// stages require dt_seconds which is unavailable before WiFi/SNTP sync.
+// They are validated offline against training data by validate_burst.py.
+#define CC_BURST_BRIGHT_SIM_THR   12    // |gm_diff| > this → BRIGHTNESS_SHIFT → process
+#define CC_BURST_TILE_DIFF_THR    12    // |tile_diff| > this → counts toward n_changed
+#define CC_BURST_DARK_DIFF_THR    12    // (prev - curr) > this → counts toward n_dark
+#define CC_BURST_DUP_MAX_TILES     0    // n_changed ≤ this → DUPLICATE → suppress
+#define CC_BURST_DIFFUSE_MIN_DARK 60    // n_dark ≥ this → DIFFUSE → suppress
+#define CC_BURST_BS_MIN_GM       160    // BRIGHT_STABLE: global_mean must exceed this
+#define CC_BURST_BS_MAX_DARK      35    // BRIGHT_STABLE: suppress when n_dark < this
+
 // ── NVS key names ─────────────────────────────────────────────────────────────
 // "cc_m"   : tile means     (300 × float  = 1200 B)
 // "cc_v"   : tile variances (300 × float  = 1200 B)
 // "cc_p"   : previous-frame tile means (300 × uint8 = 300 B)
+// "cc_pgm" : previous-frame global mean (uint8)
 // "cc_seen": total frames observed this bucket (uint16)
 // NOTE: blob size change (192→300 tiles) is detected on load — mismatched blobs
 // are silently discarded and the model re-initialises from the prior.
-static const char *KEY_MEAN  = "cc_m";
-static const char *KEY_VAR   = "cc_v";
-static const char *KEY_PREV  = "cc_p";
-static const char *KEY_SEEN  = "cc_seen";
+static const char *KEY_MEAN    = "cc_m";
+static const char *KEY_VAR     = "cc_v";
+static const char *KEY_PREV    = "cc_p";
+static const char *KEY_PREV_GM = "cc_pgm";
+static const char *KEY_SEEN    = "cc_seen";
 
 // ── In-RAM model state ────────────────────────────────────────────────────────
 static float    s_mean[CC_NUM_TILES];
 static float    s_var[CC_NUM_TILES];
 static uint8_t  s_prev[CC_NUM_TILES];
-static bool     s_prev_valid  = false;
-static uint16_t s_frames_seen = 0;   // total non-NIGHT frames processed (mirrors Python bucket_seen
+static bool     s_prev_valid    = false;
+static uint8_t  s_prev_gm       = 128;
+static bool     s_prev_gm_valid = false;
+static uint16_t s_frames_seen   = 0;   // total non-NIGHT frames processed (mirrors Python bucket_seen
                                       // for the active time-of-day bucket; NIGHT frames skip this
                                       // counter because they precede the NIGHT gate and updating the
                                       // count there would over-inflate warmup — same net effect as
@@ -133,15 +151,19 @@ static void save_model(void)
 static void load_prev(void)
 {
     nvs_handle_t h;
-    s_prev_valid = false;
+    s_prev_valid    = false;
+    s_prev_gm_valid = false;
     if (nvs_open(NVS_NS, NVS_READONLY, &h) != ESP_OK) return;
     size_t sp = sizeof(s_prev);
     s_prev_valid = (nvs_get_blob(h, KEY_PREV, s_prev, &sp) == ESP_OK && sp == sizeof(s_prev));
+    uint8_t pgm = 128;
+    s_prev_gm_valid = (nvs_get_u8(h, KEY_PREV_GM, &pgm) == ESP_OK);
+    s_prev_gm = pgm;
     nvs_close(h);
-    if (!s_prev_valid) ESP_LOGI(TAG, "no prior frame — temporal check skipped");
+    if (!s_prev_valid) ESP_LOGI(TAG, "no prior frame — burst+temporal check skipped");
 }
 
-static void save_prev(const uint8_t *tile_means)
+static void save_prev(const uint8_t *tile_means, uint8_t global_mean)
 {
     nvs_handle_t h;
     if (nvs_open(NVS_NS, NVS_READWRITE, &h) != ESP_OK) {
@@ -149,6 +171,7 @@ static void save_prev(const uint8_t *tile_means)
         return;
     }
     nvs_set_blob(h, KEY_PREV, tile_means, CC_NUM_TILES);
+    nvs_set_u8(h,  KEY_PREV_GM, global_mean);
     nvs_commit(h);
     nvs_close(h);
 }
@@ -200,9 +223,6 @@ static void update_model(const uint8_t *means)
 
 static void run_pipeline(const uint8_t *means, bw_cc_result_t *out)
 {
-    // NIGHT — frame too dark for reliable anomaly detection → upload unconditionally.
-    // Proxy for "sun is down" that requires no clock or location.  Matches Python
-    // Stage 0 in classifier.py (tile_mean.mean() < night_brightness_threshold).
     uint32_t gm_sum = 0;
     for (int i = 0; i < CC_NUM_TILES; i++) gm_sum += means[i];
     uint32_t global_mean = gm_sum / CC_NUM_TILES;
@@ -210,10 +230,91 @@ static void run_pipeline(const uint8_t *means, bw_cc_result_t *out)
     bw_tele_i("global_mean", (long)global_mean);
     bw_tele_arr_u8("tile_means", means, CC_NUM_TILES);
 
+    // ── Burst pre-filter ──────────────────────────────────────────────────────
+    // Compares current frame to the previous captured frame to suppress PIR
+    // re-fires on sun/cloud transitions.  The following stages match Python
+    // burst_filter.py exactly for the cases that don't require dt_seconds.
+    // FAST_SHIFT and ISOLATED are omitted — no wall clock before WiFi/SNTP.
+    {
+        const char *burst_trigger;
+        const char *burst_label;
+        int gm_diff    = 0;
+        int n_changed  = 0;
+        int n_dark     = 0;
+
+        if (!s_prev_valid || !s_prev_gm_valid) {
+            // FIRST — no previous frame available
+            burst_trigger = "FIRST";
+            burst_label   = "process";
+        } else {
+            // Signed diff, then abs — use int to avoid uint8 wrap-around
+            gm_diff = (int)global_mean - (int)s_prev_gm;
+            if (gm_diff < 0) gm_diff = -gm_diff;
+
+            if (gm_diff > CC_BURST_BRIGHT_SIM_THR) {
+                // BRIGHTNESS_SHIFT — large whole-scene illumination change → process.
+                // Covers the role of ISOLATED + FAST_SHIFT + BRIGHTNESS_SHIFT for the
+                // no-dt case: any significant brightness jump is treated as process.
+                burst_trigger = "BRIGHTNESS_SHIFT";
+                burst_label   = "process";
+            } else {
+                // Compute tile-level diffs (only when gm_diff is within threshold)
+                for (int i = 0; i < CC_NUM_TILES; i++) {
+                    int diff = (int)means[i] - (int)s_prev[i];
+                    if (diff < 0 ? -diff > CC_BURST_TILE_DIFF_THR : diff > CC_BURST_TILE_DIFF_THR)
+                        n_changed++;
+                    if (-diff > CC_BURST_DARK_DIFF_THR)   // prev - curr > thr: got darker
+                        n_dark++;
+                }
+
+                if (n_changed <= CC_BURST_DUP_MAX_TILES) {
+                    // DUPLICATE — pixel-identical burst re-fire
+                    burst_trigger = "DUPLICATE";
+                    burst_label   = "suppress";
+                } else if ((uint32_t)global_mean > CC_BURST_BS_MIN_GM
+                           && n_dark < CC_BURST_BS_MAX_DARK) {
+                    // BRIGHT_STABLE — bright scene, very few dark tiles: no object present
+                    burst_trigger = "BRIGHT_STABLE";
+                    burst_label   = "suppress";
+                } else if (n_dark >= CC_BURST_DIFFUSE_MIN_DARK) {
+                    // DIFFUSE — massive darkening: cloud shadow sweeping the scene
+                    burst_trigger = "DIFFUSE";
+                    burst_label   = "suppress";
+                } else {
+                    // SAFE — safety bias: upload
+                    burst_trigger = "SAFE";
+                    burst_label   = "process";
+                }
+            }
+        }
+
+        bw_tele_s("burst_trigger",   burst_trigger);
+        bw_tele_s("burst_label",     burst_label);
+        bw_tele_i("burst_gm_diff",   gm_diff);
+        bw_tele_i("burst_n_changed", n_changed);
+        bw_tele_i("burst_n_dark",    n_dark);
+        ESP_LOGI(TAG, "BURST %-17s gm_diff=%d n=%d nd=%d → %s",
+                 burst_trigger, gm_diff, n_changed, n_dark, burst_label);
+
+        if (burst_label[0] == 's') {   // "suppress"
+            save_prev(means, (uint8_t)global_mean);
+            strcpy(out->label, "clouds");
+            strcpy(out->stage, burst_trigger);
+            bw_tele_s("result", "clouds");
+            bw_tele_s("stage",  burst_trigger);
+            return;
+        }
+        // burst_label == "process" → fall through to background-model pipeline
+    }
+
+    // ── NIGHT ─────────────────────────────────────────────────────────────────
+    // Frame too dark for reliable anomaly detection → upload unconditionally.
+    // Proxy for "sun is down" that requires no clock or location.  Matches Python
+    // Stage 0 in classifier.py (tile_mean.mean() < night_brightness_threshold).
     if (global_mean < CC_NIGHT_THRESHOLD) {
         update_model(means);
         save_model();
-        save_prev(means);
+        save_prev(means, (uint8_t)global_mean);
         strcpy(out->label, "process");
         strcpy(out->stage, "NIGHT");
         bw_tele_s("result", "process");
@@ -235,7 +336,7 @@ static void run_pipeline(const uint8_t *means, bw_cc_result_t *out)
     if (warmup) {
         update_model(means);
         save_model();
-        save_prev(means);
+        save_prev(means, (uint8_t)global_mean);
         strcpy(out->label, "process");
         strcpy(out->stage, "WARMUP");
         bw_tele_s("result", "process");
@@ -288,7 +389,7 @@ static void run_pipeline(const uint8_t *means, bw_cc_result_t *out)
 
     // DARK_OBJ — compact dark object appeared this frame
     if (dark_obj_cond) {
-        save_prev(means);
+        save_prev(means, (uint8_t)global_mean);
         strcpy(out->label, "process");
         strcpy(out->stage, "DARK_OBJ");
         bw_tele_s("result", "process");
@@ -302,7 +403,7 @@ static void run_pipeline(const uint8_t *means, bw_cc_result_t *out)
     if (ratio <= CC_QUIET_RATIO) {
         update_model(means);
         save_model();
-        save_prev(means);
+        save_prev(means, (uint8_t)global_mean);
         strcpy(out->label, "clouds");
         strcpy(out->stage, "QUIET");
         bw_tele_s("result", "clouds");
@@ -317,7 +418,7 @@ static void run_pipeline(const uint8_t *means, bw_cc_result_t *out)
         update_model(means);
         s_frames_seen = 0;   // reset warmup — scene changed, re-bootstrap before suppressing
         save_model();        // saves s_frames_seen = 0 via KEY_SEEN
-        save_prev(means);
+        save_prev(means, (uint8_t)global_mean);
         strcpy(out->label, "process");
         strcpy(out->stage, "SCENE_DRIFT");
         bw_tele_s("result", "process");
@@ -328,7 +429,7 @@ static void run_pipeline(const uint8_t *means, bw_cc_result_t *out)
     }
 
     // AMBIGUOUS — default: upload (safety bias, never suppress on doubt)
-    save_prev(means);
+    save_prev(means, (uint8_t)global_mean);
     strcpy(out->label, "process");
     strcpy(out->stage, "AMBIGUOUS");
     bw_tele_s("result", "process");
@@ -349,6 +450,7 @@ void bw_cc_reset(void)
     nvs_erase_key(h, KEY_MEAN);
     nvs_erase_key(h, KEY_VAR);
     nvs_erase_key(h, KEY_PREV);
+    nvs_erase_key(h, KEY_PREV_GM);
     nvs_erase_key(h, KEY_SEEN);
     nvs_commit(h);
     nvs_close(h);

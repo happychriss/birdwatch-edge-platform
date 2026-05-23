@@ -36,6 +36,7 @@ ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 
 from cloud_check.background import BackgroundModel
+from cloud_check.burst_filter import BurstConfig, burst_classify
 from cloud_check.classifier import classify
 from cloud_check.config import Config
 from cloud_check.dataset import DATASET_ROOT, Sample, load_dataset
@@ -54,10 +55,14 @@ from cloud_check.features import (
 
 _cfg = Config()
 _model = BackgroundModel(_cfg)
+_burst_cfg = BurstConfig()
 _model_lock = threading.Lock()
 _assess_count = 0
 _start_time = time.time()
-_prev_tile_mean: dict[int, "np.ndarray"] = {}  # bucket_idx → last tile_mean
+_prev_tile_mean: dict[int, "np.ndarray"] = {}   # bucket_idx → last tile_mean (background model)
+_burst_prev_tile_mean: "np.ndarray | None" = None  # burst filter state
+_burst_prev_gm: "float | None" = None
+_burst_prev_time: "float | None" = None
 
 
 # ---------------------------------------------------------------------------
@@ -116,8 +121,40 @@ def assess():
         return jsonify(error=f"could not decode image: {e}"), 400
 
     feats = extract_tile_features(frame)
+    import numpy as np
+    gm = float(feats["mean"].mean())
 
     with _model_lock:
+        global _burst_prev_tile_mean, _burst_prev_gm, _burst_prev_time
+
+        # ── Burst pre-filter ──────────────────────────────────────────────────
+        now = time.time()
+        dt = (now - _burst_prev_time) if _burst_prev_time is not None else float('inf')
+        burst = burst_classify(
+            feats["mean"], gm, _burst_prev_tile_mean, _burst_prev_gm, dt, _burst_cfg
+        )
+        # Always update burst state (mirrors ESP NVS save_prev — every frame)
+        _burst_prev_tile_mean = feats["mean"]
+        _burst_prev_gm = gm
+        _burst_prev_time = now
+
+        if burst.label == "suppress":
+            # Also advance background-model prev so temporal check stays valid
+            bucket = _model._idx(hour)
+            _prev_tile_mean[bucket] = feats["mean"]
+            _assess_count += 1
+            return jsonify(
+                label="clouds",
+                trigger=burst.trigger,
+                reason=burst.reason,
+                burst_n_changed=burst.n_changed,
+                burst_n_dark=burst.n_dark,
+                burst_gm_diff=round(burst.gm_diff, 2),
+                action="suppress",
+                assessed_at=datetime.now().isoformat(timespec="seconds"),
+            )
+
+        # ── Background-model pipeline ─────────────────────────────────────────
         bucket = _model._idx(hour)
         prev = _prev_tile_mean.get(bucket)
         was_warmup = _model.warmup_remaining(hour) > 0
@@ -180,10 +217,14 @@ def model_status():
 @app.route("/model/reset", methods=["POST"])
 def model_reset():
     global _model, _assess_count, _prev_tile_mean
+    global _burst_prev_tile_mean, _burst_prev_gm, _burst_prev_time
     with _model_lock:
         _model = BackgroundModel(_cfg)
         _assess_count = 0
         _prev_tile_mean = {}
+        _burst_prev_tile_mean = None
+        _burst_prev_gm = None
+        _burst_prev_time = None
     return jsonify(status="reset", timestamp=datetime.now().isoformat(timespec="seconds"))
 
 

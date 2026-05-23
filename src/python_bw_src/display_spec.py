@@ -30,15 +30,37 @@ DISPLAY_SPEC: dict = {
     "stage": {
         "type": "stage_badge",
         "palette": {
+            # Background-model stages
             "NIGHT":          "#1a1a2e",
             "WARMUP":         "#9b59b6",
             "DARK_OBJ":       "#2ecc71",
-            "INDIRECT_LIGHT": "#e74c3c",
-            "SPOT_CHANGE":    "#ff6b35",
             "QUIET":          "#3498db",
             "SCENE_DRIFT":    "#e67e22",
             "AMBIGUOUS":      "#f39c12",
             "CAM_ERR":        "#c0392b",
+            # Burst-filter stages
+            "FIRST":          "#7f8c8d",
+            "ISOLATED":       "#95a5a6",
+            "BRIGHTNESS_SHIFT": "#1abc9c",
+            "FAST_SHIFT":     "#e74c3c",
+            "DUPLICATE":      "#4a4a4a",
+            "BRIGHT_STABLE":  "#2471a3",
+            "DIFFUSE":        "#154360",
+            "SAFE":           "#27ae60",
+        },
+        "fallback": "#aab",
+    },
+    "burst_trigger": {
+        "type": "stage_badge",
+        "palette": {
+            "FIRST":          "#7f8c8d",
+            "ISOLATED":       "#95a5a6",
+            "BRIGHTNESS_SHIFT": "#1abc9c",
+            "FAST_SHIFT":     "#e74c3c",
+            "DUPLICATE":      "#4a4a4a",
+            "BRIGHT_STABLE":  "#2471a3",
+            "DIFFUSE":        "#154360",
+            "SAFE":           "#27ae60",
         },
         "fallback": "#aab",
     },
@@ -61,13 +83,23 @@ DISPLAY_SPEC: dict = {
         "hide_values": ["Boot", "PIR", "Timer", "Camera Start", "Camera Stop"],
     },
     # Numeric intermediates — shown as plain numbers, no badge.
-    "global_mean":   {"type": "numeric"},
-    "ratio":         {"type": "format_val", "format": "{:.3f}"},
-    "dark_anomalous": {"type": "numeric"},
-    "dark_tiles":    {"type": "numeric"},
-    "new_dark_tiles": {"type": "numeric"},
-    "warmup":        {"type": "numeric"},
-    "prev_valid":    {"type": "numeric"},
+    "global_mean":     {"type": "numeric"},
+    "ratio":           {"type": "format_val", "format": "{:.3f}"},
+    "dark_anomalous":  {"type": "numeric"},
+    "dark_tiles":      {"type": "numeric"},
+    "new_dark_tiles":  {"type": "numeric"},
+    "warmup":          {"type": "numeric"},
+    "prev_valid":      {"type": "numeric"},
+    "burst_n_changed": {"type": "numeric"},
+    "burst_n_dark":    {"type": "numeric"},
+    # Simulated marker — shown when meta was computed by backfill_meta.py, not firmware.
+    "simulated": {
+        "type": "badge_if",
+        "match_value": True,
+        "label": "SIM",
+        "color": "#7d6608",
+        "text_color": "#fff",
+    },
     # tile_means is a large array — hide from card view, show in detail view only.
     "tile_means":    {"type": "detail_only"},
     # Firmware-flash marker — badge only on the first frame after a new build.
@@ -79,11 +111,22 @@ DISPLAY_SPEC: dict = {
         "text_color": "#fff",
     },
     "fw_build":    {"type": "detail_only"},
+    # Manual annotation labels (set via keyboard in frame_detail view).
+    "label": {
+        "type": "badge",
+        "colors": {
+            "bird":    ("#d5f5e3", "#1e8449"),
+            "special": ("#fef9e7", "#7d6608"),
+            "ignore":  ("#f4f6f7", "#7f8c8d"),
+        },
+        "fallback": ("#eee", "#778"),
+    },
 }
 
 # Key display order for the card info panel (unlisted keys are appended after).
 DISPLAY_ORDER = [
-    "result", "stage", "photo_mode", "fresh_flash",
+    "result", "stage", "burst_trigger", "photo_mode", "fresh_flash", "simulated",
     "battery", "trigger",
     "global_mean", "ratio", "dark_tiles", "new_dark_tiles",
+    "burst_n_changed", "burst_n_dark",
 ]

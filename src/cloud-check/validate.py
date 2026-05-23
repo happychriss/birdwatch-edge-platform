@@ -42,10 +42,18 @@ if str(_server_dir) not in sys.path:
     sys.path.insert(0, str(_server_dir))
 
 from cloud_check.background import BackgroundModel
+from cloud_check.burst_filter import BurstConfig, burst_classify
 from cloud_check.classifier import classify, ClassifierResult
 from cloud_check.config import Config
 from cloud_check.features import extract_tile_features, load_gray_vga
 from db import BwFrame, Session
+
+# Burst stages that suppress without needing dt_seconds — ESP implements these
+# and the Python validator can check them for exact parity.
+# FAST_SHIFT and ISOLATED require dt_seconds which the ESP cannot compute before
+# WiFi/SNTP sync; when Python classifies these, we fall through to the background
+# model comparison (ESP would have classified BRIGHTNESS_SHIFT → process).
+_BURST_SUPPRESS_STAGES = frozenset({'DUPLICATE', 'BRIGHT_STABLE', 'DIFFUSE'})
 
 
 # ── config helpers ────────────────────────────────────────────────────────────
@@ -117,6 +125,21 @@ def _get_py_field(result: ClassifierResult, py_field: str, tile_mean: np.ndarray
     return getattr(result, py_field, None)
 
 
+def _get_py_field_burst(burst_trigger: str, py_field: str, tile_mean: np.ndarray) -> Any:
+    """Extract a Python-side value for a burst-suppressed frame.
+
+    Only label, trigger/stage, and global_mean are meaningful for burst frames;
+    all other background-model fields (ratio, warmup, etc.) are skipped.
+    """
+    if py_field == 'label':
+        return 'clouds'
+    if py_field == 'trigger':
+        return burst_trigger
+    if py_field == 'global_mean':
+        return int(float(tile_mean.mean()))
+    return None   # ratio, warmup, etc. — N/A for burst stage
+
+
 # ── main entry point ──────────────────────────────────────────────────────────
 
 def run(config_path: str | None = None) -> list[dict]:
@@ -154,7 +177,11 @@ def run(config_path: str | None = None) -> list[dict]:
     )
 
     model = BackgroundModel(py_cfg)
+    burst_cfg = BurstConfig()
     prev_tile_mean: np.ndarray | None = None
+    prev_burst_tile_mean: np.ndarray | None = None
+    prev_burst_gm: float | None = None
+    prev_burst_ts: datetime | None = None
     results: list[dict] = []
     db = Session()
 
@@ -224,20 +251,53 @@ def run(config_path: str | None = None) -> list[dict]:
                     })
                     continue
 
-            # ── run Python classifier ─────────────────────────────────────
-            model.observe(hour)
-            py_result = classify(tile_mean, hour, model, py_cfg, prev_tile_mean=prev_tile_mean)
+            # ── run burst pre-filter ──────────────────────────────────────
+            burst_gm = float(tile_mean.mean())
+            if prev_burst_ts is not None and frame.captured_at is not None:
+                burst_dt = (frame.captured_at.replace(tzinfo=None)
+                            - prev_burst_ts.replace(tzinfo=None)).total_seconds()
+                if burst_dt < 0:
+                    burst_dt = float('inf')
+            else:
+                burst_dt = float('inf')
 
-            # Update model (mirrors pipeline.py update policy)
-            was_warmup = model.warmup_remaining(hour) > 0
-            if was_warmup or py_result.label == 'clouds' or py_result.trigger in (
-                'SCENE_DRIFT', 'NIGHT'
-            ):
-                model.update(hour, tile_mean)
-            if py_result.trigger == 'SCENE_DRIFT':
-                model.reset_warmup(hour)
+            burst_result = burst_classify(
+                tile_mean, burst_gm, prev_burst_tile_mean, prev_burst_gm,
+                burst_dt, burst_cfg,
+            )
+            # Always update burst state (mirrors ESP save_prev — every frame)
+            prev_burst_tile_mean = tile_mean
+            prev_burst_gm = burst_gm
+            prev_burst_ts = frame.captured_at
 
-            prev_tile_mean = tile_mean
+            # Determine whether the burst filter would suppress this frame.
+            # FAST_SHIFT / ISOLATED are dt-dependent; the ESP cannot compute
+            # dt before WiFi/SNTP sync, so it classifies those as
+            # BRIGHTNESS_SHIFT → process.  Treat them as process here too.
+            burst_suppresses = (burst_result.label == 'suppress'
+                                and burst_result.trigger in _BURST_SUPPRESS_STAGES)
+
+            if burst_suppresses:
+                # ── Burst-suppressed: compare burst result only ────────────
+                # Background model does not run on the ESP for these frames;
+                # skip model.observe/update.  Still advance prev_tile_mean so
+                # the temporal check on the next frame matches ESP behaviour.
+                prev_tile_mean = tile_mean
+            else:
+                # ── Background model ──────────────────────────────────────
+                model.observe(hour)
+                py_result = classify(tile_mean, hour, model, py_cfg, prev_tile_mean=prev_tile_mean)
+
+                # Update model (mirrors pipeline.py update policy)
+                was_warmup = model.warmup_remaining(hour) > 0
+                if was_warmup or py_result.label == 'clouds' or py_result.trigger in (
+                    'SCENE_DRIFT', 'NIGHT'
+                ):
+                    model.update(hour, tile_mean)
+                if py_result.trigger == 'SCENE_DRIFT':
+                    model.reset_warmup(hour)
+
+                prev_tile_mean = tile_mean
 
             # ── compare configured checks ─────────────────────────────────
             checks_detail = []
@@ -247,8 +307,15 @@ def run(config_path: str | None = None) -> list[dict]:
                 py_field = check['py_field']
                 esp_val  = meta.get(esp_key)
                 if esp_val is None:
-                    continue   # ESP didn't emit this key — skip
-                py_val = _get_py_field(py_result, py_field, tile_mean)
+                    continue   # ESP didn't emit this key — skip silently
+
+                if burst_suppresses:
+                    py_val = _get_py_field_burst(burst_result.trigger, py_field, tile_mean)
+                    if py_val is None:
+                        continue   # field not meaningful for burst frames
+                else:
+                    py_val = _get_py_field(py_result, py_field, tile_mean)
+
                 m = _compare(check, esp_val, py_val)
                 if m:
                     m['match'] = False

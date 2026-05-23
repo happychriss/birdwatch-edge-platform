@@ -102,6 +102,28 @@
 
   .no-photo { color: #8a9bb0; font-size: 14px; padding: 60px;
               background: #fff; border-radius: 6px; text-align: center; }
+
+  /* ── Label bar ── */
+  .label-bar {
+    background: #f8fbff; border-bottom: 1px solid #dce8f0;
+    padding: 8px 14px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  }
+  .label-btn {
+    padding: 7px 18px; border-radius: 8px; border: 2px solid transparent;
+    font-size: 13px; font-weight: 700; cursor: pointer; transition: all 0.1s;
+    min-height: 40px;
+  }
+  .label-btn-bird    { background: #e8f5e9; color: #1e8449; border-color: #a5d6a7; }
+  .label-btn-bird.active    { background: #27ae60; color: #fff; border-color: #27ae60; }
+  .label-btn-special { background: #fef9e7; color: #7d6608; border-color: #f9ca24; }
+  .label-btn-special.active { background: #f39c12; color: #fff; border-color: #f39c12; }
+  .label-btn-ignore  { background: #f4f6f7; color: #556; border-color: #ccc; }
+  .label-btn-ignore.active  { background: #7f8c8d; color: #fff; border-color: #7f8c8d; }
+  .label-hint { font-size: 11px; color: #8a9bb0; margin-left: auto; }
+  kbd {
+    display: inline-block; padding: 1px 5px; border: 1px solid #ccc;
+    border-radius: 3px; font-size: 10px; background: #f4f6f7; font-family: monospace;
+  }
 </style>
 </head>
 <body>
@@ -130,6 +152,19 @@
   {% endif %}
 </div>
 
+<!-- ── Label bar ── -->
+<div class="label-bar" id="label-bar">
+  {% set cur_lbl = (entry.meta or {}).get('label') %}
+  <button class="label-btn label-btn-bird    {{ 'active' if cur_lbl == 'bird'    }}" onclick="setLabel('bird')"   >Bird</button>
+  <button class="label-btn label-btn-special {{ 'active' if cur_lbl == 'special' }}" onclick="setLabel('special')">Special</button>
+  <button class="label-btn label-btn-ignore  {{ 'active' if cur_lbl == 'ignore'  }}" onclick="setLabel('ignore')" >Ignore</button>
+  {% set dl = (entry.meta or {}).get('downloaded_at') %}
+  {% if dl %}<span style="font-size:11px;color:#2980b9;font-weight:600;">saved {{ dl[:16] }}</span>{% endif %}
+  <span class="label-hint">
+    <kbd>Space</kbd> bird &nbsp; <kbd>S</kbd> special &nbsp; <kbd>Del</kbd> ignore &nbsp; <kbd>C</kbd> clear
+  </span>
+</div>
+
 <!-- ── Navbar ── -->
 <div class="navbar">
   {% if prev_id %}
@@ -146,7 +181,7 @@
   <button class="nav-btn" id="btn-tiles" onclick="toggleTiles()">&#9783; Tiles</button>
   {% endif %}
   <span class="nav-spacer"></span>
-  <span class="nav-hint">&#8592; &#8594; keys to navigate</span>
+  <span class="nav-hint">&#8592; &#8594; navigate &nbsp;·&nbsp; <kbd style="font-size:10px;border:1px solid #ccc;padding:1px 4px;border-radius:3px;background:#f4f6f7;">T</kbd> tiles</span>
 </div>
 
 <!-- ── Photo ── -->
@@ -251,12 +286,60 @@ window.addEventListener('resize', function() {
   if (tilesOn) drawTiles();
 });
 
+// ── Label ────────────────────────────────────────────────────────────────────
+const FRAME_ID = {{ entry.id }};
+let currentLabel = {{ ((entry.meta or {}).get('label')) | tojson }};
+
+function setLabel(label, thenNav) {
+  const newLabel = (label === currentLabel) ? null : label;  // toggle off if same
+  fetch(`/frame/${FRAME_ID}/label`, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({label: newLabel}),
+  }).then(r => r.json()).then(data => {
+    currentLabel = data.label;
+    _refreshLabelBar();
+    if (thenNav) setTimeout(thenNav, 180);
+  });
+}
+
+function _refreshLabelBar() {
+  ['bird', 'special', 'ignore'].forEach(lbl => {
+    const btn = document.querySelector(`.label-btn-${lbl}`);
+    if (!btn) return;
+    if (currentLabel === lbl) btn.classList.add('active');
+    else btn.classList.remove('active');
+  });
+  // Flash the label bar briefly as visual feedback
+  const bar = document.getElementById('label-bar');
+  bar.style.transition = 'background 0.1s';
+  bar.style.background = currentLabel ? '#e8f5e9' : '#f8fbff';
+  setTimeout(() => { bar.style.background = ''; }, 400);
+}
+
 // ── Keyboard navigation ──────────────────────────────────────────────────────
 document.addEventListener('keydown', function(e) {
+  if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
   {% if prev_id %}if (e.key === 'ArrowLeft')  location.href = '/frame_detail?id={{ prev_id }}';{% endif %}
   {% if next_id %}if (e.key === 'ArrowRight') location.href = '/frame_detail?id={{ next_id }}';{% endif %}
   if (e.key === 'Escape') location.href = '/';
   if (e.key === 't' || e.key === 'T') { if (TILE_MEANS) toggleTiles(); }
+
+  // Label shortcuts — navigate to next after labeling
+  {% set nav_next = "location.href = '/frame_detail?id=" + next_id|string + "'" if next_id else "" %}
+  if (e.key === ' ') {
+    e.preventDefault();
+    setLabel('bird'{% if next_id %}, function(){ {{ nav_next }}; }{% endif %});
+  }
+  if (e.key === 's' || e.key === 'S') {
+    setLabel('special'{% if next_id %}, function(){ {{ nav_next }}; }{% endif %});
+  }
+  if (e.key === 'Delete') {
+    setLabel('ignore'{% if next_id %}, function(){ {{ nav_next }}; }{% endif %});
+  }
+  if (e.key === 'c' || e.key === 'C') {
+    setLabel(null);
+  }
 });
 </script>
 
