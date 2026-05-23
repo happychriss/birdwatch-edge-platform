@@ -100,6 +100,29 @@
   }
   #tile-canvas.visible { display: block; }
 
+  /* ── Label / saved overlay on image ── */
+  .img-label {
+    position: absolute; top: 8px; left: 8px; z-index: 3;
+    padding: 2px 8px; border-radius: 8px;
+    font-size: 10px; font-weight: 700; text-transform: uppercase;
+    letter-spacing: 0.3px; pointer-events: none;
+  }
+  .img-label-right { left: auto; right: 8px; }
+  .flag-bird    { background: #27ae60; color: #fff; }
+  .flag-special { background: #f39c12; color: #fff; }
+  .flag-ignore  { background: #7f8c8d; color: #fff; }
+  .flag-saved   { background: #2980b9; color: #fff; }
+
+  /* ── Tile tooltip ── */
+  #tile-tooltip {
+    display: none; position: fixed; z-index: 200;
+    background: rgba(10,20,35,0.88); color: #e8f4fd;
+    padding: 6px 10px; border-radius: 6px;
+    font-size: 11px; font-family: monospace; line-height: 1.7;
+    pointer-events: none; white-space: pre;
+    box-shadow: 0 2px 10px rgba(0,0,0,0.4);
+  }
+
   .no-photo { color: #8a9bb0; font-size: 14px; padding: 60px;
               background: #fff; border-radius: 6px; text-align: center; }
 
@@ -187,26 +210,33 @@
 <!-- ── Photo ── -->
 <div class="photo-wrap">
   {% if entry.filename %}
+    {% set cur_lbl = (entry.meta or {}).get('label') %}
+    {% set dl = (entry.meta or {}).get('downloaded_at') %}
     <div class="img-wrap" id="img-wrap">
       <img id="frame-img" src="{{ url_for('static', filename=entry.filename) }}" alt="frame">
       <canvas id="tile-canvas"></canvas>
+      <span id="label-overlay"
+            class="img-label{% if cur_lbl %} flag-{{ cur_lbl }}{% endif %}"
+            {% if not cur_lbl %}style="display:none"{% endif %}>{{ cur_lbl or '' }}</span>
+      {% if dl %}<span class="img-label img-label-right flag-saved">saved</span>{% endif %}
     </div>
   {% else %}
     <div class="no-photo">No image available</div>
   {% endif %}
 </div>
 
+<div id="tile-tooltip"></div>
+
 <script>
-// ── Tile overlay ────────────────────────────────────────────────────────────
+// ── Tile overlay ─────────────────────────────────────────────────────────────
 const TILE_MEANS  = {{ (entry.meta.get('tile_means') if entry.meta else None) | tojson }};
+const PREV_TILE_MEANS = {{ prev_tile_means | tojson }};
 const GLOBAL_MEAN = {{ (entry.meta.get('global_mean', 128) if entry.meta else 128) | tojson }};
-// Grid dimensions derived from the tile_means array (firmware-reported).
-// 20×15 = 300 (current), 16×12 = 192 (legacy) — both aspect ratios are 4:3.
+// 20×15 = 300 tiles (current firmware), 16×12 = 192 (legacy)
 const TILE_COLS = (TILE_MEANS && TILE_MEANS.length === 192) ? 16 : 20;
 const TILE_ROWS = (TILE_MEANS && TILE_MEANS.length === 192) ? 12 : 15;
-// Thresholds mirroring ESP firmware constants
-const DARK_DELTA_MODEL = 35;   // CC_DARK_DELTA_MODEL
-const DARK_DELTA_PREV  = 20;   // CC_DARK_DELTA_PREV (also used as "bright" threshold)
+const DARK_DELTA_MODEL = 35;
+const DARK_DELTA_PREV  = 20;
 
 let tilesOn = false;
 
@@ -214,49 +244,34 @@ function drawTiles() {
   const img    = document.getElementById('frame-img');
   const canvas = document.getElementById('tile-canvas');
   if (!img || !canvas || !TILE_MEANS) return;
-
-  // Match canvas pixel dimensions to rendered image size
   const w = img.offsetWidth, h = img.offsetHeight;
   canvas.width  = w;
   canvas.height = h;
-
   const ctx = canvas.getContext('2d');
   ctx.clearRect(0, 0, w, h);
-
-  const tw = w / TILE_COLS;
-  const th = h / TILE_ROWS;
+  const tw = w / TILE_COLS, th = h / TILE_ROWS;
   const fontSize = Math.max(7, Math.min(11, tw * 0.38)) + 'px';
-
   for (let row = 0; row < TILE_ROWS; row++) {
     for (let col = 0; col < TILE_COLS; col++) {
       const val   = TILE_MEANS[row * TILE_COLS + col];
-      const delta = GLOBAL_MEAN - val;   // positive = darker than global mean
+      const delta = GLOBAL_MEAN - val;   // positive = tile is darker than global mean
       const x = col * tw, y = row * th;
-
-      // Fill: red for dark tiles (potential object), blue for bright, clear for neutral
       if (delta >= DARK_DELTA_MODEL) {
-        // Strongly darker than mean → likely object tile
         const alpha = Math.min(0.72, 0.35 + (delta - DARK_DELTA_MODEL) / 80);
         ctx.fillStyle = `rgba(210,50,50,${alpha.toFixed(2)})`;
         ctx.fillRect(x, y, tw, th);
       } else if (delta >= DARK_DELTA_PREV) {
-        // Moderately darker
         const alpha = (delta - DARK_DELTA_PREV) / (DARK_DELTA_MODEL - DARK_DELTA_PREV) * 0.35;
         ctx.fillStyle = `rgba(210,120,50,${alpha.toFixed(2)})`;
         ctx.fillRect(x, y, tw, th);
       } else if (delta <= -DARK_DELTA_PREV) {
-        // Brighter than mean → blue tint
         const alpha = Math.min(0.35, (-delta - DARK_DELTA_PREV) / 80);
         ctx.fillStyle = `rgba(50,110,220,${alpha.toFixed(2)})`;
         ctx.fillRect(x, y, tw, th);
       }
-
-      // Grid lines
       ctx.strokeStyle = 'rgba(255,255,255,0.30)';
       ctx.lineWidth = 0.5;
       ctx.strokeRect(x + 0.5, y + 0.5, tw - 1, th - 1);
-
-      // Value text
       ctx.font = `${fontSize} monospace`;
       ctx.fillStyle = 'rgba(255,255,255,0.92)';
       ctx.shadowColor = 'rgba(0,0,0,0.7)';
@@ -274,24 +289,55 @@ function toggleTiles() {
   if (tilesOn) {
     drawTiles();
     canvas.classList.add('visible');
-    btn.classList.add('active');
+    if (btn) btn.classList.add('active');
   } else {
     canvas.classList.remove('visible');
-    btn.classList.remove('active');
+    if (btn) btn.classList.remove('active');
   }
 }
 
-// Redraw on resize so the overlay stays aligned
-window.addEventListener('resize', function() {
-  if (tilesOn) drawTiles();
-});
+window.addEventListener('resize', function() { if (tilesOn) drawTiles(); });
 
-// ── Label ────────────────────────────────────────────────────────────────────
+// ── Tile tooltip on hover ─────────────────────────────────────────────────────
+const _tooltip = document.getElementById('tile-tooltip');
+const _imgWrap = document.getElementById('img-wrap');
+if (_imgWrap) {
+  _imgWrap.addEventListener('mousemove', function(e) {
+    if (!tilesOn || !TILE_MEANS) { _tooltip.style.display = 'none'; return; }
+    const img  = document.getElementById('frame-img');
+    const rect = img.getBoundingClientRect();
+    const x = e.clientX - rect.left, y = e.clientY - rect.top;
+    if (x < 0 || y < 0 || x > rect.width || y > rect.height) {
+      _tooltip.style.display = 'none'; return;
+    }
+    const col = Math.min(TILE_COLS - 1, Math.floor(x / rect.width  * TILE_COLS));
+    const row = Math.min(TILE_ROWS - 1, Math.floor(y / rect.height * TILE_ROWS));
+    const idx = row * TILE_COLS + col;
+    const val = TILE_MEANS[idx];
+    const dGlobal = val - GLOBAL_MEAN;
+    const sign = v => (v >= 0 ? '+' : '') + v;
+    let lines = [
+      `tile [${row},${col}]   DN: ${val}`,
+      `Δ global:  ${sign(dGlobal)}  (${dGlobal >= 0 ? 'brighter' : 'darker'})`,
+    ];
+    if (PREV_TILE_MEANS && PREV_TILE_MEANS.length === TILE_MEANS.length) {
+      const dPrev = val - PREV_TILE_MEANS[idx];
+      lines.push(`Δ prev:    ${sign(dPrev)}  (${dPrev >= 0 ? 'brighter' : 'darker'})`);
+    }
+    _tooltip.textContent = lines.join('\n');
+    _tooltip.style.display = 'block';
+    _tooltip.style.left = (e.clientX + 14) + 'px';
+    _tooltip.style.top  = (e.clientY - 10) + 'px';
+  });
+  _imgWrap.addEventListener('mouseleave', function() { _tooltip.style.display = 'none'; });
+}
+
+// ── Label ─────────────────────────────────────────────────────────────────────
 const FRAME_ID = {{ entry.id }};
 let currentLabel = {{ ((entry.meta or {}).get('label')) | tojson }};
 
 function setLabel(label, thenNav) {
-  const newLabel = (label === currentLabel) ? null : label;  // toggle off if same
+  const newLabel = (label === currentLabel) ? null : label;
   fetch(`/frame/${FRAME_ID}/label`, {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
@@ -300,44 +346,60 @@ function setLabel(label, thenNav) {
     currentLabel = data.label;
     _refreshLabelBar();
     if (thenNav) setTimeout(thenNav, 180);
-  });
+  }).catch(err => console.error('setLabel:', err));
 }
 
 function _refreshLabelBar() {
+  // Update image overlay chip
+  const overlay = document.getElementById('label-overlay');
+  if (overlay) {
+    if (currentLabel) {
+      overlay.textContent = currentLabel;
+      overlay.className = `img-label flag-${currentLabel}`;
+      overlay.style.display = '';
+    } else {
+      overlay.style.display = 'none';
+    }
+  }
+  // Update label bar button states
   ['bird', 'special', 'ignore'].forEach(lbl => {
     const btn = document.querySelector(`.label-btn-${lbl}`);
-    if (!btn) return;
-    if (currentLabel === lbl) btn.classList.add('active');
-    else btn.classList.remove('active');
+    if (btn) { currentLabel === lbl ? btn.classList.add('active') : btn.classList.remove('active'); }
   });
-  // Flash the label bar briefly as visual feedback
+  // Brief green flash on label bar
   const bar = document.getElementById('label-bar');
-  bar.style.transition = 'background 0.1s';
-  bar.style.background = currentLabel ? '#e8f5e9' : '#f8fbff';
-  setTimeout(() => { bar.style.background = ''; }, 400);
+  if (bar) {
+    bar.style.transition = 'background 0.1s';
+    bar.style.background = currentLabel ? '#e8f5e9' : '#f8fbff';
+    setTimeout(() => { bar.style.background = ''; }, 400);
+  }
 }
 
-// ── Keyboard navigation ──────────────────────────────────────────────────────
+// ── Keyboard ──────────────────────────────────────────────────────────────────
+const _nextUrl = {% if next_id %}'/frame_detail?id={{ next_id }}'{% else %}null{% endif %};
+const _prevUrl = {% if prev_id %}'/frame_detail?id={{ prev_id }}'{% else %}null{% endif %};
+const _goNext  = _nextUrl ? () => { location.href = _nextUrl; } : null;
+
 document.addEventListener('keydown', function(e) {
   if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
-  {% if prev_id %}if (e.key === 'ArrowLeft')  location.href = '/frame_detail?id={{ prev_id }}';{% endif %}
-  {% if next_id %}if (e.key === 'ArrowRight') location.href = '/frame_detail?id={{ next_id }}';{% endif %}
-  if (e.key === 'Escape') location.href = '/';
-  if (e.key === 't' || e.key === 'T') { if (TILE_MEANS) toggleTiles(); }
+  // Blur focused buttons so Space/Enter don't also fire their onclick
+  if (e.target.tagName === 'BUTTON') e.target.blur();
 
-  // Label shortcuts — navigate to next after labeling
-  {% set nav_next = "location.href = '/frame_detail?id=" + next_id|string + "'" if next_id else "" %}
+  if (e.key === 'ArrowLeft'  && _prevUrl) { location.href = _prevUrl; return; }
+  if (e.key === 'ArrowRight' && _nextUrl) { location.href = _nextUrl; return; }
+  if (e.key === 'Escape') { location.href = '/'; return; }
+  if (e.key === 't' || e.key === 'T') { if (TILE_MEANS) toggleTiles(); return; }
+
   if (e.key === ' ') {
     e.preventDefault();
-    setLabel('bird'{% if next_id %}, function(){ {{ nav_next }}; }{% endif %});
-  }
-  if (e.key === 's' || e.key === 'S') {
-    setLabel('special'{% if next_id %}, function(){ {{ nav_next }}; }{% endif %});
-  }
-  if (e.key === 'Delete') {
-    setLabel('ignore'{% if next_id %}, function(){ {{ nav_next }}; }{% endif %});
-  }
-  if (e.key === 'c' || e.key === 'C') {
+    setLabel('bird', _goNext);
+  } else if (e.key === 's' || e.key === 'S') {
+    e.preventDefault();
+    setLabel('special', _goNext);
+  } else if (e.key === 'Delete' || e.key === 'Backspace') {
+    e.preventDefault();
+    setLabel('ignore', _goNext);
+  } else if (e.key === 'c' || e.key === 'C') {
     setLabel(null);
   }
 });

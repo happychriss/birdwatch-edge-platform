@@ -102,6 +102,10 @@ DISPLAY_SPEC: dict = {
     },
     # tile_means is a large array — hide from card view, show in detail view only.
     "tile_means":    {"type": "detail_only"},
+    # Backfill-computed fields — suppress from card badge row; visible in detail table.
+    "downloaded_at": {"type": "plain"},
+    "burst_label":   {"type": "plain"},
+    "burst_gm_diff": {"type": "format_val", "format": "{:.1f} DN"},
     # Firmware-flash marker — badge only on the first frame after a new build.
     "fresh_flash": {
         "type": "badge_if",

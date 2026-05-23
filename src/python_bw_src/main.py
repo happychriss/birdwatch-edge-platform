@@ -458,13 +458,18 @@ def frame_detail():
         elif s < 3600: time_diff = f"{int(s / 60)}m {int(s % 60)}s"
         else:          time_diff = f"{int(s / 3600)}h {int((s % 3600) / 60)}m"
 
+    prev_tile_means = None
+    if prev_entry and prev_entry.meta:
+        prev_tile_means = prev_entry.meta.get('tile_means')
+
     return render_template('frame_detail.html',
                            entry=entry,
                            prev_id=prev_entry.id if prev_entry else None,
                            next_id=next_entry.id if next_entry else None,
                            time_diff=time_diff,
                            spec=DISPLAY_SPEC,
-                           order=DISPLAY_ORDER)
+                           order=DISPLAY_ORDER,
+                           prev_tile_means=prev_tile_means)
 
 
 # ─────────────────────────────── /validate ───────────────────────────────────

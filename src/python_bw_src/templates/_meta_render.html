@@ -13,7 +13,7 @@
    detail_only and hide_values fields are skipped. #}
 {% macro render_badges(meta, spec, order) %}
   {# Build ordered key list: ordered keys first, then remaining #}
-  {% set seen = namespace(keys=[]) %}
+  {% set seen = namespace(keys=[], stage_vals=[]) %}
   {% for k in order %}
     {% if k in meta %}
       {% set seen.keys = seen.keys + [k] %}
@@ -30,9 +30,13 @@
         {% endif %}
         <span class="badge" style="background:{{ bg }};color:{{ fg }}">{{ val }}</span>
       {% elif rtype == 'stage_badge' %}
-        {% set pal = rule.get('palette', {}) %}
-        {% set col = pal.get(val, rule.get('fallback', '#aab')) %}
-        <span class="badge" style="background:{{ col }};color:#fff">{{ val }}</span>
+        {# deduplicate: burst-suppressed frames set stage == burst_trigger; show only once #}
+        {% if val not in seen.stage_vals %}
+          {% set seen.stage_vals = seen.stage_vals + [val] %}
+          {% set pal = rule.get('palette', {}) %}
+          {% set col = pal.get(val, rule.get('fallback', '#aab')) %}
+          <span class="badge" style="background:{{ col }};color:#fff">{{ val }}</span>
+        {% endif %}
       {% elif rtype == 'badge_if' %}
         {% if val == rule.get('match_value') %}
           <span class="badge" style="background:{{ rule.get('color','#aaa') }};color:{{ rule.get('text_color','#fff') }}">{{ rule.get('label', val) }}</span>
