@@ -1,18 +1,28 @@
-"""backfill_meta.py — Back-fill pipeline results for old bw_frames rows.
+"""backfill_meta.py — Clean canonical recompute of pipeline meta from JPGs.
 
-Adds burst_trigger / burst_label / burst_n_* fields (and, where missing,
-result / stage / global_mean / photo_mode) to every bw_frames row that has
-a JPEG file but was captured before the burst-filter firmware flash (2026-05-23 09:42).
+For every bw_frames row that has a JPG file, this script:
 
-Frames that already carry burst_trigger in meta are treated as authoritative
-(new firmware) and are not overwritten.  Their image data is still fed into the
-running burst/bg-model state so the simulation stays in sync.
+  1. Loads the JPG and extracts tile_means + global_mean directly from it
+     (so the stored telemetry matches the visible image — not the QQVGA
+     lightcheck capture that the firmware made a moment earlier).
+  2. Replays the burst pre-filter + background-model pipeline against the
+     JPG-derived tile_means, in strict chronological order, so the bg model
+     evolves consistently across the dataset.
+  3. Snapshots the model means BEFORE each frame's update and stores them
+     as model_tile_means (drives the Δm tile overlay in the detail view).
+  4. Overwrites: tile_means, model_tile_means, result, stage, global_mean,
+     ratio, dark_anomalous, dark_tiles, new_dark_tiles, photo_mode,
+     burst_trigger, burst_label, burst_gm_diff, burst_n_changed, burst_n_dark.
+     Marks every reprocessed row with simulated=True.
+  5. Preserves manual / external markers: label, downloaded_at, fresh_flash,
+     fw_build (and any other meta keys the script does not touch).
+
+Frames are processed unconditionally — the previous "already authoritative"
+skip is gone.  When new firmware uploads land via /frame, the server keeps
+the ESP-provided values; only this script overwrites them.
 
 Usage:
-    python backfill_meta.py [--dry-run] [--force]
-
-    --dry-run   Print what would change; do not touch the database.
-    --force     Re-compute and overwrite even frames that already have burst_trigger.
+    python backfill_meta.py [--dry-run]
 """
 
 from __future__ import annotations
@@ -47,6 +57,14 @@ from db import BwFrame, Session
 _jpg_raw = os.getenv('JPG_FOLDER_PATH', '/tmp')
 JPG_FOLDER = (_server_dir / _jpg_raw).resolve() if not Path(_jpg_raw).is_absolute() else Path(_jpg_raw)
 
+# Fields that this script recomputes and overwrites every run.
+_OVERWRITE_KEYS = (
+    'tile_means', 'model_tile_means', 'result', 'stage', 'global_mean',
+    'ratio', 'dark_anomalous', 'dark_tiles', 'new_dark_tiles', 'photo_mode',
+    'burst_trigger', 'burst_label', 'burst_gm_diff', 'burst_n_changed',
+    'burst_n_dark', 'warmup', 'prev_valid', 'simulated',
+)
+
 
 def _photo_mode(gm: int) -> str:
     if gm < 130:
@@ -54,7 +72,7 @@ def _photo_mode(gm: int) -> str:
     return 'NORMAL'
 
 
-def run_backfill(dry_run: bool = False, force: bool = False) -> None:
+def run_backfill(dry_run: bool = False) -> None:
     session = Session()
 
     frames = (session.query(BwFrame)
@@ -63,8 +81,9 @@ def run_backfill(dry_run: bool = False, force: bool = False) -> None:
               .all())
 
     print(f"Found {len(frames)} frames with filenames", flush=True)
+    print(f"JPG folder: {JPG_FOLDER}", flush=True)
 
-    # Config mirrors firmware: single time bucket, 4-frame warmup.
+    # Match firmware exactly: single time bucket, 4-frame warmup.
     cc_cfg = Config(num_time_buckets=1, warmup_frames_per_bucket=4)
     burst_cfg = BurstConfig()
     bg_model = BackgroundModel(cc_cfg)
@@ -74,11 +93,10 @@ def run_backfill(dry_run: bool = False, force: bool = False) -> None:
     prev_ts: datetime | None = None
     prev_tile_mean_by_bucket: dict[int, np.ndarray] = {}
 
-    updated = skipped = errors = 0
+    updated = errors = 0
 
     for frame in frames:
         meta = dict(frame.meta or {})
-        already_authoritative = 'burst_trigger' in meta
 
         jpg_path = JPG_FOLDER / frame.filename
         if not jpg_path.exists():
@@ -94,8 +112,8 @@ def run_backfill(dry_run: bool = False, force: bool = False) -> None:
             errors += 1
             continue
 
-        tile_mean: np.ndarray = feats['mean']   # (GRID_H, GRID_W) float32
-        gm: int = feats['global_mean']           # truncated int, matches ESP
+        tile_mean: np.ndarray = feats['mean']    # (GRID_H, GRID_W) float32
+        gm: int = feats['global_mean']            # truncated int, matches ESP
 
         # dt since previous frame
         if prev_ts is not None and frame.captured_at is not None:
@@ -103,8 +121,7 @@ def run_backfill(dry_run: bool = False, force: bool = False) -> None:
         else:
             dt = float('inf')
 
-        # --- Run pipeline for state (always, even if we skip writing) ---
-
+        # --- Burst pre-filter ----------------------------------------------------
         burst = burst_classify(
             tile_mean, float(gm),
             prev_tile_mean, prev_gm,
@@ -117,13 +134,13 @@ def run_backfill(dry_run: bool = False, force: bool = False) -> None:
         was_warmup = bg_model.warmup_remaining(hour) > 0
         bg_model.observe(hour)
 
-        # Snapshot model means BEFORE any update — this is what z-scores are computed from
+        # Snapshot model means BEFORE any update — what z-scores were computed from
         model_means_flat: list[int] = bg_model.mean[bucket].flatten().round().astype(int).tolist()
 
+        bg_pred = None
         if burst.label == 'suppress':
             result = 'clouds'
             stage = burst.trigger
-            bg_pred = None
         else:
             bg_pred = classify(tile_mean, hour, bg_model, cc_cfg, prev_tile_mean=bg_prev)
             result = bg_pred.label
@@ -134,40 +151,49 @@ def run_backfill(dry_run: bool = False, force: bool = False) -> None:
                 bg_model.reset_warmup(hour)
             prev_tile_mean_by_bucket[bucket] = tile_mean
 
-        # Always advance burst state
+        # Advance burst state for next iteration
         prev_tile_mean = tile_mean
         prev_gm = float(gm)
         prev_ts = frame.captured_at
 
-        if already_authoritative and not force:
-            skipped += 1
-            continue
+        # --- Build the canonical meta payload ----------------------------------
+        tile_means_flat: list[int] = tile_mean.flatten().round().astype(int).tolist()
 
-        # --- Build patched meta ---
         new_fields: dict = {
-            'burst_trigger':   burst.trigger,
-            'burst_label':     burst.label,
-            'burst_gm_diff':   round(burst.gm_diff, 1),
-            'burst_n_changed': burst.n_changed,
-            'burst_n_dark':    burst.n_dark,
-            'result':          result,
-            'stage':           stage,
-            'global_mean':     gm,
+            'tile_means':       tile_means_flat,
             'model_tile_means': model_means_flat,
-            'simulated':       True,
+            'global_mean':      gm,
+            'photo_mode':       _photo_mode(gm),
+            'result':           result,
+            'stage':            stage,
+            'warmup':           bool(was_warmup),
+            'prev_valid':       bool(bg_prev is not None),
+            'burst_trigger':    burst.trigger,
+            'burst_label':      burst.label,
+            'burst_gm_diff':    round(burst.gm_diff, 1),
+            'burst_n_changed':  int(burst.n_changed),
+            'burst_n_dark':     int(burst.n_dark),
+            'simulated':        True,
         }
-        if 'photo_mode' not in meta:
-            new_fields['photo_mode'] = _photo_mode(gm)
         if bg_pred is not None:
-            new_fields['ratio'] = round(bg_pred.anomaly_ratio, 3)
-            new_fields['new_dark_tiles'] = bg_pred.new_dark_tiles
-            new_fields['dark_anomalous'] = int(bg_pred.anomaly_mask.sum())
+            new_fields['ratio']           = round(float(bg_pred.anomaly_ratio), 3)
+            new_fields['new_dark_tiles']  = int(bg_pred.new_dark_tiles)
+            new_fields['dark_anomalous']  = int(bg_pred.anomaly_mask.sum())
+            new_fields['dark_tiles']      = int(getattr(bg_pred, 'dark_model_tiles', 0))
+        else:
+            # Burst-suppressed: no bg model output, zero out the bg-only stats
+            new_fields['ratio']          = 0.0
+            new_fields['new_dark_tiles'] = 0
+            new_fields['dark_anomalous'] = 0
+            new_fields['dark_tiles']     = 0
 
+        # Merge: existing meta wins for manual/external keys (label, downloaded_at,
+        # fresh_flash, fw_build, etc.); recomputed keys overwrite.
         patched = {**meta, **new_fields}
 
         ts_str = frame.captured_at.strftime('%Y-%m-%d %H:%M') if frame.captured_at else '?'
         print(f"  {'DRY' if dry_run else 'UPD'} {frame.filename} {ts_str}"
-              f"  burst={burst.trigger}  bg={stage}  result={result}", flush=True)
+              f"  burst={burst.trigger:<17} bg={stage:<12} result={result}", flush=True)
 
         if not dry_run:
             frame.meta = patched
@@ -179,17 +205,18 @@ def run_backfill(dry_run: bool = False, force: bool = False) -> None:
         session.commit()
         print('\nCommitted.', flush=True)
 
-    print(f'\nDone: {updated} updated, {skipped} skipped (authoritative), {errors} errors',
+    print(f'\nDone: {updated} updated, {errors} errors (missing JPG / decode fail)',
           flush=True)
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description='Back-fill burst pipeline meta for old bw_frames rows')
+    ap = argparse.ArgumentParser(description='Clean canonical recompute of pipeline meta from JPGs')
     ap.add_argument('--dry-run', action='store_true', help='Print changes without writing to DB')
-    ap.add_argument('--force', action='store_true',
-                    help='Overwrite even frames that already have burst_trigger')
+    # Accepted for backwards-compat with /admin/backfill endpoint; no longer meaningful
+    # (every run unconditionally reprocesses every frame with a JPG).
+    ap.add_argument('--force', action='store_true', help=argparse.SUPPRESS)
     args = ap.parse_args()
-    run_backfill(dry_run=args.dry_run, force=args.force)
+    run_backfill(dry_run=args.dry_run)
 
 
 if __name__ == '__main__':

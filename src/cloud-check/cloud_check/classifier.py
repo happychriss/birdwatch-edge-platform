@@ -21,6 +21,7 @@ class ClassifierResult:
     warmup: bool                  # bucket is still in warmup
     new_dark_tiles: int           # tiles newly dark vs previous frame (dark_tiles if no prev)
     temporal_available: bool      # whether prev_tile_mean was provided
+    dark_tiles: int = 0           # tiles ≥ dark_object_min_delta darker than model AND z-anomalous
 
 
 def classify(
@@ -58,6 +59,7 @@ def classify(
             warmup=model.warmup_remaining(hour) > 0,
             new_dark_tiles=0,
             temporal_available=prev_tile_mean is not None,
+            dark_tiles=0,
         )
 
     z = model.z_scores(hour, tile_mean)

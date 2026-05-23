@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify, render_template, redirect
+from flask import Flask, request, jsonify, render_template, redirect, send_from_directory, abort
 from datetime import datetime, timedelta
 from collections import defaultdict
 import json
@@ -640,6 +640,37 @@ def export_list(label: str):
         for f in frames
     ]
     return jsonify({'label': label, 'count': len(result), 'frames': result})
+
+
+@app.route('/admin/image/<int:frame_id>')
+def admin_image(frame_id: int):
+    """Serve a frame's JPG by id (mirrors /static/<filename> without needing the name).
+
+    Used by remote/dev tooling to inspect arbitrary frames without first
+    looking up the filename via /admin/export/all.
+    """
+    frame = session.query(BwFrame).filter(BwFrame.id == frame_id).first()
+    if not frame or not frame.filename:
+        abort(404)
+    folder = os.getenv('JPG_FOLDER_PATH', '/tmp')
+    if not os.path.isabs(folder):
+        folder = os.path.abspath(folder)
+    return send_from_directory(folder, frame.filename, mimetype='image/jpeg')
+
+
+@app.route('/admin/meta/<int:frame_id>')
+def admin_meta(frame_id: int):
+    """Return the full meta JSONB + captured_at + result for a frame by id."""
+    frame = session.query(BwFrame).filter(BwFrame.id == frame_id).first()
+    if not frame:
+        abort(404)
+    return jsonify({
+        'id': frame.id,
+        'captured_at': frame.captured_at.isoformat() if frame.captured_at else None,
+        'result': frame.result,
+        'filename': frame.filename,
+        'meta': frame.meta or {},
+    })
 
 
 @app.route('/frame/<int:frame_id>/downloaded', methods=['POST'])
