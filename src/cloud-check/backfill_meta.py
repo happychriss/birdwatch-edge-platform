@@ -67,7 +67,7 @@ JPG_FOLDER = (_server_dir / _jpg_raw).resolve() if not Path(_jpg_raw).is_absolut
 # Fields that this script recomputes and overwrites every run.
 _OVERWRITE_KEYS = (
     'tile_means', 'model_tile_means', 'result', 'stage', 'global_mean',
-    'ratio', 'dark_anomalous', 'dark_tiles', 'new_dark_tiles', 'photo_mode',
+    'ratio', 'dark_anomalous', 'dark_tiles', 'new_dark_tiles', 'dark_blob_max', 'photo_mode',
     'burst_trigger', 'burst_label', 'burst_gm_diff', 'burst_n_changed',
     'burst_n_dark', 'warmup', 'prev_valid', 'simulated',
 )
@@ -217,6 +217,7 @@ def run_backfill(dry_run: bool = False) -> None:
             new_fields['new_dark_tiles']  = int(bg_pred.new_dark_tiles)
             new_fields['dark_anomalous']  = int(bg_pred.anomaly_mask.sum())
             new_fields['dark_tiles']      = int(bg_pred.dark_tiles)
+            new_fields['dark_blob_max']   = int(bg_pred.dark_blob_max)
             new_fields['scene_bucket']    = int(bg_pred.scene_bucket)
         else:
             # Burst-suppressed: no bg model output, zero out the bg-only stats
@@ -224,6 +225,7 @@ def run_backfill(dry_run: bool = False) -> None:
             new_fields['new_dark_tiles'] = 0
             new_fields['dark_anomalous'] = 0
             new_fields['dark_tiles']     = 0
+            new_fields['dark_blob_max']  = 0
 
         # Merge: existing meta wins for manual/external keys (label, downloaded_at,
         # fresh_flash, fw_build, etc.); recomputed keys overwrite.

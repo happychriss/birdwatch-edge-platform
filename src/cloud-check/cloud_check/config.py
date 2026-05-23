@@ -25,6 +25,7 @@ class Config:
     dark_object_min_tiles: int = 1      # minimum number of such dark tiles required to trigger DARK_OBJ
     temporal_dark_delta: float = 20.0   # tile must be this much darker than PREVIOUS frame → genuinely new dark event
     scene_drift_min_tiles: int = 4      # SCENE_DRIFT needs this many persistently-dark tiles
+    dark_obj_max_blob_fraction: float = 0.40  # max fraction of frame covered by largest dark blob
 
     warmup_frames_per_bucket: int = 0  # Python simulation: steady-state (model already calibrated).
                                         # C firmware uses CC_WARMUP_FRAMES=4 for actual first-boot via NVS.

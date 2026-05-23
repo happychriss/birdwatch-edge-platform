@@ -108,6 +108,7 @@ DISPLAY_SPEC: dict = {
     "prev_valid":      {"type": "numeric"},
     "burst_n_changed": {"type": "numeric"},
     "burst_n_dark":    {"type": "numeric"},
+    "dark_blob_max":   {"type": "numeric"},
     # Simulated marker — shown when meta was computed by backfill_meta.py, not firmware.
     "simulated": {
         "type": "badge_if",
@@ -148,6 +149,6 @@ DISPLAY_SPEC: dict = {
 DISPLAY_ORDER = [
     "result", "stage", "burst_trigger", "photo_mode", "fresh_flash", "simulated",
     "battery", "trigger",
-    "scene_bucket", "global_mean", "ratio", "dark_tiles", "new_dark_tiles",
+    "scene_bucket", "global_mean", "ratio", "dark_tiles", "new_dark_tiles", "dark_blob_max",
     "burst_n_changed", "burst_n_dark",
 ]

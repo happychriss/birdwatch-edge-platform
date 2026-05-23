@@ -132,6 +132,10 @@ Power down: camera deinit, remote log flush, WiFi off, GPIO5 LOW
 
 ## 4. False-Trigger Filtering
 
+> **Reference documents:**
+> - [`model.md`](model.md) — full detection model design, thresholds, lighting buckets, blob check, performance
+> - [`architecture.md`](architecture.md) — system setup, database, server, dev workflow, labeling conventions
+
 PIR sensors are sensitive to rapid infrared changes caused by moving shadows or cloud cover. Two complementary filters are applied in sequence, both implemented on-device (C) and mirrored in Python for server-side validation.
 
 ### 4.1 Burst-Mode Sequence Filter (pre-filter, runs first)

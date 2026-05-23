@@ -14,7 +14,8 @@ class ClassifierResult:
     label: str                    # "clouds" or "process"
     trigger: str                  # rule: WARMUP | DARK_OBJ | QUIET | SCENE_DRIFT | AMBIGUOUS
     anomaly_mask: np.ndarray      # (GRID_H, GRID_W) bool — tiles with z > threshold AND darker than model
-    blob_max_size: int            # largest connected anomalous region
+    blob_max_size: int            # largest connected anomalous region (z-mask)
+    dark_blob_max: int            # largest connected blob on absolute-delta dark mask
     anomaly_ratio: float          # dark-only anomaly ratio (tiles darker than model / total)
     compactness: float            # blob_max / total_anomalies (0..1, 1 = single solid blob)
     reason: str                   # human-readable explanation
@@ -62,6 +63,7 @@ def classify(
             trigger="NIGHT",
             anomaly_mask=np.zeros(tile_mean.shape, dtype=bool),
             blob_max_size=0,
+            dark_blob_max=0,
             anomaly_ratio=0.0,
             compactness=0.0,
             reason=f"scene too dark (global_mean={global_mean} < {cfg.night_brightness_threshold})",
@@ -87,7 +89,8 @@ def classify(
     delta = tile_mean - bucket_mean
     # No z-gate on dark_tiles — just absolute delta. Catches birds at 35-90 DN
     # that fall below z=3 even with tighter scene buckets (std≈28 DN).
-    dark_tiles = int((delta < -cfg.dark_object_min_delta).sum())
+    dark_delta_mask = delta < -cfg.dark_object_min_delta
+    dark_tiles = int(dark_delta_mask.sum())
 
     if prev_tile_mean is not None:
         temporal_delta = tile_mean - prev_tile_mean
@@ -105,12 +108,24 @@ def classify(
         sizes[0] = 0
         blob_max = int(sizes.max())
 
+    # Blob on absolute-delta dark mask — distinguishes compact bird from diffuse shadow.
+    # A whole-scene darkening creates a blob spanning >40% of the frame; a bird is smaller.
+    if dark_tiles > 0:
+        dark_labelled, _ = cc_label(dark_delta_mask)
+        dark_sizes = np.bincount(dark_labelled.ravel())
+        dark_sizes[0] = 0
+        dark_blob_max = int(dark_sizes.max())
+    else:
+        dark_blob_max = 0
+    dark_blob_fraction = dark_blob_max / tile_mean.size
+
     compactness = blob_max / total_anom if total_anom > 0 else 0.0
     warmup = model.warmup_remaining(b) > 0
 
     dark_obj_condition = (
         dark_tiles >= cfg.dark_object_min_tiles
         and (not temporal_available or new_dark_tiles >= cfg.dark_object_min_tiles)
+        and dark_blob_fraction <= cfg.dark_obj_max_blob_fraction
     )
     stale_condition = (
         dark_tiles >= cfg.scene_drift_min_tiles
@@ -149,6 +164,7 @@ def classify(
         trigger=trigger,
         anomaly_mask=mask,
         blob_max_size=blob_max,
+        dark_blob_max=dark_blob_max,
         anomaly_ratio=ratio,
         compactness=compactness,
         reason=reason,
