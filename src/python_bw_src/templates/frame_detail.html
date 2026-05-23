@@ -345,7 +345,8 @@ function setLabel(label, thenNav) {
   }).then(r => r.json()).then(data => {
     currentLabel = data.label;
     _refreshLabelBar();
-    if (thenNav) setTimeout(thenNav, 180);
+    // only navigate when setting a label; pressing same key again = undo, stay on frame
+    if (thenNav && newLabel !== null) setTimeout(thenNav, 180);
   }).catch(err => console.error('setLabel:', err));
 }
 

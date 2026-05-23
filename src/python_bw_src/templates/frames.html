@@ -102,6 +102,8 @@
     padding: 1px 7px; border-radius: 10px; font-size: 10px;
     font-weight: 700; letter-spacing: 0.3px; text-transform: uppercase;
   }
+  /* Badges in the card info row are secondary — keep them subtle */
+  .info .badge { font-size: 9px; padding: 1px 5px; opacity: 0.65; }
 
   /* ── List view ── */
   .grid.list-view { flex-direction: column; gap: 4px; }
@@ -124,13 +126,21 @@
     align-items: center; justify-content: center;
   }
   #lightbox.open { display: flex; }
-  #lightbox img  { max-width: 95vw; max-height: 92vh; border-radius: 6px;
-                   box-shadow: 0 8px 40px rgba(0,0,0,0.5); }
+  #lightbox-wrap { position: relative; display: inline-block; }
+  #lightbox-wrap img { max-width: 95vw; max-height: 92vh; border-radius: 6px;
+                       box-shadow: 0 8px 40px rgba(0,0,0,0.5); display: block; }
   #lightbox-close {
     position: absolute; top: 14px; right: 18px; font-size: 32px;
     color: #fff; cursor: pointer; background: none; border: none; opacity: 0.85;
     padding: 8px;
   }
+  .lb-label {
+    position: absolute; top: 10px; left: 10px; z-index: 2;
+    padding: 3px 10px; border-radius: 9px;
+    font-size: 12px; font-weight: 700; text-transform: uppercase;
+    letter-spacing: 0.4px; pointer-events: none;
+  }
+  .lb-saved { left: auto; right: 10px; }
 
   /* ── Pagination ── */
   .pagination {
@@ -190,7 +200,7 @@
   {% set card_cls = 'result-' + result if result in ('clouds', 'process') else 'result-unknown' %}
 
   <div class="card {{ card_cls }}"
-       ondblclick="openPhoto('{{ url_for('static', filename=entry.filename) if entry.filename else '' }}')">
+       ondblclick="openPhoto('{{ url_for('static', filename=entry.filename) if entry.filename else '' }}','{{ meta.get('label') or '' }}',{{ 'true' if meta.get('downloaded_at') else 'false' }})">
     {% if entry.filename %}
       {% set lbl = meta.get('label') %}
       {% set dl  = meta.get('downloaded_at') %}
@@ -222,7 +232,11 @@
 <!-- ── Lightbox ── -->
 <div id="lightbox">
   <button id="lightbox-close" onclick="closePhoto()">✕</button>
-  <img id="lightbox-img" src="" alt="">
+  <div id="lightbox-wrap">
+    <img id="lightbox-img" src="" alt="">
+    <span id="lb-label" class="lb-label" style="display:none"></span>
+    <span id="lb-saved" class="lb-label lb-saved flag-saved" style="display:none">saved</span>
+  </div>
 </div>
 
 <script>
@@ -235,9 +249,13 @@ function setView(v) {
 }
 (function(){ const s = localStorage.getItem('bw_view'); if (s === 'list') setView('list'); })();
 
-function openPhoto(url) {
+function openPhoto(url, label, saved) {
   if (!url) return;
   document.getElementById('lightbox-img').src = url;
+  const lbl = document.getElementById('lb-label');
+  if (label) { lbl.textContent = label; lbl.className = `lb-label flag-${label}`; lbl.style.display = ''; }
+  else        { lbl.style.display = 'none'; }
+  document.getElementById('lb-saved').style.display = saved ? '' : 'none';
   document.getElementById('lightbox').classList.add('open');
 }
 function closePhoto() { document.getElementById('lightbox').classList.remove('open'); }
