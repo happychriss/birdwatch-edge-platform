@@ -296,14 +296,14 @@ function drawTiles() {
       ctx.fillStyle = 'rgba(255,255,255,0.97)';
       ctx.fillText(val, x + 2, y + fs + 1);                       // row 1: tile mean
 
-      // row 2: Δ model (true per-tile) or Δ global if no model stored (label differs)
-      const mLabel = hasModel ? 'm' : 'g';
+      // row 2: Δ model (true per-tile) or Δ global if no model stored
+      const mLabel = hasModel ? 'Δm' : 'Δg';
       ctx.fillStyle = dModel >= 0 ? 'rgba(160,210,255,0.97)' : 'rgba(255,160,140,0.97)';
       ctx.fillText(mLabel + sign(dModel), x + 2, y + fs * 2 + 2); // row 2: Δ model
 
       if (dPrev !== null) {
         ctx.fillStyle = dPrev >= 0 ? 'rgba(160,255,190,0.97)' : 'rgba(255,215,120,0.97)';
-        ctx.fillText('p' + sign(dPrev), x + 2, y + fs * 3 + 3);   // row 3: Δ prev frame
+        ctx.fillText('Δp' + sign(dPrev), x + 2, y + fs * 3 + 3);  // row 3: Δ prev frame
       }
 
       ctx.shadowBlur = 0;
