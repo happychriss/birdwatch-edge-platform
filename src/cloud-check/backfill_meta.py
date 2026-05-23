@@ -52,6 +52,7 @@ from cloud_check.background import BackgroundModel
 from cloud_check.classifier import classify
 from cloud_check.config import Config
 from cloud_check.features import load_gray_vga, extract_tile_features
+from cloud_check.scene_buckets import CENTROIDS, K as CC_K
 from db import BwFrame, Session
 
 _jpg_raw = os.getenv('JPG_FOLDER_PATH', '/tmp')
@@ -83,10 +84,15 @@ def run_backfill(dry_run: bool = False) -> None:
     print(f"Found {len(frames)} frames with filenames", flush=True)
     print(f"JPG folder: {JPG_FOLDER}", flush=True)
 
-    # Match firmware exactly: single time bucket, 4-frame warmup.
-    cc_cfg = Config(num_time_buckets=1, warmup_frames_per_bucket=4)
+    # Match firmware exactly: K=4 lighting-scenario buckets, 4-frame warmup per bucket.
+    cc_cfg = Config(num_time_buckets=CC_K, warmup_frames_per_bucket=4)
     burst_cfg = BurstConfig()
     bg_model = BackgroundModel(cc_cfg)
+    # Pre-seed each bucket's mean from the computed centroids so the model
+    # starts from a meaningful prior (avoids mean=128 cold start for all buckets).
+    for _b in range(CC_K):
+        bg_model.mean[_b] = CENTROIDS[_b].reshape(cc_cfg.grid_h, cc_cfg.grid_w).copy()
+        bg_model.bucket_seen[_b] = cc_cfg.warmup_frames_per_bucket  # treat centroids as warmup
 
     prev_tile_mean: np.ndarray | None = None
     prev_gm: float | None = None
