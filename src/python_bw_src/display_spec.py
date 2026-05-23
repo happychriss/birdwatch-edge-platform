@@ -82,6 +82,22 @@ DISPLAY_SPEC: dict = {
         "type": "hide_values",
         "hide_values": ["Boot", "PIR", "Timer", "Camera Start", "Camera Stop"],
     },
+    "scene_bucket": {
+        "type": "badge",
+        "colors": {
+            "0": ("#d2e4f7", "#1a5276"),   # dim
+            "1": ("#d5eafd", "#154577"),   # mid-light
+            "2": ("#fde8d0", "#7d3c00"),   # mid-bright
+            "3": ("#fef9cc", "#7d6200"),   # bright/sun
+        },
+        "label_map": {
+            "0": "Bucket 0 · dim",
+            "1": "Bucket 1 · mid",
+            "2": "Bucket 2 · bright",
+            "3": "Bucket 3 · sun",
+        },
+        "fallback": ("#eee", "#778"),
+    },
     # Numeric intermediates — shown as plain numbers, no badge.
     "global_mean":     {"type": "numeric"},
     "ratio":           {"type": "format_val", "format": "{:.3f}"},
@@ -132,6 +148,6 @@ DISPLAY_SPEC: dict = {
 DISPLAY_ORDER = [
     "result", "stage", "burst_trigger", "photo_mode", "fresh_flash", "simulated",
     "battery", "trigger",
-    "global_mean", "ratio", "dark_tiles", "new_dark_tiles",
+    "scene_bucket", "global_mean", "ratio", "dark_tiles", "new_dark_tiles",
     "burst_n_changed", "burst_n_dark",
 ]

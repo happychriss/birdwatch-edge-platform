@@ -8,6 +8,24 @@
   <span class="badge" style="background:{{ bg }};color:{{ fg }}">{{ text }}</span>
 {% endmacro %}
 
+{# Resolve color and label for a 'badge' rule + value.
+   Supports integer values by trying val|string as key first. #}
+{% macro _badge_from_rule(rule, val) %}
+  {% set colors = rule.get('colors', {}) %}
+  {% set lmap   = rule.get('label_map', {}) %}
+  {% set vkey   = val|string %}
+  {% if vkey in colors %}
+    {% set bg = colors[vkey][0] %}{% set fg = colors[vkey][1] %}
+  {% elif val in colors %}
+    {% set bg = colors[val][0] %}{% set fg = colors[val][1] %}
+  {% else %}
+    {% set fb = rule.get('fallback', ('#eee', '#778')) %}
+    {% set bg = fb[0] %}{% set fg = fb[1] %}
+  {% endif %}
+  {% set label = lmap.get(vkey, lmap.get(val, val)) %}
+  <span class="badge" style="background:{{ bg }};color:{{ fg }}">{{ label }}</span>
+{% endmacro %}
+
 {# Render the "important" fields as inline badges for the card view.
    Only fields with badge/stage_badge/badge_if/format_val types are shown here.
    detail_only and hide_values fields are skipped. #}
@@ -21,14 +39,7 @@
       {% set rtype = rule.get('type', 'plain') %}
       {% set val = meta[k] %}
       {% if rtype == 'badge' %}
-        {% set colors = rule.get('colors', {}) %}
-        {% if val in colors %}
-          {% set bg = colors[val][0] %}{% set fg = colors[val][1] %}
-        {% else %}
-          {% set fb = rule.get('fallback', ('#eee', '#778')) %}
-          {% set bg = fb[0] %}{% set fg = fb[1] %}
-        {% endif %}
-        <span class="badge" style="background:{{ bg }};color:{{ fg }}">{{ val }}</span>
+        {{ _badge_from_rule(rule, val) }}
       {% elif rtype == 'stage_badge' %}
         {# deduplicate: burst-suppressed frames set stage == burst_trigger; show only once #}
         {% if val not in seen.stage_vals %}
@@ -78,14 +89,7 @@
       {% set rtype = rule.get('type', 'plain') %}
       {% set val = meta[k] %}
       {% if rtype == 'badge' %}
-        {% set colors = rule.get('colors', {}) %}
-        {% if val in colors %}
-          {% set bg = colors[val][0] %}{% set fg = colors[val][1] %}
-        {% else %}
-          {% set fb = rule.get('fallback', ('#eee', '#778')) %}
-          {% set bg = fb[0] %}{% set fg = fb[1] %}
-        {% endif %}
-        <span class="badge" style="background:{{ bg }};color:{{ fg }}">{{ val }}</span>
+        {{ _badge_from_rule(rule, val) }}
       {% elif rtype == 'stage_badge' %}
         {% if val not in seen.stage_vals %}
           {% set seen.stage_vals = seen.stage_vals + [val] %}
@@ -138,16 +142,9 @@
       <td class="meta-val"><details><summary>{{ val.__class__.__name__ }}[{{ val | length if val is iterable else '' }}]</summary><code>{{ val }}</code></details></td>
     </tr>
   {% elif rtype == 'badge' %}
-    {% set colors = rule.get('colors', {}) %}
-    {% if val in colors %}
-      {% set bg = colors[val][0] %}{% set fg = colors[val][1] %}
-    {% else %}
-      {% set fb = rule.get('fallback', ('#eee', '#778')) %}
-      {% set bg = fb[0] %}{% set fg = fb[1] %}
-    {% endif %}
     <tr>
       <td class="meta-key">{{ k }}</td>
-      <td class="meta-val"><span class="badge" style="background:{{ bg }};color:{{ fg }}">{{ val }}</span></td>
+      <td class="meta-val">{{ _badge_from_rule(rule, val) }}</td>
     </tr>
   {% elif rtype == 'stage_badge' %}
     {% set pal = rule.get('palette', {}) %}

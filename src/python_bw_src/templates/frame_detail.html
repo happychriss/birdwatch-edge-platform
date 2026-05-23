@@ -167,7 +167,7 @@
   </div>
   {% if entry.meta %}
   <div style="margin:6px 0 4px;line-height:2.2;">
-    {{ render_key_badges(entry.meta, spec, ['result','stage','burst_trigger','photo_mode','battery','fresh_flash','simulated','label']) }}
+    {{ render_key_badges(entry.meta, spec, ['result','stage','burst_trigger','scene_bucket','photo_mode','battery','fresh_flash','simulated','label']) }}
   </div>
   <details class="meta-details">
     <summary>Parameters &amp; intermediates</summary>
@@ -236,11 +236,15 @@ const TILE_MEANS       = {{ (entry.meta.get('tile_means') if entry.meta else Non
 const PREV_TILE_MEANS  = {{ prev_tile_means | tojson }};
 const MODEL_TILE_MEANS = {{ model_tile_means | tojson }};
 const GLOBAL_MEAN      = {{ (entry.meta.get('global_mean', 128) if entry.meta else 128) | tojson }};
+const SCENE_BUCKET     = {{ (entry.meta.get('scene_bucket') if entry.meta else None) | tojson }};
+const DARK_TILES_COUNT = {{ (entry.meta.get('dark_tiles', 0) if entry.meta else 0) | tojson }};
+const NEW_DARK_COUNT   = {{ (entry.meta.get('new_dark_tiles', 0) if entry.meta else 0) | tojson }};
 // 20×15 = 300 tiles (current firmware), 16×12 = 192 (legacy)
 const TILE_COLS = (TILE_MEANS && TILE_MEANS.length === 192) ? 16 : 20;
 const TILE_ROWS = (TILE_MEANS && TILE_MEANS.length === 192) ? 12 : 15;
-const DARK_DELTA_MODEL = 35;
-const DARK_DELTA_PREV  = 20;
+const DARK_DELTA_MODEL = 20;   // matches CC_DARK_DELTA_MODEL in firmware and config.py
+const DARK_DELTA_PREV  = 20;   // matches CC_DARK_DELTA_PREV
+const BUCKET_NAMES = ['dim·gm≈57', 'mid·gm≈102', 'bright·gm≈118', 'sun·gm≈155'];
 
 let tilesOn = false;
 
@@ -270,17 +274,20 @@ function drawTiles() {
       const darkDelta = modelRef - val;  // positive = tile darker than model → drives red fill
       const x = col * tw, y = row * th;
 
-      // Background: red = darker than model (potential object), blue = brighter
+      // Background fill:
+      //   red     = tile ≥ DARK_DELTA_MODEL (20 DN) darker than model → DARK_OBJ candidate
+      //   orange  = tile 10–20 DN darker than model → approaching threshold
+      //   blue    = tile ≥ 10 DN brighter than model
       if (darkDelta >= DARK_DELTA_MODEL) {
-        const a = Math.min(0.72, 0.35 + (darkDelta - DARK_DELTA_MODEL) / 80);
+        const a = Math.min(0.78, 0.45 + (darkDelta - DARK_DELTA_MODEL) / 60);
         ctx.fillStyle = `rgba(210,50,50,${a.toFixed(2)})`;
         ctx.fillRect(x, y, tw, th);
-      } else if (darkDelta >= DARK_DELTA_PREV) {
-        const a = (darkDelta - DARK_DELTA_PREV) / (DARK_DELTA_MODEL - DARK_DELTA_PREV) * 0.35;
-        ctx.fillStyle = `rgba(210,120,50,${a.toFixed(2)})`;
+      } else if (darkDelta >= 10) {
+        const a = (darkDelta - 10) / (DARK_DELTA_MODEL - 10) * 0.38;
+        ctx.fillStyle = `rgba(220,130,30,${a.toFixed(2)})`;
         ctx.fillRect(x, y, tw, th);
-      } else if (darkDelta <= -DARK_DELTA_PREV) {
-        const a = Math.min(0.35, (-darkDelta - DARK_DELTA_PREV) / 80);
+      } else if (darkDelta <= -10) {
+        const a = Math.min(0.38, (-darkDelta - 10) / 70);
         ctx.fillStyle = `rgba(50,110,220,${a.toFixed(2)})`;
         ctx.fillRect(x, y, tw, th);
       }
@@ -355,18 +362,23 @@ if (_imgWrap) {
     const row = Math.min(TILE_ROWS - 1, Math.floor(y / rect.height * TILE_ROWS));
     const idx = row * TILE_COLS + col;
     const val = TILE_MEANS[idx];
-    const sign = v => (v >= 0 ? '+' : '') + v;
+    const sign = v => (v >= 0 ? '+' : '') + Math.round(v);
     const hasM = MODEL_TILE_MEANS && MODEL_TILE_MEANS.length === TILE_MEANS.length;
     const modelRef = hasM ? MODEL_TILE_MEANS[idx] : GLOBAL_MEAN;
     const dModel = val - modelRef;
+    const darkObj = (modelRef - val) >= DARK_DELTA_MODEL;
+    const bucketName = (SCENE_BUCKET !== null && SCENE_BUCKET !== undefined)
+                       ? `Bucket ${SCENE_BUCKET} · ${BUCKET_NAMES[SCENE_BUCKET] || ''}` : '—';
     let lines = [
-      `tile [${row},${col}]   DN: ${val}`,
-      `Δ ${hasM ? 'model' : 'global'}: ${sign(dModel)}  (${dModel >= 0 ? 'brighter' : 'darker'} than ${hasM ? 'bg model' : 'scene avg'})`,
+      `tile [${row},${col}]   DN: ${Math.round(val)}   ${bucketName}`,
+      `Δ ${hasM ? 'model' : 'global'}: ${sign(dModel)}  (${dModel >= 0 ? 'brighter' : 'darker'} than ${hasM ? 'bg model' : 'scene avg'})${darkObj ? '  ★ DARK_OBJ' : ''}`,
     ];
     if (PREV_TILE_MEANS && PREV_TILE_MEANS.length === TILE_MEANS.length) {
       const dPrev = val - PREV_TILE_MEANS[idx];
-      lines.push(`Δ prev:    ${sign(dPrev)}  (${dPrev >= 0 ? 'brighter' : 'darker'})`);
+      const newDark = (PREV_TILE_MEANS[idx] - val) >= DARK_DELTA_PREV;
+      lines.push(`Δ prev:    ${sign(dPrev)}  (${dPrev >= 0 ? 'brighter' : 'darker'})${newDark ? '  ★ new dark' : ''}`);
     }
+    lines.push(`─── frame dark_tiles: ${DARK_TILES_COUNT}  new_dark: ${NEW_DARK_COUNT}`);
     _tooltip.textContent = lines.join('\n');
     _tooltip.style.display = 'block';
     _tooltip.style.left = (e.clientX + 14) + 'px';
