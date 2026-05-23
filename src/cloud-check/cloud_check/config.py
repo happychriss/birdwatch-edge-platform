@@ -21,7 +21,7 @@ class Config:
     # and only suppress when the evidence for "this is just lighting" is clear.
     tile_z_threshold: float = 3.0      # per-tile z-score above which the tile is "anomalous"
     quiet_anomaly_ratio: float = 0.25  # ≤ this fraction of dark-anomalous tiles → suppress
-    dark_object_min_delta: float = 35.0  # tile became this much darker than bucket mean → object-like
+    dark_object_min_delta: float = 20.0  # tile became this much darker than bucket mean → object-like
     dark_object_min_tiles: int = 1      # minimum number of such dark tiles required to trigger DARK_OBJ
     temporal_dark_delta: float = 20.0   # tile must be this much darker than PREVIOUS frame → genuinely new dark event
     scene_drift_min_tiles: int = 4      # SCENE_DRIFT needs this many persistently-dark tiles

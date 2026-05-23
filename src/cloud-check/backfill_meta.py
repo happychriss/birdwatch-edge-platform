@@ -55,6 +55,12 @@ from cloud_check.features import load_gray_vga, extract_tile_features
 from cloud_check.scene_buckets import CENTROIDS, K as CC_K
 from db import BwFrame, Session
 
+# Burst stages that suppress without running the background model.
+# DIFFUSE and dt-based stages (FAST_SHIFT, ISOLATED) fall through to the BG
+# model — the BG model is better-positioned to decide (compares vs long-term
+# mean, not just prev frame).
+_BURST_SUPPRESS_STAGES = frozenset({'DUPLICATE', 'BRIGHT_STABLE'})
+
 _jpg_raw = os.getenv('JPG_FOLDER_PATH', '/tmp')
 JPG_FOLDER = (_server_dir / _jpg_raw).resolve() if not Path(_jpg_raw).is_absolute() else Path(_jpg_raw)
 
@@ -84,15 +90,15 @@ def run_backfill(dry_run: bool = False) -> None:
     print(f"Found {len(frames)} frames with filenames", flush=True)
     print(f"JPG folder: {JPG_FOLDER}", flush=True)
 
-    # Match firmware exactly: K=4 lighting-scenario buckets, 4-frame warmup per bucket.
+    # Match firmware exactly: K=4 lighting-scenario buckets.
+    # warmup_frames_per_bucket=4 to match ESP CC_WARMUP_FRAMES; centroids pre-seed the means.
     cc_cfg = Config(num_time_buckets=CC_K, warmup_frames_per_bucket=4)
     burst_cfg = BurstConfig()
     bg_model = BackgroundModel(cc_cfg)
-    # Pre-seed each bucket's mean from the computed centroids so the model
-    # starts from a meaningful prior (avoids mean=128 cold start for all buckets).
+    # Pre-seed each bucket's mean from the computed centroids — skip the mean=128 cold start.
     for _b in range(CC_K):
         bg_model.mean[_b] = CENTROIDS[_b].reshape(cc_cfg.grid_h, cc_cfg.grid_w).copy()
-        bg_model.bucket_seen[_b] = cc_cfg.warmup_frames_per_bucket  # treat centroids as warmup
+        bg_model.bucket_seen[_b] = cc_cfg.warmup_frames_per_bucket  # centroid counts as warmup
 
     prev_tile_mean: np.ndarray | None = None
     prev_gm: float | None = None
@@ -104,22 +110,45 @@ def run_backfill(dry_run: bool = False) -> None:
     for frame in frames:
         meta = dict(frame.meta or {})
 
-        jpg_path = JPG_FOLDER / frame.filename
-        if not jpg_path.exists():
-            print(f"  MISS  {frame.filename}", flush=True)
-            errors += 1
-            continue
-
-        try:
-            gray = load_gray_vga(jpg_path)
-            feats = extract_tile_features(gray)
-        except Exception as exc:
-            print(f"  ERR   {frame.filename}: {exc}", flush=True)
-            errors += 1
-            continue
-
-        tile_mean: np.ndarray = feats['mean']    # (GRID_H, GRID_W) float32
-        gm: int = feats['global_mean']            # truncated int, matches ESP
+        # Prefer stored tile_means from DB (written by a previous backfill or by the
+        # firmware).  This lets the simulation run without local JPG access — the
+        # production server's photos are only needed on first population.
+        stored_tm = meta.get('tile_means')
+        expected_tiles = cc_cfg.grid_h * cc_cfg.grid_w
+        if stored_tm and isinstance(stored_tm, list) and len(stored_tm) == expected_tiles:
+            tile_mean = np.array(stored_tm, dtype=np.float32).reshape(cc_cfg.grid_h, cc_cfg.grid_w)
+            gm = int(float(tile_mean.mean()))  # truncate, matches ESP integer division
+        else:
+            # Fall back to loading from local disk or HTTP
+            jpg_path = JPG_FOLDER / frame.filename
+            if jpg_path.exists():
+                try:
+                    gray = load_gray_vga(jpg_path)
+                    feats = extract_tile_features(gray)
+                    tile_mean = feats['mean']
+                    gm = feats['global_mean']
+                except Exception as exc:
+                    print(f"  ERR   {frame.filename}: {exc}", flush=True)
+                    errors += 1
+                    continue
+            else:
+                # Try HTTP fetch from production server
+                server_base = os.getenv('PHOTO_SERVER', 'http://192.168.1.110:8000').rstrip('/')
+                url = f"{server_base}/static/{frame.filename}"
+                try:
+                    import io, requests
+                    from PIL import Image as PILImage
+                    resp = requests.get(url, timeout=15)
+                    resp.raise_for_status()
+                    img = PILImage.open(io.BytesIO(resp.content)).convert('L').resize((640, 480))
+                    frame_arr = np.asarray(img, dtype=np.uint8)
+                    feats = extract_tile_features(frame_arr)
+                    tile_mean = feats['mean']
+                    gm = feats['global_mean']
+                except Exception as exc:
+                    print(f"  MISS  {frame.filename}: {exc}", flush=True)
+                    errors += 1
+                    continue
 
         # dt since previous frame
         if prev_ts is not None and frame.captured_at is not None:
@@ -144,7 +173,9 @@ def run_backfill(dry_run: bool = False) -> None:
         model_means_flat: list[int] = bg_model.mean[bucket].flatten().round().astype(int).tolist()
 
         bg_pred = None
-        if burst.label == 'suppress':
+        burst_suppresses = (burst.label == 'suppress'
+                            and burst.trigger in _BURST_SUPPRESS_STAGES)
+        if burst_suppresses:
             result = 'clouds'
             stage = burst.trigger
         else:

@@ -57,7 +57,7 @@ static const char *NVS_NS = "cc";
 #define CC_INIT_MEAN        128.0f  // mean prior for unseen tiles (mid-scale grey)
 #define CC_Z_THRESHOLD      3.0f    // z-score to flag a tile as anomalous
 #define CC_QUIET_RATIO      0.25f   // ≤25 % dark-anomalous tiles → QUIET → suppress
-#define CC_DARK_DELTA_MODEL 35.0f   // tile must be ≥35 DN darker than model mean (DARK_OBJ check)
+#define CC_DARK_DELTA_MODEL 20.0f   // tile must be ≥20 DN darker than model mean (DARK_OBJ check)
 #define CC_DARK_DELTA_PREV  20.0f   // tile must be ≥20 DN darker than previous frame (temporal check)
 #define CC_DARK_MIN_TILES        1  // ≥1 qualifying dark tile triggers DARK_OBJ
 #define CC_SCENE_DRIFT_MIN_TILES 4  // SCENE_DRIFT needs ≥4 persistently-dark tiles
@@ -588,21 +588,9 @@ static void run_pipeline(const uint8_t *means, bw_cc_result_t *out)
         return;
     }
 
-    // QUIET — dark-anomalous ratio low → scene matches model → suppress
-    if (ratio <= CC_QUIET_RATIO) {
-        update_model(b, means);
-        save_model(b);
-        save_prev(means, (uint8_t)global_mean);
-        strcpy(out->label, "clouds");
-        strcpy(out->stage, "QUIET");
-        bw_tele_s("result", "clouds");
-        bw_tele_s("stage",  "QUIET");
-        ESP_LOGI(TAG, "QUIET bucket=%d (ratio=%.0f%%) → clouds (suppress)", b, ratio * 100.0f);
-        return;
-    }
-
-    // SCENE_DRIFT — tiles dark vs model were already present in previous frame
-    // → model is stale (overnight scene change); re-calibrate and upload to be safe
+    // SCENE_DRIFT — tiles persistently dark vs model but nothing newly dark vs prev frame
+    // → model is stale (scene changed gradually); re-calibrate and upload to be safe.
+    // Checked BEFORE QUIET: stale model can make ratio look low even with many dark tiles.
     if (stale_cond) {
         update_model(b, means);
         s_frames_seen[b] = 0;   // reset warmup for this bucket — scene changed
@@ -614,6 +602,19 @@ static void run_pipeline(const uint8_t *means, bw_cc_result_t *out)
         bw_tele_s("stage",  "SCENE_DRIFT");
         ESP_LOGI(TAG, "SCENE_DRIFT bucket=%d (dark_model=%d new_dark=0) → process + warmup reset",
                  b, dark_model_tiles);
+        return;
+    }
+
+    // QUIET — dark-anomalous ratio low → scene matches model → suppress
+    if (ratio <= CC_QUIET_RATIO) {
+        update_model(b, means);
+        save_model(b);
+        save_prev(means, (uint8_t)global_mean);
+        strcpy(out->label, "clouds");
+        strcpy(out->stage, "QUIET");
+        bw_tele_s("result", "clouds");
+        bw_tele_s("stage",  "QUIET");
+        ESP_LOGI(TAG, "QUIET bucket=%d (ratio=%.0f%%) → clouds (suppress)", b, ratio * 100.0f);
         return;
     }
 

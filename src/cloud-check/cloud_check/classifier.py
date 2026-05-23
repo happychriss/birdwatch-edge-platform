@@ -127,15 +127,17 @@ def classify(
         decision = "process"
         reason = (f"dark object cue (dark_tiles={dark_tiles}, new_dark={new_dark_tiles}, "
                   f"blob={blob_max}, dark_ratio={ratio:.2f}, bucket={b})")
-    elif ratio <= cfg.quiet_anomaly_ratio:
-        trigger = "QUIET"
-        decision = "clouds"
-        reason = f"scene matches model (dark_ratio={ratio:.3f} ≤ {cfg.quiet_anomaly_ratio}, bucket={b})"
     elif stale_condition:
+        # Check stale BEFORE quiet: high dark_tiles with no new change means the model
+        # hasn't caught up with a gradual scene shift — upload and re-calibrate.
         trigger = "SCENE_DRIFT"
         decision = "process"
         reason = (f"persistent scene drift (dark_tiles={dark_tiles}, new_dark=0, "
                   f"dark_ratio={ratio:.2f}) → model stale, upload + re-calibrate")
+    elif ratio <= cfg.quiet_anomaly_ratio:
+        trigger = "QUIET"
+        decision = "clouds"
+        reason = f"scene matches model (dark_ratio={ratio:.3f} ≤ {cfg.quiet_anomaly_ratio}, bucket={b})"
     else:
         trigger = "AMBIGUOUS"
         decision = "process"

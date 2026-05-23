@@ -53,7 +53,7 @@ from db import BwFrame, Session
 # FAST_SHIFT and ISOLATED require dt_seconds which the ESP cannot compute before
 # WiFi/SNTP sync; when Python classifies these, we fall through to the background
 # model comparison (ESP would have classified BRIGHTNESS_SHIFT → process).
-_BURST_SUPPRESS_STAGES = frozenset({'DUPLICATE', 'BRIGHT_STABLE', 'DIFFUSE'})
+_BURST_SUPPRESS_STAGES = frozenset({'DUPLICATE', 'BRIGHT_STABLE'})
 
 
 # ── config helpers ────────────────────────────────────────────────────────────
