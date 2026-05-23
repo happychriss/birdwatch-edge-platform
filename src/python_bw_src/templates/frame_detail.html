@@ -229,9 +229,10 @@
 
 <script>
 // ── Tile overlay ─────────────────────────────────────────────────────────────
-const TILE_MEANS  = {{ (entry.meta.get('tile_means') if entry.meta else None) | tojson }};
-const PREV_TILE_MEANS = {{ prev_tile_means | tojson }};
-const GLOBAL_MEAN = {{ (entry.meta.get('global_mean', 128) if entry.meta else 128) | tojson }};
+const TILE_MEANS       = {{ (entry.meta.get('tile_means') if entry.meta else None) | tojson }};
+const PREV_TILE_MEANS  = {{ prev_tile_means | tojson }};
+const MODEL_TILE_MEANS = {{ model_tile_means | tojson }};
+const GLOBAL_MEAN      = {{ (entry.meta.get('global_mean', 128) if entry.meta else 128) | tojson }};
 // 20×15 = 300 tiles (current firmware), 16×12 = 192 (legacy)
 const TILE_COLS = (TILE_MEANS && TILE_MEANS.length === 192) ? 16 : 20;
 const TILE_ROWS = (TILE_MEANS && TILE_MEANS.length === 192) ? 12 : 15;
@@ -253,18 +254,20 @@ function drawTiles() {
   const tw = w / TILE_COLS, th = h / TILE_ROWS;
   // Font sized so 3 lines fit vertically in each tile
   const fs = Math.max(6, Math.min(9, Math.floor(th / 4.2)));
-  const hasPrev = PREV_TILE_MEANS && PREV_TILE_MEANS.length === TILE_MEANS.length;
+  const hasPrev  = PREV_TILE_MEANS  && PREV_TILE_MEANS.length  === TILE_MEANS.length;
+  const hasModel = MODEL_TILE_MEANS && MODEL_TILE_MEANS.length === TILE_MEANS.length;
 
   for (let row = 0; row < TILE_ROWS; row++) {
     for (let col = 0; col < TILE_COLS; col++) {
-      const idx  = row * TILE_COLS + col;
-      const val  = TILE_MEANS[idx];
-      const dGm  = val - GLOBAL_MEAN;          // + = brighter, - = darker than scene avg
-      const dPrev = hasPrev ? val - PREV_TILE_MEANS[idx] : null;
-      const darkDelta = GLOBAL_MEAN - val;      // positive = tile darker than average
+      const idx      = row * TILE_COLS + col;
+      const val      = TILE_MEANS[idx];
+      const modelRef = hasModel ? MODEL_TILE_MEANS[idx] : GLOBAL_MEAN;
+      const dModel   = val - modelRef;   // negative = tile darker than model/global (z uses this)
+      const dPrev    = hasPrev ? val - PREV_TILE_MEANS[idx] : null;
+      const darkDelta = modelRef - val;  // positive = tile darker than model → drives red fill
       const x = col * tw, y = row * th;
 
-      // Background colour: red = darker than model (potential object), blue = brighter
+      // Background: red = darker than model (potential object), blue = brighter
       if (darkDelta >= DARK_DELTA_MODEL) {
         const a = Math.min(0.72, 0.35 + (darkDelta - DARK_DELTA_MODEL) / 80);
         ctx.fillStyle = `rgba(210,50,50,${a.toFixed(2)})`;
@@ -284,21 +287,23 @@ function drawTiles() {
       ctx.lineWidth = 0.5;
       ctx.strokeRect(x + 0.5, y + 0.5, tw - 1, th - 1);
 
-      // Three text rows: mean  /  Δglobal  /  Δprev
+      // Three text rows — bold for readability
       const sign = v => (v >= 0 ? '+' : '') + v;
-      ctx.font = `${fs}px monospace`;
-      ctx.shadowColor = 'rgba(0,0,0,0.85)';
-      ctx.shadowBlur  = 1.5;
+      ctx.font = `bold ${fs}px monospace`;
+      ctx.shadowColor = 'rgba(0,0,0,0.9)';
+      ctx.shadowBlur  = 2;
 
-      ctx.fillStyle = 'rgba(255,255,255,0.95)';
-      ctx.fillText(val,           x + 2, y + fs + 1);          // row 1: tile mean
+      ctx.fillStyle = 'rgba(255,255,255,0.97)';
+      ctx.fillText(val, x + 2, y + fs + 1);                       // row 1: tile mean
 
-      ctx.fillStyle = dGm >= 0 ? 'rgba(180,220,255,0.95)' : 'rgba(255,180,160,0.95)';
-      ctx.fillText('g' + sign(dGm), x + 2, y + fs * 2 + 2);   // row 2: Δ global mean
+      // row 2: Δ model (true per-tile) or Δ global if no model stored (label differs)
+      const mLabel = hasModel ? 'm' : 'g';
+      ctx.fillStyle = dModel >= 0 ? 'rgba(160,210,255,0.97)' : 'rgba(255,160,140,0.97)';
+      ctx.fillText(mLabel + sign(dModel), x + 2, y + fs * 2 + 2); // row 2: Δ model
 
       if (dPrev !== null) {
-        ctx.fillStyle = dPrev >= 0 ? 'rgba(180,255,200,0.95)' : 'rgba(255,220,140,0.95)';
-        ctx.fillText('p' + sign(dPrev), x + 2, y + fs * 3 + 3); // row 3: Δ prev frame
+        ctx.fillStyle = dPrev >= 0 ? 'rgba(160,255,190,0.97)' : 'rgba(255,215,120,0.97)';
+        ctx.fillText('p' + sign(dPrev), x + 2, y + fs * 3 + 3);   // row 3: Δ prev frame
       }
 
       ctx.shadowBlur = 0;
@@ -347,11 +352,13 @@ if (_imgWrap) {
     const row = Math.min(TILE_ROWS - 1, Math.floor(y / rect.height * TILE_ROWS));
     const idx = row * TILE_COLS + col;
     const val = TILE_MEANS[idx];
-    const dGlobal = val - GLOBAL_MEAN;
     const sign = v => (v >= 0 ? '+' : '') + v;
+    const hasM = MODEL_TILE_MEANS && MODEL_TILE_MEANS.length === TILE_MEANS.length;
+    const modelRef = hasM ? MODEL_TILE_MEANS[idx] : GLOBAL_MEAN;
+    const dModel = val - modelRef;
     let lines = [
       `tile [${row},${col}]   DN: ${val}`,
-      `Δ global:  ${sign(dGlobal)}  (${dGlobal >= 0 ? 'brighter' : 'darker'})`,
+      `Δ ${hasM ? 'model' : 'global'}: ${sign(dModel)}  (${dModel >= 0 ? 'brighter' : 'darker'} than ${hasM ? 'bg model' : 'scene avg'})`,
     ];
     if (PREV_TILE_MEANS && PREV_TILE_MEANS.length === TILE_MEANS.length) {
       const dPrev = val - PREV_TILE_MEANS[idx];

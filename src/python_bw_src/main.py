@@ -462,6 +462,8 @@ def frame_detail():
     if prev_entry and prev_entry.meta:
         prev_tile_means = prev_entry.meta.get('tile_means')
 
+    model_tile_means = entry.meta.get('model_tile_means') if entry.meta else None
+
     return render_template('frame_detail.html',
                            entry=entry,
                            prev_id=prev_entry.id if prev_entry else None,
@@ -469,7 +471,8 @@ def frame_detail():
                            time_diff=time_diff,
                            spec=DISPLAY_SPEC,
                            order=DISPLAY_ORDER,
-                           prev_tile_means=prev_tile_means)
+                           prev_tile_means=prev_tile_means,
+                           model_tile_means=model_tile_means)
 
 
 # ─────────────────────────────── /validate ───────────────────────────────────

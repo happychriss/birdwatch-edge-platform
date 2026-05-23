@@ -117,6 +117,9 @@ def run_backfill(dry_run: bool = False, force: bool = False) -> None:
         was_warmup = bg_model.warmup_remaining(hour) > 0
         bg_model.observe(hour)
 
+        # Snapshot model means BEFORE any update — this is what z-scores are computed from
+        model_means_flat: list[int] = bg_model.mean[bucket].flatten().round().astype(int).tolist()
+
         if burst.label == 'suppress':
             result = 'clouds'
             stage = burst.trigger
@@ -150,6 +153,7 @@ def run_backfill(dry_run: bool = False, force: bool = False) -> None:
             'result':          result,
             'stage':           stage,
             'global_mean':     gm,
+            'model_tile_means': model_means_flat,
             'simulated':       True,
         }
         if 'photo_mode' not in meta:

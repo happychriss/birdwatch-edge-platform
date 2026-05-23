@@ -100,8 +100,9 @@ DISPLAY_SPEC: dict = {
         "color": "#7d6608",
         "text_color": "#fff",
     },
-    # tile_means is a large array — hide from card view, show in detail view only.
-    "tile_means":    {"type": "detail_only"},
+    # Large arrays — hide from card view, show collapsed in detail view only.
+    "tile_means":        {"type": "detail_only"},
+    "model_tile_means":  {"type": "detail_only"},
     # Backfill-computed fields — suppress from card badge row; visible in detail table.
     "downloaded_at": {"type": "plain"},
     "burst_label":   {"type": "plain"},
