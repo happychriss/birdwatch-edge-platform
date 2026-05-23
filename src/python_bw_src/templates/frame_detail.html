@@ -1,4 +1,4 @@
-{% from '_meta_render.html' import render_rows %}
+{% from '_meta_render.html' import render_rows, render_key_badges %}
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -166,6 +166,9 @@
     {% if entry.filename %}&nbsp;·&nbsp;<span style="font-size:11px;color:#8a9bb0">{{ entry.filename }}</span>{% endif %}
   </div>
   {% if entry.meta %}
+  <div style="margin:6px 0 4px;line-height:2.2;">
+    {{ render_key_badges(entry.meta, spec, ['result','stage','burst_trigger','photo_mode','battery','fresh_flash','simulated','label']) }}
+  </div>
   <details class="meta-details">
     <summary>Parameters &amp; intermediates</summary>
     <table class="meta-table">

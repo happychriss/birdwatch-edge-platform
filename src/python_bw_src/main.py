@@ -3,6 +3,7 @@ from datetime import datetime, timedelta
 from collections import defaultdict
 import json
 import os
+import sys
 import requests
 import subprocess
 import threading
@@ -12,10 +13,78 @@ from sqlalchemy.orm.attributes import flag_modified
 from db import BwPhoto, BwFrame, Session
 from display_spec import DISPLAY_SPEC, DISPLAY_ORDER
 
+# ─── Live background model ────────────────────────────────────────────────────
+# Maintains an in-process BackgroundModel that mirrors the ESP's NVS state.
+# On startup: replays all stored tile_means from DB (chronological order).
+# On each /frame POST: snapshots model means BEFORE update and stores as
+# meta['model_tile_means'], enabling the tile overlay Δm display.
+_cc_abs = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                       '..', 'cloud-check'))
+if _cc_abs not in sys.path:
+    sys.path.insert(0, _cc_abs)
+
+_LIVE_OK     = False
+_live_ready  = False
+_live_model  = None
+_live_lock   = threading.Lock()
+_bg_cfg      = None
+_UPDATE_STAGES = {'NIGHT', 'WARMUP', 'QUIET', 'SCENE_DRIFT'}
+
+try:
+    import numpy as _np
+    from cloud_check.background import BackgroundModel as _BackgroundModel
+    from cloud_check.config import Config as _BgConfig
+    _bg_cfg     = _BgConfig(num_time_buckets=1, warmup_frames_per_bucket=0)
+    _live_model = _BackgroundModel(_bg_cfg)
+    _LIVE_OK    = True
+    print("[live_model] cloud_check loaded OK", flush=True)
+except Exception as _import_exc:
+    print(f"[live_model] disabled — {_import_exc}", flush=True)
+
+
+def _warm_live_model():
+    """Replay tile_means from DB in chronological order to reconstruct bg model state."""
+    global _live_ready
+    if not _LIVE_OK:
+        return
+    local_session = Session()
+    try:
+        frames = (local_session.query(BwFrame)
+                  .filter(BwFrame.filename.isnot(None))
+                  .order_by(BwFrame.captured_at.asc())
+                  .all())
+        n = 0
+        grid_size = _bg_cfg.grid_h * _bg_cfg.grid_w
+        for frame in frames:
+            if not frame.meta:
+                continue
+            tile_means = frame.meta.get('tile_means')
+            if not tile_means or len(tile_means) != grid_size:
+                continue
+            stage = frame.meta.get('stage', '')
+            hour  = frame.captured_at.hour if frame.captured_at else 12
+            arr   = _np.array(tile_means, dtype=_np.float32).reshape(
+                        _bg_cfg.grid_h, _bg_cfg.grid_w)
+            with _live_lock:
+                _live_model.observe(hour)
+                if stage in _UPDATE_STAGES:
+                    _live_model.update(hour, arr)
+                if stage == 'SCENE_DRIFT':
+                    _live_model.reset_warmup(hour)
+            n += 1
+        _live_ready = True
+        print(f"[live_model] warmed up on {n} frames", flush=True)
+    except Exception as exc:
+        print(f"[live_model] warmup error: {exc}", flush=True)
+    finally:
+        local_session.close()
+
+# ─────────────────────────────────────────────────────────────────────────────
 
 birdwatch_http = "http://192.168.1.43"
 global_status = "PIR_Sensor"
 session = Session()
+threading.Thread(target=_warm_live_model, daemon=True).start()
 
 app = Flask(__name__, static_folder=os.getenv('JPG_FOLDER_PATH'), static_url_path='/static')
 print(os.getenv('JPG_FOLDER_PATH'))
@@ -375,6 +444,27 @@ def process_frame_upload():
             captured_at = datetime.now()
 
         result = meta.get('result')
+
+        # Inject server-computed model_tile_means when ESP hasn't sent it yet.
+        # Once the ESP firmware is updated to emit model_tile_means, this branch
+        # is skipped ('model_tile_means' already in meta).
+        if _LIVE_OK and _live_ready and 'model_tile_means' not in meta:
+            _tm = meta.get('tile_means')
+            if _tm and len(_tm) == _bg_cfg.grid_h * _bg_cfg.grid_w:
+                _arr  = _np.array(_tm, dtype=_np.float32).reshape(
+                            _bg_cfg.grid_h, _bg_cfg.grid_w)
+                _hour = captured_at.hour
+                _stg  = meta.get('stage', '')
+                with _live_lock:
+                    _live_model.observe(_hour)
+                    _bkt  = _live_model._idx(_hour)
+                    # Snapshot BEFORE update — mirrors what z-scores were computed from
+                    _snap = _live_model.mean[_bkt].flatten().round().astype(int).tolist()
+                    if _stg in _UPDATE_STAGES:
+                        _live_model.update(_hour, _arr)
+                    if _stg == 'SCENE_DRIFT':
+                        _live_model.reset_warmup(_hour)
+                meta['model_tile_means'] = _snap
 
         frame = BwFrame(
             captured_at=captured_at,

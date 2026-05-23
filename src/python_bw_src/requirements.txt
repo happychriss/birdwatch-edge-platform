@@ -9,3 +9,4 @@ Werkzeug==3.0.2
 requests>=2.31
 SQLAlchemy>=2.0
 psycopg2-binary>=2.9
+numpy>=1.24

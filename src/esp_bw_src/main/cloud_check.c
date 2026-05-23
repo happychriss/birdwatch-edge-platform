@@ -230,6 +230,18 @@ static void run_pipeline(const uint8_t *means, bw_cc_result_t *out)
     bw_tele_i("global_mean", (long)global_mean);
     bw_tele_arr_u8("tile_means", means, CC_NUM_TILES);
 
+    // Background model means (pre-update snapshot) — lets the server render Δm per tile.
+    // s_mean[] was loaded from NVS before run_pipeline(); this is the state that z-scores
+    // are computed from.  Rounded to uint8 for compact JSON.
+    {
+        uint8_t model_m[CC_NUM_TILES];
+        for (int i = 0; i < CC_NUM_TILES; i++) {
+            float v = s_mean[i] + 0.5f;
+            model_m[i] = (v < 0.0f) ? 0u : (v > 255.0f) ? 255u : (uint8_t)v;
+        }
+        bw_tele_arr_u8("model_tile_means", model_m, CC_NUM_TILES);
+    }
+
     // ── Burst pre-filter ──────────────────────────────────────────────────────
     // Compares current frame to the previous captured frame to suppress PIR
     // re-fires on sun/cloud transitions.  The following stages match Python

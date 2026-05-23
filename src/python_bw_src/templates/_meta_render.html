@@ -67,6 +67,49 @@
   {% endfor %}
 {% endmacro %}
 
+{# Render a specific subset of keys as inline badges. Used in the frame_detail
+   always-visible header strip so result/stage are visible without expanding the
+   collapsible.  Deduplicates repeated stage_badge values (burst == stage). #}
+{% macro render_key_badges(meta, spec, keys) %}
+  {% set seen = namespace(stage_vals=[]) %}
+  {% for k in keys %}
+    {% if k in meta %}
+      {% set rule = spec.get(k, {}) %}
+      {% set rtype = rule.get('type', 'plain') %}
+      {% set val = meta[k] %}
+      {% if rtype == 'badge' %}
+        {% set colors = rule.get('colors', {}) %}
+        {% if val in colors %}
+          {% set bg = colors[val][0] %}{% set fg = colors[val][1] %}
+        {% else %}
+          {% set fb = rule.get('fallback', ('#eee', '#778')) %}
+          {% set bg = fb[0] %}{% set fg = fb[1] %}
+        {% endif %}
+        <span class="badge" style="background:{{ bg }};color:{{ fg }}">{{ val }}</span>
+      {% elif rtype == 'stage_badge' %}
+        {% if val not in seen.stage_vals %}
+          {% set seen.stage_vals = seen.stage_vals + [val] %}
+          {% set pal = rule.get('palette', {}) %}
+          {% set col = pal.get(val, rule.get('fallback', '#aab')) %}
+          <span class="badge" style="background:{{ col }};color:#fff">{{ val }}</span>
+        {% endif %}
+      {% elif rtype == 'badge_if' %}
+        {% if val == rule.get('match_value') %}
+          <span class="badge" style="background:{{ rule.get('color','#aaa') }};color:{{ rule.get('text_color','#fff') }}">{{ rule.get('label', val) }}</span>
+        {% endif %}
+      {% elif rtype == 'format_val' %}
+        {% set fmt = rule.get('format', '{}') %}
+        {% set warn = rule.get('warn_below') %}
+        {% if warn is not none and val is number and val < warn %}
+          <span class="badge" style="background:#fde8e8;color:#c0392b;border:1px solid #f5c6cb">{{ fmt.format(val) }}</span>
+        {% else %}
+          <span class="badge" style="background:#f4f6f7;color:#556;border:1px solid #dce">{{ fmt.format(val) }}</span>
+        {% endif %}
+      {% endif %}
+    {% endif %}
+  {% endfor %}
+{% endmacro %}
+
 {# Render ALL fields as a table of rows for the detail view. #}
 {% macro render_rows(meta, spec, order) %}
   {% set shown = namespace(keys=[]) %}
