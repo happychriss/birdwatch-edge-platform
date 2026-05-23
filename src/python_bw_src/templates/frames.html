@@ -55,9 +55,6 @@
   .btn-backfill { background: #fef9e7; border-color: #f9ca24; color: #7d6608; }
   .btn-backfill:hover { background: #fdebd0; }
   .btn-backfill:disabled { opacity: 0.5; cursor: default; }
-  .btn-download { background: #e8f5e9; border-color: #a5d6a7; color: #1e8449; }
-  .btn-download:hover { background: #c8e6c9; }
-  .btn-download:disabled { opacity: 0.5; cursor: default; }
 
   /* ── Label flag on card image ── */
   .label-flag {
@@ -179,8 +176,6 @@
   <button class="btn btn-pir" onclick="location.href='/set_status?status=PIR_Sensor'">PIR Sensor</button>
   <button class="btn btn-backfill" id="btn-backfill" onclick="runBackfill(false)" title="Simulate burst+bg pipeline on old frames">Backfill old</button>
   <span id="backfill-status" style="font-size:12px;color:#556;"></span>
-  <button class="btn btn-download" id="btn-download" onclick="runDownload()" title="Copy labeled images to download folder">Download</button>
-  <span id="download-status" style="font-size:12px;color:#556;"></span>
   <div class="view-toggle">
     <button class="view-btn active" id="btn-grid" onclick="setView('grid')" title="Grid view">⊞</button>
     <button class="view-btn"        id="btn-list" onclick="setView('list')" title="List view">☰</button>
@@ -275,33 +270,6 @@ function pollBackfill() {
     }
   });
 }
-
-function runDownload() {
-  const btn = document.getElementById('btn-download');
-  const status = document.getElementById('download-status');
-  btn.disabled = true;
-  status.textContent = 'Copying…';
-  fetch('/admin/download', {method: 'POST'})
-    .then(r => r.json())
-    .then(data => {
-      if (data.error) {
-        status.textContent = 'Error: ' + data.error;
-      } else {
-        status.textContent = `Saved ${data.copied} → ${data.folder}`;
-        if (data.copied > 0) setTimeout(() => location.reload(), 1200);
-      }
-      btn.disabled = false;
-    })
-    .catch(e => { status.textContent = 'Error: ' + e; btn.disabled = false; });
-}
-
-// Show pending download count on page load
-(function() {
-  fetch('/admin/download/stats').then(r => r.json()).then(data => {
-    const btn = document.getElementById('btn-download');
-    if (data.total_new > 0) btn.textContent = `Download (${data.total_new} new)`;
-  }).catch(() => {});
-})();
 
 let refreshSecs = 300;
 const countdownEl = document.getElementById('countdown');

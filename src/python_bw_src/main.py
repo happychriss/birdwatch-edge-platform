@@ -4,7 +4,6 @@ from collections import defaultdict
 import json
 import os
 import requests
-import shutil
 import subprocess
 import threading
 import time
@@ -15,7 +14,6 @@ from display_spec import DISPLAY_SPEC, DISPLAY_ORDER
 
 
 birdwatch_http = "http://192.168.1.43"
-DOWNLOAD_FOLDER = os.getenv('DOWNLOAD_FOLDER_PATH', '')
 global_status = "PIR_Sensor"
 session = Session()
 
@@ -505,80 +503,59 @@ def set_label(frame_id: int):
     return jsonify({'id': frame_id, 'label': label}), 200
 
 
-# ─────────────────────────────── /admin/download ─────────────────────────────
+# ─────────────────────────────── /admin/export ───────────────────────────────
 
-@app.route('/admin/download/stats')
-def download_stats():
-    counts = {}
-    for lbl in _VALID_LABELS:
-        counts[lbl] = session.query(BwFrame).filter(
-            BwFrame.meta['label'].astext == lbl,
-            BwFrame.meta['downloaded_at'].is_(None),
-        ).count()
-    counts['total_new'] = sum(counts.values())
-    counts['download_folder'] = DOWNLOAD_FOLDER or '(not configured)'
-    return jsonify(counts)
+_EXPORT_LABELS = {'bird', 'ignore', 'special', 'all'}
 
 
-@app.route('/admin/download', methods=['POST'])
-def admin_download():
-    """Copy all newly-labeled frames to DOWNLOAD_FOLDER_PATH and mark as downloaded.
+@app.route('/admin/export/<label>')
+def export_list(label: str):
+    """Return JSON list of labeled frames for the download script.
 
-    Folder structure inside DOWNLOAD_FOLDER_PATH:
-        all_images/
-        bird_images/
-        ignore_images/
-        special_images/
-
-    Returns JSON with stats.  If DOWNLOAD_FOLDER_PATH is empty, returns 400.
+    GET /admin/export/bird           → frames with label=bird, not yet downloaded
+    GET /admin/export/all            → all labeled frames, not yet downloaded
+    GET /admin/export/bird?include_downloaded=true  → include already-downloaded
     """
-    if not DOWNLOAD_FOLDER:
-        return jsonify({'error': 'DOWNLOAD_FOLDER_PATH env var not set'}), 400
+    if label not in _EXPORT_LABELS:
+        return jsonify({'error': f'unknown label; use one of {sorted(_EXPORT_LABELS)}'}), 400
 
-    dl_root = Path(DOWNLOAD_FOLDER)
-    jpg_src = Path(os.getenv('JPG_FOLDER_PATH', '/tmp'))
-    now = datetime.now().isoformat()
+    include_downloaded = request.args.get('include_downloaded', 'false').lower() == 'true'
 
-    # Fetch frames that have a label but haven't been downloaded yet
-    frames = (session.query(BwFrame)
-              .filter(BwFrame.meta['label'].astext.isnot(None),
-                      BwFrame.meta['downloaded_at'].is_(None))
-              .order_by(BwFrame.captured_at.asc())
-              .all())
+    q = session.query(BwFrame).filter(
+        BwFrame.filename.isnot(None),
+        BwFrame.meta['label'].astext.isnot(None),
+    )
+    if label != 'all':
+        q = q.filter(BwFrame.meta['label'].astext == label)
+    if not include_downloaded:
+        q = q.filter(BwFrame.meta['downloaded_at'].is_(None))
 
-    stats: dict = {'copied': 0, 'missing': 0, 'by_label': {}}
+    frames = q.order_by(BwFrame.captured_at.asc()).all()
 
-    for lbl in _VALID_LABELS:
-        (dl_root / 'all_images').mkdir(parents=True, exist_ok=True)
-        (dl_root / f'{lbl}_images').mkdir(parents=True, exist_ok=True)
+    result = [
+        {
+            'id': f.id,
+            'filename': f.filename,
+            'captured_at': f.captured_at.isoformat() if f.captured_at else None,
+            'label': (f.meta or {}).get('label'),
+        }
+        for f in frames
+    ]
+    return jsonify({'label': label, 'count': len(result), 'frames': result})
 
-    for frame in frames:
-        if not frame.filename:
-            continue
-        label = (frame.meta or {}).get('label')
-        if not label:
-            continue
-        src = jpg_src / frame.filename
-        if not src.exists():
-            stats['missing'] += 1
-            continue
-        shutil.copy2(src, dl_root / 'all_images' / frame.filename)
-        shutil.copy2(src, dl_root / f'{label}_images' / frame.filename)
-        meta = dict(frame.meta)
-        meta['downloaded_at'] = now
-        frame.meta = meta
-        flag_modified(frame, 'meta')
-        stats['copied'] += 1
-        stats['by_label'][label] = stats['by_label'].get(label, 0) + 1
 
+@app.route('/frame/<int:frame_id>/downloaded', methods=['POST'])
+def mark_downloaded(frame_id: int):
+    """Mark a frame as downloaded (sets meta['downloaded_at'])."""
+    frame = session.query(BwFrame).filter(BwFrame.id == frame_id).first()
+    if not frame:
+        return jsonify({'error': 'not found'}), 404
+    meta = dict(frame.meta or {})
+    meta['downloaded_at'] = datetime.now().isoformat()
+    frame.meta = meta
+    flag_modified(frame, 'meta')
     session.commit()
-    stats['folder'] = str(dl_root)
-    return jsonify(stats), 200
-
-
-@app.route('/admin/download', methods=['GET'])
-def download_page():
-    return redirect('/')
+    return jsonify({'id': frame_id, 'downloaded_at': meta['downloaded_at']}), 200
 
 
 @app.route('/admin/backfill', methods=['GET'])
