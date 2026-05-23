@@ -245,39 +245,63 @@ function drawTiles() {
   const canvas = document.getElementById('tile-canvas');
   if (!img || !canvas || !TILE_MEANS) return;
   const w = img.offsetWidth, h = img.offsetHeight;
+  if (!w || !h) return;
   canvas.width  = w;
   canvas.height = h;
   const ctx = canvas.getContext('2d');
   ctx.clearRect(0, 0, w, h);
   const tw = w / TILE_COLS, th = h / TILE_ROWS;
-  const fontSize = Math.max(7, Math.min(11, tw * 0.38)) + 'px';
+  // Font sized so 3 lines fit vertically in each tile
+  const fs = Math.max(6, Math.min(9, Math.floor(th / 4.2)));
+  const hasPrev = PREV_TILE_MEANS && PREV_TILE_MEANS.length === TILE_MEANS.length;
+
   for (let row = 0; row < TILE_ROWS; row++) {
     for (let col = 0; col < TILE_COLS; col++) {
-      const val   = TILE_MEANS[row * TILE_COLS + col];
-      const delta = GLOBAL_MEAN - val;   // positive = tile is darker than global mean
+      const idx  = row * TILE_COLS + col;
+      const val  = TILE_MEANS[idx];
+      const dGm  = val - GLOBAL_MEAN;          // + = brighter, - = darker than scene avg
+      const dPrev = hasPrev ? val - PREV_TILE_MEANS[idx] : null;
+      const darkDelta = GLOBAL_MEAN - val;      // positive = tile darker than average
       const x = col * tw, y = row * th;
-      if (delta >= DARK_DELTA_MODEL) {
-        const alpha = Math.min(0.72, 0.35 + (delta - DARK_DELTA_MODEL) / 80);
-        ctx.fillStyle = `rgba(210,50,50,${alpha.toFixed(2)})`;
+
+      // Background colour: red = darker than model (potential object), blue = brighter
+      if (darkDelta >= DARK_DELTA_MODEL) {
+        const a = Math.min(0.72, 0.35 + (darkDelta - DARK_DELTA_MODEL) / 80);
+        ctx.fillStyle = `rgba(210,50,50,${a.toFixed(2)})`;
         ctx.fillRect(x, y, tw, th);
-      } else if (delta >= DARK_DELTA_PREV) {
-        const alpha = (delta - DARK_DELTA_PREV) / (DARK_DELTA_MODEL - DARK_DELTA_PREV) * 0.35;
-        ctx.fillStyle = `rgba(210,120,50,${alpha.toFixed(2)})`;
+      } else if (darkDelta >= DARK_DELTA_PREV) {
+        const a = (darkDelta - DARK_DELTA_PREV) / (DARK_DELTA_MODEL - DARK_DELTA_PREV) * 0.35;
+        ctx.fillStyle = `rgba(210,120,50,${a.toFixed(2)})`;
         ctx.fillRect(x, y, tw, th);
-      } else if (delta <= -DARK_DELTA_PREV) {
-        const alpha = Math.min(0.35, (-delta - DARK_DELTA_PREV) / 80);
-        ctx.fillStyle = `rgba(50,110,220,${alpha.toFixed(2)})`;
+      } else if (darkDelta <= -DARK_DELTA_PREV) {
+        const a = Math.min(0.35, (-darkDelta - DARK_DELTA_PREV) / 80);
+        ctx.fillStyle = `rgba(50,110,220,${a.toFixed(2)})`;
         ctx.fillRect(x, y, tw, th);
       }
-      ctx.strokeStyle = 'rgba(255,255,255,0.30)';
+
+      // Grid lines
+      ctx.strokeStyle = 'rgba(255,255,255,0.25)';
       ctx.lineWidth = 0.5;
       ctx.strokeRect(x + 0.5, y + 0.5, tw - 1, th - 1);
-      ctx.font = `${fontSize} monospace`;
-      ctx.fillStyle = 'rgba(255,255,255,0.92)';
-      ctx.shadowColor = 'rgba(0,0,0,0.7)';
-      ctx.shadowBlur  = 2;
-      ctx.fillText(val, x + 2, y + th - 3);
-      ctx.shadowBlur  = 0;
+
+      // Three text rows: mean  /  Δglobal  /  Δprev
+      const sign = v => (v >= 0 ? '+' : '') + v;
+      ctx.font = `${fs}px monospace`;
+      ctx.shadowColor = 'rgba(0,0,0,0.85)';
+      ctx.shadowBlur  = 1.5;
+
+      ctx.fillStyle = 'rgba(255,255,255,0.95)';
+      ctx.fillText(val,           x + 2, y + fs + 1);          // row 1: tile mean
+
+      ctx.fillStyle = dGm >= 0 ? 'rgba(180,220,255,0.95)' : 'rgba(255,180,160,0.95)';
+      ctx.fillText('g' + sign(dGm), x + 2, y + fs * 2 + 2);   // row 2: Δ global mean
+
+      if (dPrev !== null) {
+        ctx.fillStyle = dPrev >= 0 ? 'rgba(180,255,200,0.95)' : 'rgba(255,220,140,0.95)';
+        ctx.fillText('p' + sign(dPrev), x + 2, y + fs * 3 + 3); // row 3: Δ prev frame
+      }
+
+      ctx.shadowBlur = 0;
     }
   }
 }
@@ -297,6 +321,15 @@ function toggleTiles() {
 }
 
 window.addEventListener('resize', function() { if (tilesOn) drawTiles(); });
+
+// Tiles on by default — wait for image to be loaded so offsetWidth/Height are valid
+if (TILE_MEANS) {
+  const _img = document.getElementById('frame-img');
+  if (_img) {
+    if (_img.complete && _img.naturalWidth) { toggleTiles(); }
+    else { _img.addEventListener('load', toggleTiles); }
+  }
+}
 
 // ── Tile tooltip on hover ─────────────────────────────────────────────────────
 const _tooltip = document.getElementById('tile-tooltip');
