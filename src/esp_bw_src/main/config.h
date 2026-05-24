@@ -50,10 +50,8 @@
 // 40s deadline: worst case = 3 handshake attempts × (up to 10s run + 2.5s backoff) + soft
 // retries.  Was 10s (too tight) → 20s (still cut off) → 30s (margin too thin with backoff).
 #define BW_WIFI_TIMEOUT_MS    40000
-#define BW_WIFI_BACKOFF_MS        500  // pause between NVS-cache miss and fallback scan
-// Hard backoff after handshake timeout / inactivity disassoc — Fritz!Box needs this much time
-// to clear its rate-limit state before accepting a new connection from the same MAC.
-#define BW_WIFI_BACKOFF_HARD_MS  2500
+#define BW_WIFI_BACKOFF_MS   500  // pause between NVS-cache miss and fallback scan
+// Retry backoff uses exponential delays with jitter — see s_backoff_ms[] in wifi_sta.c.
 
 // Pin to a specific BSSID — connection skips scan/NVS-cache and never
 // roams to mesh extenders.  Set all bytes to 0 to disable pinning and

@@ -13,6 +13,7 @@
 #include "esp_event.h"
 #include "esp_netif.h"
 #include "esp_log.h"
+#include "esp_random.h"
 #include "driver/gpio.h"
 #include "nvs_flash.h"
 #include "nvs.h"
@@ -34,11 +35,13 @@ static bw_wifi_fail_reason_t s_fail_reason = BW_WIFI_FAIL_TIMEOUT;
 static TimerHandle_t         s_backoff_timer;
 
 // Deferred retry called by s_backoff_timer — safe to call esp_wifi_connect() from timer task.
-static void backoff_cb(TimerHandle_t t)
-{
-    (void)t;
-    esp_wifi_connect();
-}
+static void backoff_cb(TimerHandle_t t) { (void)t; esp_wifi_connect(); }
+
+// Exponential backoff bases (ms) indexed by retry count.
+// Jitter ±500 ms (hardware RNG) is added to each — prevents multiple boards or rapid
+// PIR re-triggers from synchronising and hammering the AP at the same instant.
+static const uint32_t s_backoff_ms[] = { 2000, 3000, 5000, 7000 };
+#define BACKOFF_STEPS  (sizeof(s_backoff_ms) / sizeof(s_backoff_ms[0]))
 
 // Transient failures worth retrying — others (wrong password, AP banned MAC) are not.
 static bool is_retriable(uint8_t r)
@@ -88,14 +91,16 @@ static void on_event(void *arg, esp_event_base_t base, int32_t id, void *data)
                  s_retry + 1, BW_WIFI_MAX_RETRY);
         if (retry) {
             s_retry++;
-            // All retriable failures — including reason=205 (AP briefly invisible) — go
-            // through the backoff timer.  The AP disappears precisely because it just
-            // kicked us; it needs recovery time before accepting a new association.
+            // Exponential backoff with jitter — index into s_backoff_ms by retry count,
+            // add 0..999 ms hardware-random jitter, then fire the one-shot timer.
+            uint32_t idx      = (uint32_t)(s_retry - 1);
+            if (idx >= BACKOFF_STEPS) idx = BACKOFF_STEPS - 1;
+            uint32_t delay_ms = s_backoff_ms[idx] + (esp_random() % 1000);
+            ESP_LOGI(TAG, "backoff %lu ms (retry %d/%d)",
+                     (unsigned long)delay_ms, s_retry, BW_WIFI_MAX_RETRY);
             if (!s_backoff_timer)
-                s_backoff_timer = xTimerCreate("wbackoff",
-                                      pdMS_TO_TICKS(BW_WIFI_BACKOFF_HARD_MS),
-                                      pdFALSE, NULL, backoff_cb);
-            xTimerStart(s_backoff_timer, 0);
+                s_backoff_timer = xTimerCreate("wbackoff", 1, pdFALSE, NULL, backoff_cb);
+            xTimerChangePeriod(s_backoff_timer, pdMS_TO_TICKS(delay_ms), 0);
         } else {
             if (e->reason == WIFI_REASON_NO_AP_FOUND) {
                 s_fail_reason = BW_WIFI_FAIL_NOT_FOUND;
