@@ -35,6 +35,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
+#include <math.h>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -157,6 +158,114 @@ static void rtc_sync_from_ntp(void)
 // Compile-time build fingerprint — unique per rebuild (changes __DATE__/__TIME__).
 static const char   s_fw_build[]  = __DATE__ " " __TIME__;
 static bool         s_fresh_flash = false;   // set once in app_main when new firmware detected
+
+// ─── Wakeup source ──────────────────────────────────────────────────────────
+// Detected once at boot by reading the DS3231 alarm-1 flag.  If the flag is
+// set the DS3231 fired the alarm (RTC wakeup); otherwise the PIR did.
+typedef enum { BW_WAKE_PIR = 0, BW_WAKE_RTC } bw_wakeup_source_t;
+static bw_wakeup_source_t s_wakeup_source = BW_WAKE_PIR;
+
+// ─── Sunrise / sunset (NOAA simplified) ─────────────────────────────────────
+// Returns minutes since midnight UTC for sunrise (is_sunset=false) or sunset.
+// doy = 1..365.  Returns -1 on polar night, 24*60 on polar day (sunset only).
+static int solar_utc_minutes(int doy, bool is_sunset)
+{
+    float b    = 2.0f * (float)M_PI * (doy - 1) / 365.0f;
+    float eot  = 229.18f * (0.000075f
+                 + 0.001868f * cosf(b) - 0.032077f * sinf(b)
+                 - 0.014615f * cosf(2*b) - 0.04089f * sinf(2*b));
+    float decl = 0.006918f - 0.399912f * cosf(b) + 0.070257f * sinf(b)
+               - 0.006758f * cosf(2*b) + 0.000907f * sinf(2*b)
+               - 0.002697f * cosf(3*b) + 0.00148f  * sinf(3*b);
+    float lat    = BW_GEO_LAT_DEG * (float)M_PI / 180.0f;
+    float cos_ha = (cosf(90.833f * (float)M_PI / 180.0f) - sinf(lat) * sinf(decl))
+                 / (cosf(lat) * cosf(decl));
+    if (cos_ha >  1.0f) return -1;
+    if (cos_ha < -1.0f) return is_sunset ? 24*60 : 0;
+    float ha   = acosf(cos_ha) * 180.0f / (float)M_PI;
+    float noon = 720.0f - 4.0f * BW_GEO_LON_DEG - eot;
+    return (int)(is_sunset ? noon + 4.0f * ha : noon - 4.0f * ha);
+}
+
+// ─── Set next DS3231 alarm ───────────────────────────────────────────────────
+// Reads DS3231 current time, adds cycle_min (NVS or default), clamps to
+// daylight window (sunrise..sunset UTC for Germany).  Clears alarm flag and
+// arms Alarm 1.  rtc must be a valid open i2c_dev_t.
+static void rtc_set_next_alarm(i2c_dev_t *rtc)
+{
+    struct tm now_local;
+    if (ds3231_get_time(rtc, &now_local) != ESP_OK) {
+        ESP_LOGE(TAG, "DS3231 get_time failed — alarm not set");
+        return;
+    }
+
+    setenv("TZ", BW_TZ_BERLIN, 1);
+    tzset();
+    time_t now_utc = mktime(&now_local);   // local → UTC epoch
+    if (now_utc <= 0) {
+        ESP_LOGE(TAG, "DS3231 time not set — alarm not set");
+        return;
+    }
+
+    // Cycle period: NVS "bw_meta"/"cycle_min" (u8), default BW_ALARM_CYCLE_MIN_DEFAULT.
+    uint8_t cycle_min = BW_ALARM_CYCLE_MIN_DEFAULT;
+    {
+        nvs_handle_t h;
+        if (nvs_open("bw_meta", NVS_READONLY, &h) == ESP_OK) {
+            nvs_get_u8(h, "cycle_min", &cycle_min);
+            nvs_close(h);
+        }
+        if (cycle_min < 1) cycle_min = 1;
+    }
+
+    time_t next_utc = now_utc + (time_t)cycle_min * 60;
+
+    // Day-of-year and minutes-since-midnight-UTC for the candidate wakeup time.
+    struct tm gm;
+    gmtime_r(&next_utc, &gm);
+    int doy         = gm.tm_yday + 1;
+    int next_utc_m  = gm.tm_hour * 60 + gm.tm_min;
+
+    int sunrise_m = solar_utc_minutes(doy, false);
+    int sunset_m  = solar_utc_minutes(doy, true);
+
+    // If outside daylight, advance to sunrise (same day or next day).
+    if (sunrise_m < 0) sunrise_m = 0;       // polar day fallback
+    if (sunset_m > 24*60) sunset_m = 24*60;
+
+    if (next_utc_m < sunrise_m || next_utc_m >= sunset_m) {
+        // Past sunset → push to tomorrow's sunrise.
+        time_t day_start = (next_utc / 86400) * 86400;
+        if (next_utc_m >= sunset_m) {
+            day_start += 86400;
+            gmtime_r(&day_start, &gm);
+            doy       = gm.tm_yday + 1;
+            sunrise_m = solar_utc_minutes(doy, false);
+            if (sunrise_m < 0) sunrise_m = 0;
+        }
+        next_utc = day_start + (time_t)sunrise_m * 60;
+        gmtime_r(&next_utc, &gm);
+        next_utc_m = gm.tm_hour * 60 + gm.tm_min;
+    }
+
+    // Convert target UTC back to Berlin local time for DS3231.
+    struct tm next_local;
+    localtime_r(&next_utc, &next_local);
+
+    ds3231_clear_alarm_flags(rtc, DS3231_ALARM_1);
+    esp_err_t err = ds3231_set_alarm(rtc, DS3231_ALARM_1, &next_local,
+                                     DS3231_ALARM1_MATCH_SECMINHOUR, NULL, 0);
+    if (err == ESP_OK) {
+        ds3231_enable_alarm_ints(rtc, DS3231_ALARM_1);
+        ESP_LOGI(TAG, "DS3231 alarm → %04d-%02d-%02d %02d:%02d:%02d local"
+                 " (cycle=%d min  sunrise=%02d:%02d sunset=%02d:%02d UTC)",
+                 next_local.tm_year+1900, next_local.tm_mon+1, next_local.tm_mday,
+                 next_local.tm_hour, next_local.tm_min, next_local.tm_sec,
+                 cycle_min, sunrise_m/60, sunrise_m%60, sunset_m/60, sunset_m%60);
+    } else {
+        ESP_LOGE(TAG, "ds3231_set_alarm failed: %s", esp_err_to_name(err));
+    }
+}
 
 static const char *wakeup_to_trigger(uint32_t causes)
 {
@@ -314,6 +423,7 @@ static void run_normal_cycle(void)
         // already added inside bw_cc_assess().  These three are added once here.
         bw_tele_f("battery",    (double)battery_v);
         bw_tele_s("trigger",    trigger);
+        bw_tele_s("source",     s_wakeup_source == BW_WAKE_RTC ? "rtc" : "pir");
         bw_tele_s("photo_mode", photo_mode_str);
         if (s_fresh_flash) {
             bw_tele_b("fresh_flash", true);
@@ -385,6 +495,24 @@ void app_main(void)
     }
     bw_diag_init();
 
+    // ── Wakeup source detection ──────────────────────────────────────────────
+    // Read DS3231 Alarm-1 flag BEFORE it is cleared.  If the flag is set the
+    // DS3231 INT line fired (RTC periodic wakeup); otherwise the PIR triggered.
+    {
+        if (i2cdev_init() == ESP_OK) {
+            i2c_dev_t rtc = {0};
+            if (ds3231_init_desc(&rtc, I2C_NUM_0, BW_DS3231_SDA_GPIO, BW_DS3231_SCL_GPIO) == ESP_OK) {
+                ds3231_alarm_t fired = DS3231_ALARM_NONE;
+                ds3231_get_alarm_flags(&rtc, &fired);
+                if (fired & DS3231_ALARM_1) s_wakeup_source = BW_WAKE_RTC;
+                ds3231_free_desc(&rtc);
+            }
+            i2cdev_done();
+        }
+        ESP_LOGI(TAG, "wakeup source: %s",
+                 s_wakeup_source == BW_WAKE_RTC ? "RTC" : "PIR");
+    }
+
     // ── Firmware-update detection ────────────────────────────────────────────
     // FNV-1a hash of the compile-time build string.  On a change (new flash):
     //   • erase the NVS background model so the ESP starts from the same
@@ -414,24 +542,16 @@ void app_main(void)
     bw_watchdog_stop();
     bw_log_sysinfo(TAG);
 
-    // ── DS3231 RTC — set known time and arm 30-second wakeup alarm ───────────
+    // ── DS3231 RTC — arm next periodic alarm ─────────────────────────────────
     // Done BEFORE the cooldown sleep so it is visible in the serial log (the
     // USB-CDC connection drops during light sleep and output after wake is lost).
-    // Time is written unconditionally (avoids OSF / uninitialised clock issues).
-    // 12:00:00 → alarm at 12:00:30; board wakes via Q1/TPS22918 when INT fires.
+    // Alarm time = now + cycle_min (NVS), clamped to daylight (sunrise..sunset).
     if (i2cdev_init() == ESP_OK) {
         i2c_dev_t rtc = {0};
         if (ds3231_init_desc(&rtc, I2C_NUM_0, BW_DS3231_SDA_GPIO, BW_DS3231_SCL_GPIO) != ESP_OK) {
             ESP_LOGE(TAG, "DS3231 not found — wakeup alarm not set");
         } else {
-            struct tm t = { .tm_sec=0, .tm_min=0, .tm_hour=12,
-                            .tm_mday=1, .tm_mon=0, .tm_year=125 };
-            ds3231_set_time(&rtc, &t);
-            t.tm_sec = 30;
-            ds3231_clear_alarm_flags(&rtc, DS3231_ALARM_1);
-            ds3231_set_alarm(&rtc, DS3231_ALARM_1, &t, DS3231_ALARM1_MATCH_SECMINHOUR, NULL, 0);
-            ds3231_enable_alarm_ints(&rtc, DS3231_ALARM_1);
-            ESP_LOGI(TAG, "DS3231 alarm set — wakeup in ~30 s");
+            rtc_set_next_alarm(&rtc);
             ds3231_free_desc(&rtc);
         }
         i2cdev_done();

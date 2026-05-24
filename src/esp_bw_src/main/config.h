@@ -70,6 +70,17 @@
 // Camera server mode auto-shutdown if /stop never arrives.
 #define BW_CAM_SERVER_TIMEOUT_MS 600000  // 10 min
 
+// ─── Germany geolocation — sunrise/sunset for RTC alarm scheduling ─────────
+// Central Germany: Berlin/Frankfurt approx.  Used by solar_utc_minutes() in main.c
+// to bound periodic RTC wakeups to daylight hours only.
+#define BW_GEO_LAT_DEG             51.5f   // degrees North
+#define BW_GEO_LON_DEG             10.0f   // degrees East
+
+// ─── Periodic RTC alarm cycle ───────────────────────────────────────────────
+// Minutes between RTC-triggered wakeups during daylight.  Read from NVS key
+// "cycle_min" (u8, namespace "bw_meta") at runtime; this is the fallback.
+#define BW_ALARM_CYCLE_MIN_DEFAULT   1
+
 // ─── Post-cycle cooldown (light sleep before power release / reboot) ────────
 // Halts CPU so residual switching noise does not extend the PIR pulse.
 // GPIO5 pad latch holds HIGH during light sleep — TPS22918 stays on.
