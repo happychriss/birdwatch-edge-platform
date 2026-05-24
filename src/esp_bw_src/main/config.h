@@ -79,7 +79,7 @@
 // ─── Periodic RTC alarm cycle ───────────────────────────────────────────────
 // Minutes between RTC-triggered wakeups during daylight.  Read from NVS key
 // "cycle_min" (u8, namespace "bw_meta") at runtime; this is the fallback.
-#define BW_ALARM_CYCLE_MIN_DEFAULT   1
+#define BW_ALARM_CYCLE_MIN_DEFAULT   15
 
 // ─── Post-cycle cooldown (light sleep before power release / reboot) ────────
 // Halts CPU so residual switching noise does not extend the PIR pulse.
