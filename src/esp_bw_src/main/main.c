@@ -60,8 +60,99 @@
 
 #include <i2cdev.h>
 #include <ds3231.h>
+#include "esp_sntp.h"
 
 static const char *TAG = "MAIN";
+
+// ─── DS3231 NTP sync ──────────────────────────────────────────────────────────
+// Syncs the DS3231 RTC from NTP once per week or after a firmware flash.
+// Stores Berlin local time in the RTC (Europe/Berlin = CET/CEST).
+// Tracks last-sync epoch in NVS key "rtc_sync" (namespace "bw_meta").
+
+#define BW_NTP_SERVER         "pool.ntp.org"
+#define BW_NTP_TIMEOUT_MS     10000
+#define BW_RTC_SYNC_INTERVAL  (7u * 24u * 3600u)  // seconds
+#define BW_TZ_BERLIN          "CET-1CEST,M3.5.0,M10.5.0/3"
+
+// Returns true if DS3231 time is > 7 days past last NVS-recorded sync, or never synced.
+static bool rtc_sync_needed(bool force)
+{
+    if (force) return true;
+
+    uint32_t last_sync = 0;
+    nvs_handle_t h;
+    if (nvs_open("bw_meta", NVS_READONLY, &h) == ESP_OK) {
+        nvs_get_u32(h, "rtc_sync", &last_sync);
+        nvs_close(h);
+    }
+    if (last_sync == 0) return true;
+
+    setenv("TZ", BW_TZ_BERLIN, 1);
+    tzset();
+    bool needs = true;
+    if (i2cdev_init() == ESP_OK) {
+        i2c_dev_t rtc = {0};
+        if (ds3231_init_desc(&rtc, I2C_NUM_0, BW_DS3231_SDA_GPIO, BW_DS3231_SCL_GPIO) == ESP_OK) {
+            struct tm t;
+            if (ds3231_get_time(&rtc, &t) == ESP_OK) {
+                time_t ds_now = mktime(&t);
+                needs = (ds_now <= 0) || ((ds_now - (time_t)last_sync) >= (time_t)BW_RTC_SYNC_INTERVAL);
+            }
+            ds3231_free_desc(&rtc);
+        }
+        i2cdev_done();
+    }
+    return needs;
+}
+
+// Fetches time from NTP, writes Berlin local time to DS3231, updates NVS last-sync.
+// Must be called with WiFi connected.
+static void rtc_sync_from_ntp(void)
+{
+    ESP_LOGI(TAG, "DS3231 NTP sync → %s", BW_NTP_SERVER);
+    setenv("TZ", BW_TZ_BERLIN, 1);
+    tzset();
+
+    esp_sntp_setoperatingmode(SNTP_OPMODE_POLL);
+    esp_sntp_setservername(0, BW_NTP_SERVER);
+    esp_sntp_init();
+
+    TickType_t t0 = xTaskGetTickCount();
+    while (esp_sntp_get_sync_status() != SNTP_SYNC_STATUS_COMPLETED) {
+        if ((xTaskGetTickCount() - t0) > pdMS_TO_TICKS(BW_NTP_TIMEOUT_MS)) {
+            ESP_LOGW(TAG, "NTP sync timed out");
+            esp_sntp_stop();
+            return;
+        }
+        vTaskDelay(pdMS_TO_TICKS(200));
+    }
+    esp_sntp_stop();
+
+    time_t now_utc = time(NULL);
+    struct tm local_tm;
+    localtime_r(&now_utc, &local_tm);
+    ESP_LOGI(TAG, "NTP: %04d-%02d-%02d %02d:%02d:%02d CET/CEST",
+             local_tm.tm_year + 1900, local_tm.tm_mon + 1, local_tm.tm_mday,
+             local_tm.tm_hour, local_tm.tm_min, local_tm.tm_sec);
+
+    if (i2cdev_init() != ESP_OK) {
+        ESP_LOGE(TAG, "i2cdev_init failed — DS3231 not updated");
+        return;
+    }
+    i2c_dev_t rtc = {0};
+    if (ds3231_init_desc(&rtc, I2C_NUM_0, BW_DS3231_SDA_GPIO, BW_DS3231_SCL_GPIO) == ESP_OK) {
+        if (ds3231_set_time(&rtc, &local_tm) == ESP_OK) {
+            nvs_handle_t h;
+            if (nvs_open("bw_meta", NVS_READWRITE, &h) == ESP_OK) {
+                nvs_set_u32(h, "rtc_sync", (uint32_t)now_utc);
+                nvs_commit(h);
+                nvs_close(h);
+            }
+        }
+        ds3231_free_desc(&rtc);
+    }
+    i2cdev_done();
+}
 
 // Compile-time build fingerprint — unique per rebuild (changes __DATE__/__TIME__).
 static const char   s_fw_build[]  = __DATE__ " " __TIME__;
@@ -182,6 +273,10 @@ static void run_normal_cycle(void)
     }
     bw_blink(BW_BLINK_WIFI_OK);
     ESP_LOGI(TAG, "WiFi up");
+
+    // Sync DS3231 from NTP once per week or after a fresh flash.
+    if (rtc_sync_needed(s_fresh_flash))
+        rtc_sync_from_ntp();
 
     // Flush any errors from previous failed cycles to the server now that we
     // have connectivity.  Posted as a status row (no image) in the debug field.

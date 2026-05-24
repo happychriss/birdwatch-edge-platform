@@ -22,6 +22,7 @@ idf_component_register(
         esp_netif
         esp_http_client
         esp_http_server
+        lwip
         esp_adc
         esp_timer
         esp_driver_gpio
