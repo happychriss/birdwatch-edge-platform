@@ -54,7 +54,7 @@ The cloud-check filter is a **classical signal-processing pipeline** (not a neur
 
 The model starts cold and calibrates itself over the first ~8 PIR events per day-period. After that it suppresses 55 % of sun/cloud false triggers with zero missed real events.
 
-See [`src/cloud-check/`](src/cloud-check/README.md) for the Python simulation and [`requirements-cloud-detection.md`](requirements-cloud-detection.md) for the full algorithm specification.
+See [`src/cloud-check/`](src/cloud-check/README.md) for the Python simulation and [`requirements_model.md`](requirements_model.md) for the full algorithm specification.
 
 ---
 
@@ -171,7 +171,7 @@ training-data/        Field captures for model calibration  (images gitignored)
   real-data/process-people/       Person visible   → label: non-cloud
 external-docs/        Component datasheets
 requirements.md       Full functional specification
-requirements-cloud-detection.md   Cloud-check algorithm specification
+requirements_model.md             Cloud-check algorithm specification
 ```
 
 | Sub-project | README |

@@ -2,14 +2,62 @@
 
 PIR sensors are sensitive to rapid infrared changes caused by moving shadows or cloud cover. Two complementary filters are applied in sequence, both implemented on-device (C) and mirrored in Python for server-side validation.
 
-**Reference documents:**
-- [`model.md`](model.md) — full detection model design, thresholds, lighting buckets, blob check, performance
-- [`architecture.md`](architecture.md) — system setup, database, server, dev workflow, labeling conventions
+---
 
-**Three-project consistency rule:** Any change to this algorithm must be kept in sync across:
+## 0. Problem Statement & Design Rationale
+
+The Parallax PIR sensor responds to rapid changes in infrared radiation — not only warm moving objects but also:
+
+- Clouds passing in front of the sun (sudden scene-wide illumination change)
+- Wind moving plant leaves across the sensor's field of view
+- Shadows sweeping across the balcony as the sun moves through the day
+
+Each false trigger costs a full capture-WiFi-upload cycle (~2–3 min battery equivalent) and produces empty-scene photos that clutter the gallery and push real events off-screen.
+
+A coarse global brightness diff was tried and disabled: it cannot distinguish a dark bird silhouette from a cloud shadow because both darken the frame. A spatially-aware, per-region approach is required.
+
+### 0.1 Requirements
+
+| Priority | Requirement |
+|----------|-------------|
+| **Must** | Non-cloud recall = 1.0 — never suppress upload when a bird or person is present |
+| **Must** | Run on ESP32-S3 within ~1.5 s after capture, before WiFi connects |
+| **Must** | Self-calibrate — no manual region masks, no field threshold adjustments |
+| **Should** | Filter ≥ 50 % of cloud/sun false triggers at steady state |
+| **May** | Upload spurious cloud photos during the first day-period warmup phase |
+| **Must not** | Use ML inference (no TFLite, no CNN weights); integer-arithmetic only for clean C port |
+
+### 0.2 Approach
+
+Classical per-tile anomaly detection against an adaptive per-time-bucket background model. **This is signal processing, not AI.** Every decision produces a human-readable rule name and reason string. No training is needed — the model is a running average that the device maintains itself.
+
+**Why not a neural network?** The camera is fixed, the scene geometry is known, and the decision boundary (compact dark blob vs diffuse lighting shift) maps directly onto a handful of measurable statistics. Classical methods are:
+
+- **Fully inspectable** — every suppressed frame shows which rule fired and why
+- **Portable** — no TFLite runtime; the algorithm fits in ~2 KB of NVS + a few hundred bytes of C
+- **Self-calibrating** — the background model adapts to scene changes automatically; no re-training when something on the balcony moves
+
+---
+
+## Three-Project Consistency Rule
+
+Any change to this algorithm must be kept in sync across:
 - `src/esp_bw_src/` — ESP32-S3 firmware (C)
 - `src/cloud-check/` — Python algorithm package + parity validator
 - `src/python_bw_src/` — Flask web server + display spec
+
+**When adding or renaming a stage** (e.g. `NIGHT`, `WARMUP`, `DARK_OBJ` …) you must update all of the following:
+
+1. `classifier.py` — add the new trigger string and decision logic
+2. `config.py` — add any new threshold parameter with a sensible default
+3. `scripts/sweep.py` — add to `ALL_STAGES` and `classify_inline()`
+4. `cloud_check.c` — add the matching `#define` constant and C logic in `run_pipeline()`
+5. `cloud_check.h` — update the `stage[]` field comment to list the new value
+6. `serve.py` (`src/cloud-check/`) — add the stage colour to `_TRIGGER_COLOR`
+7. `scripts/show_gallery.py` — add the stage colour to `TRIGGER_COLOR`
+8. Both gallery templates in `src/python_bw_src/templates/` — add the stage colour `{% if stage == '...' %}`
+
+**When changing a threshold** — update `config.py` default and the matching `#define` in `cloud_check.c`.
 
 ---
 
@@ -143,3 +191,65 @@ Complete decision pipeline in execution order. Steps 1–6 are the burst pre-fil
 - **dt-based stages:** FAST_SHIFT and ISOLATED (in `burst_filter.py`) are skipped in the firmware validator — they fall through to the background model.
 - **Lighting scenario:** `global_mean` at capture time determines exposure mode — `NORMAL` (≥ 130 DN) or `LOWLIGHT` (< 130 DN). Transmitted as `photo_mode` field and displayed in server gallery.
 - **Tile threshold for display:** 20 DN (used in frame detail view for highlighting changed tiles).
+
+---
+
+## 5. Performance History
+
+Background-model pipeline evaluated on labelled real-scene frames (online self-calibrating, no labels used during inference).
+
+| Metric | Value |
+|--------|-------|
+| Non-cloud recall (birds/people) | **1.000** — zero misses |
+| Cloud recall (false-trigger suppression) | **0.606** |
+
+Key parameter history (background-model pipeline):
+- `tile_z_threshold` 3.0 → 2.5 → **3.0**: reverted — 2.5 caused high sky-tile z-score inflation; 3.0 is the production value on the 20×15 grid.
+- `quiet_anomaly_ratio` 0.05 → 0.20 → **0.25**: compensates for more tiles flagged at lower z threshold; 0.25 is production.
+- `night_brightness_threshold` 80 → **70**: avoids model-state side effects from near-twilight frames.
+- `dark_object_min_delta` 30 → **35**: tighter model-delta check reduces cloud shadow false detections.
+- `temporal_dark_delta` 15 → **20**: tighter frame-to-frame check pairs with the above.
+- `scene_drift_min_tiles` 1 → **4**: require bigger persistent change before SCENE_DRIFT fires.
+- SCENE_DRIFT now resets warmup counter so model re-bootstraps after a scene change.
+- Grid upgraded from 16×12 (40×40 px tiles, VGA) to **20×15 (8×8 px tiles, QQVGA)** — smaller tiles improve spatial resolution for small birds; lower input resolution is faster on-device.
+
+---
+
+## 6. Training Data
+
+`/workspace/training-data/` (images gitignored — folder structure committed):
+
+| Folder | Label | Notes |
+|--------|-------|-------|
+| `ignore-sun_shining/` | suppress | Noon sun false-triggers; burst filter target (224 frames) |
+| `process-birds-pillow/` | process | Toy bird + pillow as proxy objects (26 frames) |
+| `process-real-birds/` | process | Real bird captures 2026-05-21 (18 frames) |
+| `process-people/` | process | Person legs/body in frame (46 frames) |
+| `process-dark/` | process | Reserved for night/low-light captures |
+| `duplicates/` | — | Byte-identical PIR triplets moved here; originals preserved (36 frames) |
+
+All images are SXGA JPEG (from server), downsampled to 160×120 QQVGA grayscale for on-device processing and burst filter evaluation.
+
+---
+
+## 7. Development Path
+
+**Phase 1 — Python simulation (complete)**
+`src/cloud-check/` — full pipeline, confusion matrix, parameter sweep (`scripts/sweep.py`, 5 184 configurations), gallery server (`serve.py`), debug inspector.
+
+**Phase 2 — ESP-IDF C port (complete)**
+`main/cloud_check.c` — all stages ported: NIGHT, WARMUP, DARK_OBJ, QUIET, SCENE_DRIFT, AMBIGUOUS (background model) plus FIRST, BRIGHTNESS_SHIFT, DUPLICATE, BRIGHT_STABLE, DIFFUSE, SAFE (burst filter).
+
+On-device performance estimate (ESP32-S3):
+
+| Operation | Estimate |
+|-----------|----------|
+| Tile mean extraction (300 tiles) | ~1 ms |
+| EMA background update | ~0.1 ms |
+| z-score computation | ~0.5 ms |
+| **Total** | **< 10 ms** |
+
+Previous-frame tile means persist in NVS between PIR events (`cc_p`, 300 × 1 byte = 300 bytes). Background model persists in NVS (`cc_frames_seen` + per-tile EMA state).
+
+**Phase 3 — Server feedback (future)**
+The home server can echo a corrective label (`cloud` / `non-cloud`) per uploaded image to accelerate model re-calibration after scene changes, without requiring any firmware update. Stage badges received from the device are already displayed in the gallery (`python_bw_src`).

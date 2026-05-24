@@ -1,7 +1,7 @@
 # cloud-check — PIR false-trigger filter
 
 Python simulation of the on-device cloud-vs-non-cloud classifier.  
-Full spec: [`requirements-cloud-detection.md`](../../requirements-cloud-detection.md)
+Full spec: [`requirements_model.md`](../../requirements_model.md)
 
 ---
 
