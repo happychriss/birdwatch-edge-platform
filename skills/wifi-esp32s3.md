@@ -150,15 +150,14 @@ if (retry) {
         (e->reason == WIFI_REASON_DISASSOC_DUE_TO_INACTIVITY ||  // 4
          e->reason == WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT     ||  // 15
          e->reason == WIFI_REASON_HANDSHAKE_TIMEOUT);            // 204
-    if (needs_backoff) {
-        if (!s_backoff_timer)
-            s_backoff_timer = xTimerCreate("wbackoff",
-                                  pdMS_TO_TICKS(BW_WIFI_BACKOFF_HARD_MS),
-                                  pdFALSE, NULL, backoff_cb);
-        xTimerStart(s_backoff_timer, 0);
-    } else {
-        esp_wifi_connect();   // reason=205 etc: retry immediately
-    }
+    // All retriable failures — including reason=205 (AP briefly invisible) — use the
+    // backoff timer.  The AP disappears because it just kicked us; it needs recovery
+    // time before accepting a new association.
+    if (!s_backoff_timer)
+        s_backoff_timer = xTimerCreate("wbackoff",
+                              pdMS_TO_TICKS(BW_WIFI_BACKOFF_HARD_MS),
+                              pdFALSE, NULL, backoff_cb);
+    xTimerStart(s_backoff_timer, 0);
 }
 ```
 
