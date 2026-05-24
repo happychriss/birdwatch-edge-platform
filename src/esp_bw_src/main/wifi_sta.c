@@ -290,9 +290,16 @@ esp_err_t bw_wifi_connect_blocking(void)
     static const uint8_t pinned[6] = BW_WIFI_BSSID;
     if (!bssid_is_zero(pinned)) {
         // Pinned mode — strict: only this BSSID, no scan fallback.
-        // Recovery is handled by the reboot-once policy in main.c, not by
-        // scanning (which could land us on a mesh extender).
         ESP_LOGI(TAG, "pinned BSSID — strict mode, no scan fallback");
+        if (try_connect(pinned) == ESP_OK) return ESP_OK;
+
+        // First round exhausted all soft retries (exponential backoff).  Hard-reset
+        // the radio — same pattern as old Arduino code: disconnect + re-begin every
+        // N attempts.  try_connect() already called esp_wifi_stop() on failure, so
+        // this just waits for the Fritz!Box ban to age out, then does a fresh start.
+        ESP_LOGI(TAG, "hard radio reset — waiting 2 s before second round");
+        vTaskDelay(pdMS_TO_TICKS(2000));
+        s_retry = 0;  // reset soft-retry counter for the second round
         return try_connect(pinned);
     }
 

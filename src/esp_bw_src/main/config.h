@@ -47,9 +47,11 @@
 // ─── WiFi connection ───────────────────────────────────────────────────────
 #define BW_WIFI_MAX_RETRY     4       // 5 total attempts — after 2-3 hard failures the Fritz!Box
                                       // ban is active; fail fast and let reboot-once handle it
-// 40s deadline: worst case = 3 handshake attempts × (up to 10s run + 2.5s backoff) + soft
-// retries.  Was 10s (too tight) → 20s (still cut off) → 30s (margin too thin with backoff).
-#define BW_WIFI_TIMEOUT_MS    40000
+// 25s per round: covers 4 soft retries with exponential backoff {2,3,5,7}s + auth time.
+// bw_wifi_connect_blocking() runs 2 rounds (hard radio reset between them) = 52s max WiFi.
+// Was 40s single-round — two shorter rounds beat one long round because the Fritz!Box ban
+// clears during the 2s inter-round gap and the fresh esp_wifi_start() resets driver state.
+#define BW_WIFI_TIMEOUT_MS    25000
 #define BW_WIFI_BACKOFF_MS   500  // pause between NVS-cache miss and fallback scan
 // Retry backoff uses exponential delays with jitter — see s_backoff_ms[] in wifi_sta.c.
 
@@ -61,7 +63,7 @@
 #define BW_WIFI_COUNTRY_CC    "DE"    // regdomain: ch1–13, manual policy
 
 // ─── Cycle deadline watchdog ────────────────────────────────────────────────
-// Worst-case legitimate cycle: WiFi 80s (2×40s) + 3 HTTP retries×20s + delays ≈ 142s.
+// Worst-case legitimate cycle: WiFi 52s (2×25s+2s) + 3 HTTP retries×20s + delays ≈ 114s.
 // Set deadline above that so only a truly stuck cycle triggers the watchdog.
 #define BW_CYCLE_TIMEOUT_MS     150000  // 150 s
 
