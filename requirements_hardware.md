@@ -101,10 +101,11 @@ Note: firmware debounce does not help — the spurious PIR pulse from RF couplin
 | GPIO | XIAO label | Function | Notes |
 |------|-----------|----------|-------|
 | 1 | D0 | PIR signal read / EXT1 wakeup | `INPUT_PULLDOWN`; reads PIR OUT directly (before diode to ON); EXT1 deep-sleep wakeup on fallback path |
-| 2 | D1 | Battery ADC | `ADC1_CHANNEL_1`; voltage divider R1=10 kΩ, R2=20 kΩ → factor 1.5 × 1.1 cal |
+| 2 | D1 | Battery ADC | `ADC1_CHANNEL_1`; voltage divider R1=100 kΩ, R2=220 kΩ → factor 320/220 = 1.4545× |
 | 3 | D2 | RF antenna select | Output; HIGH = external U.FL, LOW = built-in; driven HIGH by `wifi_sta.c` during WiFi init |
-| 4 | D3 | (unused) | Reserved / not connected |
+| 4 | D3 | DS3231 SDA | Separate I2C bus from camera SCCB; `BW_DS3231_SDA_GPIO` |
 | 5 | D4 | Power-hold / self-latch | Output; HIGH = hold TPS22918 ON, LOW = release → board loses power |
+| 6 | D5 | DS3231 SCL | Separate I2C bus from camera SCCB; `BW_DS3231_SCL_GPIO` |
 | 21 | LED_BUILTIN | Status LED | Active-low; blink patterns for lifecycle events |
 
 ---
@@ -175,9 +176,11 @@ If the DS3231 fails and INT/SQW floats, Q1's base floats → Q1 may not turn on 
 
 ### 5.5 DS3231 I2C Pins
 
-| GPIO | Signal |
-|------|--------|
-| TBD | I2C SDA (shared with camera SCCB or separate bus) |
-| TBD | I2C SCL (shared with camera SCCB or separate bus) |
+The DS3231 uses a **separate I2C bus** from the camera SCCB bus (different GPIOs to avoid address conflicts and bus contention):
 
-The DS3231 INT/SQW pin uses a 10 kΩ pull-up to BAT+ (open-drain output).
+| GPIO | XIAO label | Signal |
+|------|-----------|--------|
+| 4 | D3 | I2C SDA (`BW_DS3231_SDA_GPIO`) |
+| 6 | D5 | I2C SCL (`BW_DS3231_SCL_GPIO`) |
+
+The DS3231 INT/SQW pin uses a 10 kΩ pull-up to BAT+ (open-drain output). DS3231 VCC is on the always-on BAT+ rail (not switched by TPS22918) so the RTC keeps time and alarm state between power cycles.
