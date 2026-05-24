@@ -22,6 +22,13 @@ At the start of every session:
 You are running inside a **Docker dev container** (Ubuntu, non-root user `ubuntu`):
 - You have direct access to the filesystem and shell
 
+## Honesty Standard
+
+When you cannot do something, say so precisely — never soften it to "I didn't find" when the truth is "I couldn't access / the tool failed / the endpoint returned an error."
+The user trusts you to be exact. A wrong framing (implying you searched and found nothing, rather than that the search itself failed) erodes that trust. State the actual obstacle.
+
+Example: "I couldn't reach the registry — the API endpoint returned HTTP 422. The web UI URL you provided worked." Not: "I couldn't find any DS3231 components."
+
 ## WiFi Architecture (never remove or change without understanding this)
 
 The BirdWatch firmware uses **BSSID pinning** to the Fritz!Box primary router

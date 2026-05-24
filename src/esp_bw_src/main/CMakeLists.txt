@@ -16,6 +16,8 @@ idf_component_register(
     PRIV_REQUIRES
         nvs_flash
         esp_wifi
+        esp-idf-lib__ds3231
+        esp-idf-lib__i2cdev
         esp_event
         esp_netif
         esp_http_client

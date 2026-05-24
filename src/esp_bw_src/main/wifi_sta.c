@@ -8,6 +8,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
 #include "freertos/task.h"
+#include "freertos/timers.h"
 #include "esp_wifi.h"
 #include "esp_event.h"
 #include "esp_netif.h"
@@ -21,26 +22,36 @@ static const char *TAG = "WIFI";
 #define BIT_CONNECTED  BIT0
 #define BIT_FAIL       BIT1
 
-#define NVS_NAMESPACE  "bw_wifi"
-#define NVS_KEY_BSSID  "bssid"
+#define NVS_NAMESPACE   "bw_wifi"
+#define NVS_KEY_BSSID   "bssid"
+#define NVS_KEY_CHANNEL "channel"
 
 static EventGroupHandle_t    s_evt;
 static int                   s_retry;
 static esp_netif_t          *s_netif;
 static bool                  s_inited;
 static bw_wifi_fail_reason_t s_fail_reason = BW_WIFI_FAIL_TIMEOUT;
+static TimerHandle_t         s_backoff_timer;
+
+// Deferred retry called by s_backoff_timer — safe to call esp_wifi_connect() from timer task.
+static void backoff_cb(TimerHandle_t t)
+{
+    (void)t;
+    esp_wifi_connect();
+}
 
 // Transient failures worth retrying — others (wrong password, AP banned MAC) are not.
 static bool is_retriable(uint8_t r)
 {
     switch (r) {
-        case WIFI_REASON_AUTH_EXPIRE:             // 2
-        case WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT:  // 15
-        case WIFI_REASON_NO_AP_FOUND:             // 201
-        case WIFI_REASON_AUTH_FAIL:               // 202
-        case WIFI_REASON_ASSOC_FAIL:              // 203
-        case WIFI_REASON_HANDSHAKE_TIMEOUT:       // 204
-        case WIFI_REASON_CONNECTION_FAIL:         // 205
+        case WIFI_REASON_AUTH_EXPIRE:                    // 2
+        case WIFI_REASON_DISASSOC_DUE_TO_INACTIVITY:    // 4  AP kicked station (e.g. handshake stall on Fritz!Box)
+        case WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT:         // 15 (legacy; ESP-IDF uses 204 instead)
+        case WIFI_REASON_NO_AP_FOUND:                    // 201
+        case WIFI_REASON_AUTH_FAIL:                      // 202
+        case WIFI_REASON_ASSOC_FAIL:                     // 203
+        case WIFI_REASON_HANDSHAKE_TIMEOUT:              // 204
+        case WIFI_REASON_CONNECTION_FAIL:                // 205
             return true;
         default:
             return false;
@@ -77,11 +88,26 @@ static void on_event(void *arg, esp_event_base_t base, int32_t id, void *data)
                  s_retry + 1, BW_WIFI_MAX_RETRY);
         if (retry) {
             s_retry++;
-            esp_wifi_connect();
+            // Fritz!Box bans the station after rapid failed handshakes (reason=4/15/204).
+            // Delay 2.5s before retrying so the AP has time to clear its ban state.
+            // Soft failures (reason=205, AP briefly invisible) retry immediately.
+            bool needs_backoff =
+                (e->reason == WIFI_REASON_DISASSOC_DUE_TO_INACTIVITY ||
+                 e->reason == WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT     ||
+                 e->reason == WIFI_REASON_HANDSHAKE_TIMEOUT);
+            if (needs_backoff) {
+                if (!s_backoff_timer)
+                    s_backoff_timer = xTimerCreate("wbackoff",
+                                          pdMS_TO_TICKS(BW_WIFI_BACKOFF_HARD_MS),
+                                          pdFALSE, NULL, backoff_cb);
+                xTimerStart(s_backoff_timer, 0);
+            } else {
+                esp_wifi_connect();
+            }
         } else {
             if (e->reason == WIFI_REASON_NO_AP_FOUND) {
                 s_fail_reason = BW_WIFI_FAIL_NOT_FOUND;
-            } else if (e->reason == WIFI_REASON_AUTH_FAIL         ||
+            } else if (e->reason == WIFI_REASON_AUTH_FAIL              ||
                        e->reason == WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT ||
                        e->reason == WIFI_REASON_HANDSHAKE_TIMEOUT) {
                 s_fail_reason = BW_WIFI_FAIL_AUTH;
@@ -111,9 +137,10 @@ static void select_external_antenna(void)
     ESP_LOGI(TAG, "antenna → external  GPIO3=%d", gpio_get_level(GPIO_NUM_3));
 }
 
-// ─── NVS BSSID cache ─────────────────────────────────────────────────────────
-// Saves the BSSID of the last successful connection so the next cold boot can
-// connect directly without scanning.
+// ─── NVS connection cache (BSSID + channel) ──────────────────────────────────
+// Saves the BSSID and primary channel of the last successful connection.
+// Channel is used as a scan hint on the next boot; 0 means scan all channels.
+// Both are cleared on connection failure so the next boot rediscovers the AP.
 
 static bool nvs_load_bssid(uint8_t bssid[6])
 {
@@ -125,23 +152,35 @@ static bool nvs_load_bssid(uint8_t bssid[6])
     return ok;
 }
 
-static void nvs_save_bssid(const uint8_t bssid[6])
+static void nvs_save_connection(const uint8_t bssid[6], uint8_t channel)
 {
     nvs_handle_t h;
     if (nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h) != ESP_OK) return;
     nvs_set_blob(h, NVS_KEY_BSSID, bssid, 6);
+    nvs_set_u8(h, NVS_KEY_CHANNEL, channel);
     nvs_commit(h);
     nvs_close(h);
 }
 
-static void nvs_clear_bssid(void)
+static void nvs_clear_connection(void)
 {
     nvs_handle_t h;
     if (nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h) != ESP_OK) return;
     nvs_erase_key(h, NVS_KEY_BSSID);
+    nvs_erase_key(h, NVS_KEY_CHANNEL);
     nvs_commit(h);
     nvs_close(h);
-    ESP_LOGI(TAG, "NVS BSSID cache cleared");
+    ESP_LOGI(TAG, "NVS connection cache cleared");
+}
+
+static uint8_t nvs_load_channel(void)
+{
+    nvs_handle_t h;
+    if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &h) != ESP_OK) return 0;
+    uint8_t ch = 0;
+    nvs_get_u8(h, NVS_KEY_CHANNEL, &ch);
+    nvs_close(h);
+    return ch;
 }
 
 esp_err_t bw_wifi_init(void)
@@ -175,7 +214,7 @@ esp_err_t bw_wifi_init(void)
 
     s_evt = xEventGroupCreate();
     s_inited = true;
-    ESP_LOGI(TAG, "WiFi STA initialised (country=%s ch=%d)", BW_WIFI_COUNTRY_CC, BW_WIFI_CHANNEL);
+    ESP_LOGI(TAG, "WiFi STA initialised (country=%s)", BW_WIFI_COUNTRY_CC);
     return ESP_OK;
 }
 
@@ -193,16 +232,21 @@ static esp_err_t try_connect(const uint8_t *bssid)
     wc.sta.pmf_cfg.capable    = true;
     wc.sta.pmf_cfg.required   = false;
     wc.sta.scan_method        = WIFI_FAST_SCAN;
-    wc.sta.channel            = BW_WIFI_CHANNEL;
+    wc.sta.channel            = nvs_load_channel();  // 0 = scan all if no cache
 
     if (bssid) {
         memcpy(wc.sta.bssid, bssid, 6);
         wc.sta.bssid_set = 1;
-        ESP_LOGI(TAG, "connect  bssid=%02x:%02x:%02x:%02x:%02x:%02x  ch=%d",
-                 bssid[0], bssid[1], bssid[2], bssid[3], bssid[4], bssid[5],
-                 BW_WIFI_CHANNEL);
+        if (wc.sta.channel)
+            ESP_LOGI(TAG, "connect  bssid=%02x:%02x:%02x:%02x:%02x:%02x  ch=%d (cached)",
+                     bssid[0], bssid[1], bssid[2], bssid[3], bssid[4], bssid[5],
+                     wc.sta.channel);
+        else
+            ESP_LOGI(TAG, "connect  bssid=%02x:%02x:%02x:%02x:%02x:%02x  ch=scan",
+                     bssid[0], bssid[1], bssid[2], bssid[3], bssid[4], bssid[5]);
     } else {
-        ESP_LOGI(TAG, "connect (any bssid)  ch=%d", BW_WIFI_CHANNEL);
+        ESP_LOGI(TAG, "connect (any bssid)  ch=%s",
+                 wc.sta.channel ? "cached" : "scan");
     }
 
     s_retry = 0;
@@ -225,11 +269,13 @@ static esp_err_t try_connect(const uint8_t *bssid)
                      ap.bssid[0], ap.bssid[1], ap.bssid[2],
                      ap.bssid[3], ap.bssid[4], ap.bssid[5],
                      ap.rssi, ap.primary, authmode_str(ap.authmode));
-            nvs_save_bssid(ap.bssid);
+            nvs_save_connection(ap.bssid, ap.primary);
         }
         return ESP_OK;
     }
 
+    // Failed — clear cached channel so next boot scans all channels fresh.
+    nvs_clear_connection();
     ESP_LOGW(TAG, "connect failed (bits=0x%lx)", (unsigned long)bits);
     esp_wifi_stop();
     return ESP_FAIL;
@@ -260,7 +306,7 @@ esp_err_t bw_wifi_connect_blocking(void)
         if (try_connect(cached_bssid) == ESP_OK) return ESP_OK;
         ESP_LOGW(TAG, "cached BSSID failed — clearing cache, backing off %d ms",
                  BW_WIFI_BACKOFF_MS);
-        nvs_clear_bssid();
+        nvs_clear_connection();
         vTaskDelay(pdMS_TO_TICKS(BW_WIFI_BACKOFF_MS));
     }
     return try_connect(NULL);

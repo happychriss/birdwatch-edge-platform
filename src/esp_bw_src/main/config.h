@@ -10,6 +10,11 @@
 #define BW_PWR_HOLD_GPIO          GPIO_NUM_5   // D4 — hold TPS22918 ON pin high
 #define BW_LED_BUILTIN_GPIO       GPIO_NUM_21  // built-in LED (active-low on XIAO)
 
+// ─── DS3231 RTC (separate I2C bus from camera SCCB) ────────────────────────
+// SDA=GPIO4/D3, SCL=GPIO6/D5; VCC on always-on BAT+ rail
+#define BW_DS3231_SDA_GPIO        GPIO_NUM_4
+#define BW_DS3231_SCL_GPIO        GPIO_NUM_6
+
 // ─── ADC channels (ADC1 only — ADC2 is unusable when WiFi is on) ───────────
 #define BW_ADC_UNIT               ADC_UNIT_1
 #define BW_ADC_BATTERY_CHANNEL    ADC_CHANNEL_1   // GPIO2 (D1) — battery divider tap
@@ -40,21 +45,25 @@
 #define BW_HTTP_SOURCE        "BW_DEV"
 
 // ─── WiFi connection ───────────────────────────────────────────────────────
-#define BW_WIFI_MAX_RETRY     4       // 5 total attempts × ~1.7s ≈ 8.5s — covers transient
-                                      // 4-way handshake / auth glitches on the pinned AP
-#define BW_WIFI_TIMEOUT_MS    10000   // 10s hard deadline per try_connect() call
-#define BW_WIFI_BACKOFF_MS    500     // pause between NVS-cache miss and fallback scan
+#define BW_WIFI_MAX_RETRY     6       // 7 total attempts — covers Fritz!Box handshake-timeout
+                                      // ban pattern; 3 hard failures + backoff + soft retries
+// 40s deadline: worst case = 3 handshake attempts × (up to 10s run + 2.5s backoff) + soft
+// retries.  Was 10s (too tight) → 20s (still cut off) → 30s (margin too thin with backoff).
+#define BW_WIFI_TIMEOUT_MS    40000
+#define BW_WIFI_BACKOFF_MS        500  // pause between NVS-cache miss and fallback scan
+// Hard backoff after handshake timeout / inactivity disassoc — Fritz!Box needs this much time
+// to clear its rate-limit state before accepting a new connection from the same MAC.
+#define BW_WIFI_BACKOFF_HARD_MS  2500
 
 // Pin to a specific BSSID — connection skips scan/NVS-cache and never
 // roams to mesh extenders.  Set all bytes to 0 to disable pinning and
 // use scan-based connect instead.  MAC from Fritzbox UI: Home Network →
 // Network → Network Connections (or sticker on the bottom of the Fritzbox).
 #define BW_WIFI_BSSID         { 0xb4, 0xfc, 0x7d, 0x92, 0xd4, 0x90 }
-#define BW_WIFI_CHANNEL       1       // Fritz!Box 2.4 GHz fixed channel
 #define BW_WIFI_COUNTRY_CC    "DE"    // regdomain: ch1–13, manual policy
 
 // ─── Cycle deadline watchdog ────────────────────────────────────────────────
-// Worst-case legitimate cycle: WiFi 20s (2×10s) + 3 HTTP retries×20s + delays ≈ 82s.
+// Worst-case legitimate cycle: WiFi 80s (2×40s) + 3 HTTP retries×20s + delays ≈ 142s.
 // Set deadline above that so only a truly stuck cycle triggers the watchdog.
 #define BW_CYCLE_TIMEOUT_MS     150000  // 150 s
 

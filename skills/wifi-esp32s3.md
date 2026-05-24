@@ -1,9 +1,9 @@
 ---
 name: wifi-esp32s3
-description: ESP-IDF WiFi STA setup for XIAO ESP32-S3 — antenna selection, BSSID pinning, retry logic, reboot-once recovery
+description: ESP-IDF WiFi STA setup for XIAO ESP32-S3 — antenna selection, BSSID pinning, dynamic channel cache, Fritz!Box handshake backoff, retry logic, reboot-once recovery
 ---
 
-# WiFi STA — ESP32-S3 (ESP-IDF v6)
+# WiFi STA — ESP32-S3 (ESP-IDF v6) with Fritz!Box
 
 ## Antenna selection (XIAO ESP32-S3 Sense)
 
@@ -41,11 +41,16 @@ wc.sta.sae_pwe_h2e        = WPA3_SAE_PWE_BOTH;    // required for WPA2/WPA3 mixe
 wc.sta.pmf_cfg.capable    = true;
 wc.sta.pmf_cfg.required   = false;
 wc.sta.scan_method        = WIFI_FAST_SCAN;
-wc.sta.channel            = 1;                     // Fritz!Box 2.4 GHz fixed channel
+wc.sta.channel            = nvs_load_channel();   // 0 = scan all; cached on success
 ```
 
 **`WPA3_SAE_PWE_BOTH` is mandatory** for any AP in WPA2/WPA3 transition mode.
 `HUNT_AND_PECK` alone will fail with reason=2 on those APs.
+
+**Do NOT hardcode a channel.** Fritz!Box reports its channel in the log, but firmware-side
+configuration and actual broadcast channel can differ. Use the NVS cache pattern below —
+on first boot channel=0 triggers a scan, the actual channel is saved on success, and
+subsequent boots use the cached value as a fast-connect hint.
 
 ## Power save
 
@@ -87,35 +92,120 @@ esp_err_t bw_wifi_connect_blocking(void)
 }
 ```
 
-**Scan mode fallback (BW_WIFI_BSSID = zeros):** NVS cached BSSID → scan. Cache is cleared on
-miss so the next boot after a failed cached-BSSID attempt goes straight to scan.
+**Pinned mode is strict — no scan fallback.** Recovery relies on the reboot-once mechanism,
+not on trying a different BSSID. This prevents ever accidentally landing on the mesh repeater.
 
-## Retry logic — reason-based filtering
+## NVS channel + BSSID cache
 
-Not all disconnect reasons are worth retrying. Non-retriable reasons (wrong password,
-AP MAC-blocked the device) should abort immediately:
+Namespace `bw_wifi`, keys `bssid` (6-byte blob) and `channel` (u8). Saved together on every
+successful connect using `esp_wifi_sta_get_ap_info()` after `IP_EVENT_STA_GOT_IP`.
+
+- First boot: channel=0 (scan all channels), BSSID pinned or open scan
+- Successful connect: saves `ap.primary` channel + actual BSSID
+- Next boot: `nvs_load_channel()` returns cached channel → fast connect hint
+- Any failure: `nvs_clear_connection()` erases both keys → next boot scans all channels fresh
 
 ```c
-static bool is_retriable(uint8_t r) {
-    switch (r) {
-        case WIFI_REASON_AUTH_EXPIRE:             // 2
-        case WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT:  // 15
-        case WIFI_REASON_NO_AP_FOUND:             // 201
-        case WIFI_REASON_AUTH_FAIL:               // 202
-        case WIFI_REASON_ASSOC_FAIL:              // 203
-        case WIFI_REASON_HANDSHAKE_TIMEOUT:       // 204
-        case WIFI_REASON_CONNECTION_FAIL:         // 205
-            return true;
-        default: return false;   // e.g. reason=3 AUTH_LEAVE = AP kicked us
+// On success:
+wifi_ap_record_t ap = {0};
+esp_wifi_sta_get_ap_info(&ap);
+nvs_save_connection(ap.bssid, ap.primary);  // save actual channel, not configured channel
+
+// On any failure:
+nvs_clear_connection();
+```
+
+Never hardcode the channel in firmware — the AP's actual broadcast channel can differ from
+what the router UI shows or from the country setting.
+
+## Fritz!Box handshake ban — backoff timer (CRITICAL)
+
+**Observed pattern:** Fritz!Box temporarily bans a station MAC after ~3 rapid failed
+4-way handshake attempts. Symptoms:
+
+```
+reason=4  (DISASSOC_DUE_TO_INACTIVITY)  — AP kicks during assoc/early handshake
+reason=15 (4WAY_HANDSHAKE_TIMEOUT)      — WPA handshake started but AP stops responding
+reason=204 (HANDSHAKE_TIMEOUT)          — same as above, IDF driver-level code
+  ...repeated 2-3 times...
+reason=202 (AUTH_FAIL)                  — Fritz!Box bans the MAC, auth refused entirely
+```
+
+Between each hard failure there is a ~1.5s natural delay (reason=205 retry that can't find
+the AP while it recovers), but this is not enough to lift the ban. The station exhausts all
+retries while still banned.
+
+**Fix: 2.5s backoff before retrying after reason=4/15/204.** Since `vTaskDelay()` cannot be
+called from the event handler, use a one-shot FreeRTOS timer:
+
+```c
+static TimerHandle_t s_backoff_timer;
+
+static void backoff_cb(TimerHandle_t t) { (void)t; esp_wifi_connect(); }
+
+// in on_event disconnect handler:
+if (retry) {
+    s_retry++;
+    bool needs_backoff =
+        (e->reason == WIFI_REASON_DISASSOC_DUE_TO_INACTIVITY ||  // 4
+         e->reason == WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT     ||  // 15
+         e->reason == WIFI_REASON_HANDSHAKE_TIMEOUT);            // 204
+    if (needs_backoff) {
+        if (!s_backoff_timer)
+            s_backoff_timer = xTimerCreate("wbackoff",
+                                  pdMS_TO_TICKS(BW_WIFI_BACKOFF_HARD_MS),
+                                  pdFALSE, NULL, backoff_cb);
+        xTimerStart(s_backoff_timer, 0);
+    } else {
+        esp_wifi_connect();   // reason=205 etc: retry immediately
     }
 }
 ```
 
-`BW_WIFI_MAX_RETRY = 4` (5 total attempts). `BW_WIFI_TIMEOUT_MS = 10000` covers ALL retries
-within one `try_connect()` call, not per retry.
+`BW_WIFI_BACKOFF_HARD_MS = 2500` in `config.h`.
+
+With backoff, the pattern becomes: fail → 2.5s → soft miss (205, ~1.5s) → retry → succeed,
+giving the Fritz!Box enough time to lift the temporary ban before the next attempt.
+
+## Retry logic — reason-based filtering
+
+```c
+static bool is_retriable(uint8_t r) {
+    switch (r) {
+        case WIFI_REASON_AUTH_EXPIRE:                    // 2
+        case WIFI_REASON_DISASSOC_DUE_TO_INACTIVITY:    // 4  — Fritz!Box kicks during slow assoc
+        case WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT:         // 15 (legacy)
+        case WIFI_REASON_NO_AP_FOUND:                    // 201
+        case WIFI_REASON_AUTH_FAIL:                      // 202
+        case WIFI_REASON_ASSOC_FAIL:                     // 203
+        case WIFI_REASON_HANDSHAKE_TIMEOUT:              // 204 (IDF primary)
+        case WIFI_REASON_CONNECTION_FAIL:                // 205
+            return true;
+        default: return false;
+    }
+}
+```
+
+`WIFI_REASON_DISASSOC_DUE_TO_INACTIVITY` (4) must be retriable — Fritz!Box sends it when the
+station is too slow to start the 4-way handshake. It is **not** an auth failure; do not
+classify it as `BW_WIFI_FAIL_AUTH`.
 
 Always log the `bssid` field from the disconnect event — it identifies which AP dropped the
 connection when multiple APs share an SSID.
+
+## DHCP timing
+
+`IP_EVENT_STA_GOT_IP` fires only after DHCP completes. Fritz!Box DHCP can take 2-3s after
+the WPA handshake. The `xEventGroupWaitBits()` timeout covers ALL retries within one
+`try_connect()` call — it is NOT reset per retry. With 6 retries and backoff, budget ~30-40s:
+
+```c
+#define BW_WIFI_MAX_RETRY    6      // 7 total attempts
+#define BW_WIFI_TIMEOUT_MS   40000  // covers all retries + backoff time + DHCP
+```
+
+Too-tight timeout (10s) was the root cause of "connects to run state but never gets IP" — the
+timeout fired while DHCP was still in progress after earlier retries consumed the budget.
 
 ## Reboot-once recovery (cold-boot only)
 
@@ -138,48 +228,41 @@ Guard in `main.c` — only reboot on a clean cold boot, not after a previous SW/
 ```c
 if (esp_reset_reason() == ESP_RST_POWERON)
     bw_power_reboot_safe();
-// else: fall through → power off (bounds the chain to exactly one reboot)
+// else: fall through → power off (bounds the chain to exactly one reboot per PIR event)
 ```
 
 ## Timing budget (worst case)
 
 | Phase | Time |
 |-------|------|
-| First `try_connect()` | ≤ 10 s |
-| Soft reboot | ~0.5 s |
-| Second `try_connect()` (after reboot) | ≤ 10 s |
+| First `try_connect()` — up to 7 attempts with backoff | ≤ 40 s |
+| Soft reboot (if first try_connect fails) | ~0.5 s |
+| Second `try_connect()` | ≤ 40 s |
 | HTTP retries (3 × 20 s) | ≤ 60 s |
-| **Total** | **≤ 80.5 s** |
+| **Total** | **≤ 140.5 s** |
 
-Watchdog deadline: `BW_CYCLE_TIMEOUT_MS = 150 s` — safe margin.
-
-## Backoff between scan-mode stages
-
-Add `BW_WIFI_BACKOFF_MS = 500` pause between the cached-BSSID attempt and the scan fallback.
-Prevents hammering the AP with rapid reconnect attempts on congested channels.
-
-## NVS BSSID cache
-
-Namespace `bw_wifi`, key `bssid` (6-byte blob). Saved on every successful connect.
-Cleared when a cached-BSSID attempt fails — ensures the next boot (after reboot) doesn't
-waste another 10 s on a stale BSSID before scanning.
-
-## Fritz!Box MAC-block
-
-Fritz!Box 7690 silently blocks a device MAC after repeated failed auth attempts
-(brute-force protection). No UI entry — clears on router reboot only. Symptom: reason=2
-on every attempt, ~1 s per attempt, no IP ever reached. BSSID pinning eliminates this
-by avoiding the mesh repeater that may have triggered the block.
+Watchdog deadline: `BW_CYCLE_TIMEOUT_MS = 150 s` — adequate margin.
 
 ## Key reason codes
 
-| Code | Name | Meaning |
-|------|------|---------|
-| 2 | AUTH_EXPIRE | AP timed out waiting for auth response |
-| 3 | AUTH_LEAVE | AP actively deauthed us |
-| 15 | 4WAY_HANDSHAKE_TIMEOUT | EAPOL 4-way stalled |
-| 201 | NO_AP_FOUND | AP not visible in connect-scan |
-| 202 | AUTH_FAIL | Internal auth failure |
-| 203 | ASSOC_FAIL | Association rejected |
-| 204 | HANDSHAKE_TIMEOUT | EAPOL timeout (driver-level) |
-| 205 | CONNECTION_FAIL | Generic (includes brute-force block) |
+| Code | Name | Meaning | Action |
+|------|------|---------|--------|
+| 2 | AUTH_EXPIRE | AP timed out waiting for auth response | retry |
+| 3 | AUTH_LEAVE | AP actively deauthed us | no retry |
+| 4 | DISASSOC_DUE_TO_INACTIVITY | AP kicked during slow assoc | retry + backoff |
+| 8 | ASSOC_LEAVE | We initiated disconnect | no retry |
+| 15 | 4WAY_HANDSHAKE_TIMEOUT | EAPOL 4-way stalled (legacy code) | retry + backoff |
+| 201 | NO_AP_FOUND | AP not visible in connect-scan | retry immediately |
+| 202 | AUTH_FAIL | Fritz!Box banned the MAC | no retry (ban must lift) |
+| 203 | ASSOC_FAIL | Association rejected | retry |
+| 204 | HANDSHAKE_TIMEOUT | EAPOL timeout (IDF driver code) | retry + backoff |
+| 205 | CONNECTION_FAIL | Generic / AP briefly invisible after kick | retry immediately |
+
+## Fritz!Box-specific notes
+
+- Fritz!Box + AVM mesh repeaters share the same SSID/password. Always pin the BSSID.
+- Fritz!Box broadcasts on the channel it actually uses, which may differ from what the
+  UI shows as "configured". Read the channel from `ap.primary` after connect, not from config.
+- Fritz!Box implements a short (~seconds) MAC rate-limit after rapid failed handshakes.
+  The 2.5s backoff prevents triggering it.
+- Fritz!Box DHCP is slower than typical routers — budget 3s after WPA handshake completes.

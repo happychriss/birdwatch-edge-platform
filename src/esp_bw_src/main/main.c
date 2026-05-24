@@ -34,6 +34,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -56,6 +57,9 @@
 #include "camera_server.h"
 #include "diag.h"
 #include "telemetry.h"
+
+#include <i2cdev.h>
+#include <ds3231.h>
 
 static const char *TAG = "MAIN";
 
@@ -314,9 +318,36 @@ void app_main(void)
     run_normal_cycle();
     bw_watchdog_stop();
     bw_log_sysinfo(TAG);
+
+    // ── DS3231 RTC — set known time and arm 30-second wakeup alarm ───────────
+    // Done BEFORE the cooldown sleep so it is visible in the serial log (the
+    // USB-CDC connection drops during light sleep and output after wake is lost).
+    // Time is written unconditionally (avoids OSF / uninitialised clock issues).
+    // 12:00:00 → alarm at 12:00:30; board wakes via Q1/TPS22918 when INT fires.
+    if (i2cdev_init() == ESP_OK) {
+        i2c_dev_t rtc = {0};
+        if (ds3231_init_desc(&rtc, I2C_NUM_0, BW_DS3231_SDA_GPIO, BW_DS3231_SCL_GPIO) != ESP_OK) {
+            ESP_LOGE(TAG, "DS3231 not found — wakeup alarm not set");
+        } else {
+            struct tm t = { .tm_sec=0, .tm_min=0, .tm_hour=12,
+                            .tm_mday=1, .tm_mon=0, .tm_year=125 };
+            ds3231_set_time(&rtc, &t);
+            t.tm_sec = 30;
+            ds3231_clear_alarm_flags(&rtc, DS3231_ALARM_1);
+            ds3231_set_alarm(&rtc, DS3231_ALARM_1, &t, DS3231_ALARM1_MATCH_SECMINHOUR, NULL, 0);
+            ds3231_enable_alarm_ints(&rtc, DS3231_ALARM_1);
+            ESP_LOGI(TAG, "DS3231 alarm set — wakeup in ~30 s");
+            ds3231_free_desc(&rtc);
+        }
+        i2cdev_done();
+    } else {
+        ESP_LOGE(TAG, "i2cdev_init failed — wakeup alarm not set");
+    }
+
     ESP_LOGI(TAG, "cooldown sleep → power release");
     esp_sleep_enable_timer_wakeup(BW_COOLDOWN_SLEEP_US);
     esp_light_sleep_start();
+
     bw_power_release();
     bw_power_deep_sleep();
 }
