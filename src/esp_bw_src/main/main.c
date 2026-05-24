@@ -181,27 +181,31 @@ static int solar_utc_minutes(int doy, bool is_sunset)
     return (int)(is_sunset ? noon + 4.0f * ha : noon - 4.0f * ha);
 }
 
-// ─── Set next DS3231 alarm ───────────────────────────────────────────────────
-// Reads DS3231 current time, adds cycle_min (NVS or default), clamps to
-// daylight window (sunrise..sunset UTC for Germany).  Clears alarm flag and
-// arms Alarm 1.  rtc must be a valid open i2c_dev_t.
-static void rtc_set_next_alarm(i2c_dev_t *rtc)
+// Formatted next-wakeup time for telemetry (populated by rtc_compute_next()).
+static char s_next_wakeup_str[32] = "?";
+
+// Reads DS3231, computes next wakeup UTC clamped to daylight, logs the
+// daytime/night decision, populates s_next_wakeup_str.  Returns UTC epoch
+// (0 on error).  rtc must be a valid open i2c_dev_t.
+static time_t rtc_compute_next(i2c_dev_t *rtc)
 {
     struct tm now_local;
     if (ds3231_get_time(rtc, &now_local) != ESP_OK) {
-        ESP_LOGE(TAG, "DS3231 get_time failed — alarm not set");
-        return;
+        ESP_LOGE(TAG, "DS3231 get_time failed");
+        return 0;
     }
 
     setenv("TZ", BW_TZ_BERLIN, 1);
     tzset();
-    time_t now_utc = mktime(&now_local);   // local → UTC epoch
+    time_t now_utc = mktime(&now_local);
     if (now_utc <= 0) {
-        ESP_LOGE(TAG, "DS3231 time not set — alarm not set");
-        return;
+        ESP_LOGE(TAG, "DS3231 time not set");
+        return 0;
     }
+    ESP_LOGI(TAG, "RTC now: %04d-%02d-%02d %02d:%02d:%02d local",
+             now_local.tm_year+1900, now_local.tm_mon+1, now_local.tm_mday,
+             now_local.tm_hour, now_local.tm_min, now_local.tm_sec);
 
-    // Cycle period: NVS "bw_meta"/"cycle_min" (u8), default BW_ALARM_CYCLE_MIN_DEFAULT.
     uint8_t cycle_min = BW_ALARM_CYCLE_MIN_DEFAULT;
     {
         nvs_handle_t h;
@@ -214,21 +218,19 @@ static void rtc_set_next_alarm(i2c_dev_t *rtc)
 
     time_t next_utc = now_utc + (time_t)cycle_min * 60;
 
-    // Day-of-year and minutes-since-midnight-UTC for the candidate wakeup time.
     struct tm gm;
     gmtime_r(&next_utc, &gm);
-    int doy         = gm.tm_yday + 1;
-    int next_utc_m  = gm.tm_hour * 60 + gm.tm_min;
+    int doy        = gm.tm_yday + 1;
+    int next_utc_m = gm.tm_hour * 60 + gm.tm_min;
 
     int sunrise_m = solar_utc_minutes(doy, false);
     int sunset_m  = solar_utc_minutes(doy, true);
+    if (sunrise_m < 0)     sunrise_m = 0;
+    if (sunset_m > 24*60)  sunset_m  = 24*60;
 
-    // If outside daylight, advance to sunrise (same day or next day).
-    if (sunrise_m < 0) sunrise_m = 0;       // polar day fallback
-    if (sunset_m > 24*60) sunset_m = 24*60;
+    bool night = (next_utc_m < sunrise_m || next_utc_m >= sunset_m);
 
-    if (next_utc_m < sunrise_m || next_utc_m >= sunset_m) {
-        // Past sunset → push to tomorrow's sunrise.
+    if (night) {
         time_t day_start = (next_utc / 86400) * 86400;
         if (next_utc_m >= sunset_m) {
             day_start += 86400;
@@ -238,24 +240,36 @@ static void rtc_set_next_alarm(i2c_dev_t *rtc)
             if (sunrise_m < 0) sunrise_m = 0;
         }
         next_utc = day_start + (time_t)sunrise_m * 60;
-        gmtime_r(&next_utc, &gm);
-        next_utc_m = gm.tm_hour * 60 + gm.tm_min;
+        ESP_LOGI(TAG, "alarm: NIGHT — sunset %02d:%02d UTC → sunrise %02d:%02d UTC (doy %d)",
+                 sunset_m/60, sunset_m%60, sunrise_m/60, sunrise_m%60, doy);
+    } else {
+        ESP_LOGI(TAG, "alarm: DAYTIME — window %02d:%02d–%02d:%02d UTC, cycle=%d min",
+                 sunrise_m/60, sunrise_m%60, sunset_m/60, sunset_m%60, cycle_min);
     }
 
-    // Convert target UTC back to Berlin local time for DS3231.
     struct tm next_local;
     localtime_r(&next_utc, &next_local);
+    snprintf(s_next_wakeup_str, sizeof(s_next_wakeup_str),
+             "%04d-%02d-%02d %02d:%02d:%02d",
+             (next_local.tm_year+1900) % 10000,
+             next_local.tm_mon+1, next_local.tm_mday,
+             next_local.tm_hour, next_local.tm_min, next_local.tm_sec);
+    ESP_LOGI(TAG, "next wakeup → %s local", s_next_wakeup_str);
+    return next_utc;
+}
 
+// Arms DS3231 Alarm 1 at next_utc (Berlin local time stored in RTC).
+static void rtc_arm_alarm(i2c_dev_t *rtc, time_t next_utc)
+{
+    struct tm next_local;
+    localtime_r(&next_utc, &next_local);
     ds3231_clear_alarm_flags(rtc, DS3231_ALARM_1);
     esp_err_t err = ds3231_set_alarm(rtc, DS3231_ALARM_1, &next_local,
                                      DS3231_ALARM1_MATCH_SECMINHOUR, NULL, 0);
     if (err == ESP_OK) {
         ds3231_enable_alarm_ints(rtc, DS3231_ALARM_1);
-        ESP_LOGI(TAG, "DS3231 alarm → %04d-%02d-%02d %02d:%02d:%02d local"
-                 " (cycle=%d min  sunrise=%02d:%02d sunset=%02d:%02d UTC)",
-                 next_local.tm_year+1900, next_local.tm_mon+1, next_local.tm_mday,
-                 next_local.tm_hour, next_local.tm_min, next_local.tm_sec,
-                 cycle_min, sunrise_m/60, sunrise_m%60, sunset_m/60, sunset_m%60);
+        ESP_LOGI(TAG, "DS3231 alarm armed → %02d:%02d:%02d",
+                 next_local.tm_hour, next_local.tm_min, next_local.tm_sec);
     } else {
         ESP_LOGE(TAG, "ds3231_set_alarm failed: %s", esp_err_to_name(err));
     }
@@ -415,10 +429,11 @@ static void run_normal_cycle(void)
         // Append per-cycle values that are only known after cc assess completes.
         // Cloud-check values (result, stage, global_mean, ratio, tile_means, …) were
         // already added inside bw_cc_assess().  These three are added once here.
-        bw_tele_f("battery",    (double)battery_v);
-        bw_tele_s("trigger",    trigger);
-        bw_tele_s("source",     s_wakeup_source == BW_WAKE_RTC ? "rtc" : "pir");
-        bw_tele_s("photo_mode", photo_mode_str);
+        bw_tele_f("battery",      (double)battery_v);
+        bw_tele_s("trigger",      trigger);
+        bw_tele_s("source",       s_wakeup_source == BW_WAKE_RTC ? "rtc" : "pir");
+        bw_tele_s("next_wakeup",  s_next_wakeup_str);
+        bw_tele_s("photo_mode",   photo_mode_str);
         if (s_fresh_flash) {
             bw_tele_b("fresh_flash", true);
             bw_tele_s("fw_build",   s_fw_build);
@@ -534,21 +549,33 @@ void app_main(void)
         }
     }
 
+    // Pre-compute next wakeup before the cycle so it is available in telemetry.
+    // (NTP may slightly shift RTC during the cycle; the alarm is re-computed
+    //  and armed post-cycle for accuracy.  The telemetry value is close enough.)
+    {
+        i2c_dev_t rtc = {0};
+        if (ds3231_init_desc(&rtc, I2C_NUM_0, BW_DS3231_SDA_GPIO, BW_DS3231_SCL_GPIO) == ESP_OK) {
+            rtc_compute_next(&rtc);   // populates s_next_wakeup_str
+            ds3231_free_desc(&rtc);
+        }
+    }
+
     bw_watchdog_start(BW_CYCLE_TIMEOUT_MS);
     run_normal_cycle();
     bw_watchdog_stop();
     bw_log_sysinfo(TAG);
 
     // ── DS3231 RTC — arm next periodic alarm ─────────────────────────────────
+    // Re-compute post-cycle (post-NTP) for accuracy, then arm Alarm 1.
     // Done BEFORE the cooldown sleep so it is visible in the serial log (the
     // USB-CDC connection drops during light sleep and output after wake is lost).
-    // Alarm time = now + cycle_min (NVS), clamped to daylight (sunrise..sunset).
     {
         i2c_dev_t rtc = {0};
         if (ds3231_init_desc(&rtc, I2C_NUM_0, BW_DS3231_SDA_GPIO, BW_DS3231_SCL_GPIO) != ESP_OK) {
             ESP_LOGE(TAG, "DS3231 not found — wakeup alarm not set");
         } else {
-            rtc_set_next_alarm(&rtc);
+            time_t next_utc = rtc_compute_next(&rtc);
+            if (next_utc > 0) rtc_arm_alarm(&rtc, next_utc);
             ds3231_free_desc(&rtc);
         }
     }
