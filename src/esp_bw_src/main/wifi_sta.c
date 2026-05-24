@@ -88,12 +88,14 @@ static void on_event(void *arg, esp_event_base_t base, int32_t id, void *data)
                  s_retry + 1, BW_WIFI_MAX_RETRY);
         if (retry) {
             s_retry++;
-            // Fritz!Box bans the station after rapid failed handshakes (reason=4/15/204).
-            // Delay 2.5s before retrying so the AP has time to clear its ban state.
+            // Fritz!Box rate-limits the station after rapid failed handshakes.
+            // Pattern: reason=4 → 15/204 (handshake ban) → reason=2 (auth ban).
+            // Delay 2.5s on all AP-side rejections so the ban can lift before retry.
             // Soft failures (reason=205, AP briefly invisible) retry immediately.
             bool needs_backoff =
-                (e->reason == WIFI_REASON_DISASSOC_DUE_TO_INACTIVITY ||
-                 e->reason == WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT     ||
+                (e->reason == WIFI_REASON_AUTH_EXPIRE                ||  // 2
+                 e->reason == WIFI_REASON_DISASSOC_DUE_TO_INACTIVITY ||  // 4
+                 e->reason == WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT     ||  // 15
                  e->reason == WIFI_REASON_HANDSHAKE_TIMEOUT);
             if (needs_backoff) {
                 if (!s_backoff_timer)

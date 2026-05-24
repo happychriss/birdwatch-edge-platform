@@ -45,8 +45,8 @@
 #define BW_HTTP_SOURCE        "BW_DEV"
 
 // ─── WiFi connection ───────────────────────────────────────────────────────
-#define BW_WIFI_MAX_RETRY     6       // 7 total attempts — covers Fritz!Box handshake-timeout
-                                      // ban pattern; 3 hard failures + backoff + soft retries
+#define BW_WIFI_MAX_RETRY     4       // 5 total attempts — after 2-3 hard failures the Fritz!Box
+                                      // ban is active; fail fast and let reboot-once handle it
 // 40s deadline: worst case = 3 handshake attempts × (up to 10s run + 2.5s backoff) + soft
 // retries.  Was 10s (too tight) → 20s (still cut off) → 30s (margin too thin with backoff).
 #define BW_WIFI_TIMEOUT_MS    40000
