@@ -91,7 +91,7 @@ static bool rtc_sync_needed(bool force)
     setenv("TZ", BW_TZ_BERLIN, 1);
     tzset();
     bool needs = true;
-    if (i2cdev_init() == ESP_OK) {
+    {
         i2c_dev_t rtc = {0};
         if (ds3231_init_desc(&rtc, I2C_NUM_0, BW_DS3231_SDA_GPIO, BW_DS3231_SCL_GPIO) == ESP_OK) {
             struct tm t;
@@ -101,7 +101,6 @@ static bool rtc_sync_needed(bool force)
             }
             ds3231_free_desc(&rtc);
         }
-        i2cdev_done();
     }
     return needs;
 }
@@ -136,10 +135,6 @@ static void rtc_sync_from_ntp(void)
              local_tm.tm_year + 1900, local_tm.tm_mon + 1, local_tm.tm_mday,
              local_tm.tm_hour, local_tm.tm_min, local_tm.tm_sec);
 
-    if (i2cdev_init() != ESP_OK) {
-        ESP_LOGE(TAG, "i2cdev_init failed — DS3231 not updated");
-        return;
-    }
     i2c_dev_t rtc = {0};
     if (ds3231_init_desc(&rtc, I2C_NUM_0, BW_DS3231_SDA_GPIO, BW_DS3231_SCL_GPIO) == ESP_OK) {
         if (ds3231_set_time(&rtc, &local_tm) == ESP_OK) {
@@ -152,7 +147,6 @@ static void rtc_sync_from_ntp(void)
         }
         ds3231_free_desc(&rtc);
     }
-    i2cdev_done();
 }
 
 // Compile-time build fingerprint — unique per rebuild (changes __DATE__/__TIME__).
@@ -495,19 +489,22 @@ void app_main(void)
     }
     bw_diag_init();
 
+    // Single i2cdev_init() for the entire power-on cycle.  i2cdev uses a
+    // static bool that prevents re-init after a done(); calling init/done in
+    // pairs across multiple functions leaves the mutex NULL on the second init.
+    if (i2cdev_init() != ESP_OK)
+        ESP_LOGE(TAG, "i2cdev_init failed — DS3231 unavailable this cycle");
+
     // ── Wakeup source detection ──────────────────────────────────────────────
     // Read DS3231 Alarm-1 flag BEFORE it is cleared.  If the flag is set the
     // DS3231 INT line fired (RTC periodic wakeup); otherwise the PIR triggered.
     {
-        if (i2cdev_init() == ESP_OK) {
-            i2c_dev_t rtc = {0};
-            if (ds3231_init_desc(&rtc, I2C_NUM_0, BW_DS3231_SDA_GPIO, BW_DS3231_SCL_GPIO) == ESP_OK) {
-                ds3231_alarm_t fired = DS3231_ALARM_NONE;
-                ds3231_get_alarm_flags(&rtc, &fired);
-                if (fired & DS3231_ALARM_1) s_wakeup_source = BW_WAKE_RTC;
-                ds3231_free_desc(&rtc);
-            }
-            i2cdev_done();
+        i2c_dev_t rtc = {0};
+        if (ds3231_init_desc(&rtc, I2C_NUM_0, BW_DS3231_SDA_GPIO, BW_DS3231_SCL_GPIO) == ESP_OK) {
+            ds3231_alarm_t fired = DS3231_ALARM_NONE;
+            ds3231_get_alarm_flags(&rtc, &fired);
+            if (fired & DS3231_ALARM_1) s_wakeup_source = BW_WAKE_RTC;
+            ds3231_free_desc(&rtc);
         }
         ESP_LOGI(TAG, "wakeup source: %s",
                  s_wakeup_source == BW_WAKE_RTC ? "RTC" : "PIR");
@@ -546,7 +543,7 @@ void app_main(void)
     // Done BEFORE the cooldown sleep so it is visible in the serial log (the
     // USB-CDC connection drops during light sleep and output after wake is lost).
     // Alarm time = now + cycle_min (NVS), clamped to daylight (sunrise..sunset).
-    if (i2cdev_init() == ESP_OK) {
+    {
         i2c_dev_t rtc = {0};
         if (ds3231_init_desc(&rtc, I2C_NUM_0, BW_DS3231_SDA_GPIO, BW_DS3231_SCL_GPIO) != ESP_OK) {
             ESP_LOGE(TAG, "DS3231 not found — wakeup alarm not set");
@@ -554,10 +551,8 @@ void app_main(void)
             rtc_set_next_alarm(&rtc);
             ds3231_free_desc(&rtc);
         }
-        i2cdev_done();
-    } else {
-        ESP_LOGE(TAG, "i2cdev_init failed — wakeup alarm not set");
     }
+    i2cdev_done();   // paired with the single i2cdev_init() at the top of app_main
 
     ESP_LOGI(TAG, "cooldown sleep → power release");
     esp_sleep_enable_timer_wakeup(BW_COOLDOWN_SLEEP_US);
