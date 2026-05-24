@@ -15,7 +15,7 @@ from dotenv import load_dotenv
 from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.engine import URL
-from sqlalchemy.orm import DeclarativeBase, sessionmaker
+from sqlalchemy.orm import DeclarativeBase, sessionmaker, scoped_session
 
 load_dotenv()
 
@@ -29,7 +29,8 @@ _db_url = URL.create(
 )
 
 engine = create_engine(_db_url)
-Session = sessionmaker(bind=engine)
+# scoped_session gives each thread its own Session instance — safe with Flask threaded=True.
+Session = scoped_session(sessionmaker(bind=engine))
 
 
 class Base(DeclarativeBase):

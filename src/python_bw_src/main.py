@@ -83,10 +83,14 @@ def _warm_live_model():
 
 birdwatch_http = "http://192.168.1.43"
 global_status = "PIR_Sensor"
-session = Session()
+session = Session  # scoped_session proxy — each thread gets its own Session instance
 threading.Thread(target=_warm_live_model, daemon=True).start()
 
 app = Flask(__name__, static_folder=os.getenv('JPG_FOLDER_PATH'), static_url_path='/static')
+
+@app.teardown_appcontext
+def shutdown_session(exc):
+    Session.remove()  # return the thread-local session to the pool after each request
 print(os.getenv('JPG_FOLDER_PATH'))
 
 
@@ -777,4 +781,4 @@ def validate_view():
 
 if __name__ == '__main__':
     app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024
-    app.run(host='0.0.0.0', port=8000)
+    app.run(host='0.0.0.0', port=8000, threaded=True)
