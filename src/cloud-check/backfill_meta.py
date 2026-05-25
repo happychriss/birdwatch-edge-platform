@@ -2,20 +2,23 @@
 
 For every bw_frames row that has a JPG file, this script:
 
-  1. Loads the JPG and extracts tile_means + global_mean directly from it
-     (so the stored telemetry matches the visible image — not the QQVGA
-     lightcheck capture that the firmware made a moment earlier).
+  1. Loads the JPG and extracts tile_means_y/u/v + global_mean via BT.601 YCbCr.
   2. Replays the burst pre-filter + background-model pipeline against the
      JPG-derived tile_means, in strict chronological order, so the bg model
      evolves consistently across the dataset.
   3. Snapshots the model means BEFORE each frame's update and stores them
      as model_tile_means (drives the Δm tile overlay in the detail view).
-  4. Overwrites: tile_means, model_tile_means, result, stage, global_mean,
-     ratio, dark_anomalous, dark_tiles, new_dark_tiles, photo_mode,
-     burst_trigger, burst_label, burst_gm_diff, burst_n_changed, burst_n_dark.
+  4. Overwrites: tile_means, tile_means_u, tile_means_v, model_tile_means,
+     model_tile_means_u, model_tile_means_v, result, stage, global_mean,
+     ratio, dark_anomalous, dark_tiles, new_dark_tiles, photo_bucket,
+     burst_trigger, burst_label, burst_gm_diff, burst_n_changed, burst_n_dark,
+     burst_n_chroma.
      Marks every reprocessed row with simulated=True.
   5. Preserves manual / external markers: label, downloaded_at, fresh_flash,
      fw_build (and any other meta keys the script does not touch).
+
+Model update policy mirrors the firmware: only frames with source='rtc' update
+the background model. PIR frames are evidence only (no model update).
 
 Frames are processed unconditionally — the previous "already authoritative"
 skip is gone.  When new firmware uploads land via /frame, the server keeps
@@ -48,17 +51,13 @@ import numpy as np
 from sqlalchemy.orm.attributes import flag_modified
 
 from cloud_check.burst_filter import BurstConfig, burst_classify
-from cloud_check.background import BackgroundModel
+from cloud_check.background import BackgroundModel, photo_bucket_idx
 from cloud_check.classifier import classify
 from cloud_check.config import Config
-from cloud_check.features import load_gray_vga, extract_tile_features
-from cloud_check.scene_buckets import CENTROIDS, K as CC_K
+from cloud_check.features import load_yuv_vga, extract_tile_features_yuv
 from db import BwFrame, Session
 
 # Burst stages that suppress without running the background model.
-# DIFFUSE and dt-based stages (FAST_SHIFT, ISOLATED) fall through to the BG
-# model — the BG model is better-positioned to decide (compares vs long-term
-# mean, not just prev frame).
 _BURST_SUPPRESS_STAGES = frozenset({'DUPLICATE', 'BRIGHT_STABLE'})
 
 _jpg_raw = os.getenv('JPG_FOLDER_PATH', '/tmp')
@@ -66,15 +65,21 @@ JPG_FOLDER = (_server_dir / _jpg_raw).resolve() if not Path(_jpg_raw).is_absolut
 
 # Fields that this script recomputes and overwrites every run.
 _OVERWRITE_KEYS = (
-    'tile_means', 'model_tile_means', 'result', 'stage', 'global_mean',
-    'ratio', 'dark_anomalous', 'dark_tiles', 'new_dark_tiles', 'dark_blob_max', 'photo_mode',
-    'burst_trigger', 'burst_label', 'burst_gm_diff', 'burst_n_changed',
-    'burst_n_dark', 'warmup', 'prev_valid', 'simulated',
+    'tile_means', 'tile_means_u', 'tile_means_v',
+    'model_tile_means', 'model_tile_means_u', 'model_tile_means_v',
+    'result', 'stage', 'global_mean',
+    'ratio', 'dark_anomalous', 'dark_tiles', 'new_dark_tiles', 'dark_blob_max',
+    'photo_bucket', 'warmup', 'prev_valid', 'simulated',
+    'burst_trigger', 'burst_label', 'burst_gm_diff',
+    'burst_n_changed', 'burst_n_dark', 'burst_n_chroma',
 )
 
 
-def _photo_mode(gm: int) -> str:
-    if gm < 130:
+def _photo_bucket(gm: int) -> str:
+    """Map global Y mean to photo-bucket name (mirrors firmware thresholds)."""
+    if gm >= 160:
+        return 'BRIGHT'
+    if gm < 80:
         return 'LOWLIGHT'
     return 'NORMAL'
 
@@ -90,49 +95,67 @@ def run_backfill(dry_run: bool = False) -> None:
     print(f"Found {len(frames)} frames with filenames", flush=True)
     print(f"JPG folder: {JPG_FOLDER}", flush=True)
 
-    # Match firmware exactly: K=4 lighting-scenario buckets.
-    # warmup_frames_per_bucket=4 to match ESP CC_WARMUP_FRAMES; centroids pre-seed the means.
-    cc_cfg = Config(num_time_buckets=CC_K, warmup_frames_per_bucket=4)
+    # Match firmware: 3 photo-buckets × 1 scene-bucket, warmup=4.
+    # No centroid pre-seeding — the first 4 RTC frames per bucket warm the model.
+    cc_cfg = Config(
+        num_photo_buckets=3,
+        num_scene_buckets=1,
+        bright_photo_threshold=160,
+        lowlight_photo_threshold=80,
+        warmup_frames_per_bucket=4,
+    )
     burst_cfg = BurstConfig()
     bg_model = BackgroundModel(cc_cfg)
-    # Pre-seed each bucket's mean from the computed centroids — skip the mean=128 cold start.
-    for _b in range(CC_K):
-        bg_model.mean[_b] = CENTROIDS[_b].reshape(cc_cfg.grid_h, cc_cfg.grid_w).copy()
-        bg_model.bucket_seen[_b] = cc_cfg.warmup_frames_per_bucket  # centroid counts as warmup
 
-    prev_tile_mean: np.ndarray | None = None
-    prev_gm: float | None = None
-    prev_ts: datetime | None = None
-    prev_tile_mean_by_bucket: dict[int, np.ndarray] = {}
+    # Per-cell (photo_bucket × scene_bucket) previous tile means for temporal check
+    prev_tile_mean_by_cell: dict[tuple[int, int], tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
+
+    # Burst filter prev state (all frames, not just RTC)
+    prev_burst_tile_mean_y: np.ndarray | None = None
+    prev_burst_tile_mean_u: np.ndarray | None = None
+    prev_burst_tile_mean_v: np.ndarray | None = None
+    prev_burst_gm: float | None = None
+    prev_burst_ts: datetime | None = None
 
     updated = errors = 0
 
     for frame in frames:
         meta = dict(frame.meta or {})
 
-        # Prefer stored tile_means from DB (written by a previous backfill or by the
-        # firmware).  This lets the simulation run without local JPG access — the
-        # production server's photos are only needed on first population.
-        stored_tm = meta.get('tile_means')
+        # ── Feature extraction ────────────────────────────────────────────────
+        # Prefer stored tile_means_y/u/v from DB (written by firmware or prev backfill).
+        # Falls back to JPEG decode from local disk or HTTP.
+        esp_tm_y = meta.get('tile_means')
+        esp_tm_u = meta.get('tile_means_u')
+        esp_tm_v = meta.get('tile_means_v')
         expected_tiles = cc_cfg.grid_h * cc_cfg.grid_w
-        if stored_tm and isinstance(stored_tm, list) and len(stored_tm) == expected_tiles:
-            tile_mean = np.array(stored_tm, dtype=np.float32).reshape(cc_cfg.grid_h, cc_cfg.grid_w)
-            gm = int(float(tile_mean.mean()))  # truncate, matches ESP integer division
+
+        if esp_tm_y and isinstance(esp_tm_y, list) and len(esp_tm_y) == expected_tiles:
+            tile_mean_y = np.array(esp_tm_y, dtype=np.float32).reshape(cc_cfg.grid_h, cc_cfg.grid_w)
+            tile_mean_u = (
+                np.array(esp_tm_u, dtype=np.float32).reshape(cc_cfg.grid_h, cc_cfg.grid_w)
+                if esp_tm_u and len(esp_tm_u) == expected_tiles else None
+            )
+            tile_mean_v = (
+                np.array(esp_tm_v, dtype=np.float32).reshape(cc_cfg.grid_h, cc_cfg.grid_w)
+                if esp_tm_v and len(esp_tm_v) == expected_tiles else None
+            )
+            gm = int(float(tile_mean_y.mean()))
         else:
-            # Fall back to loading from local disk or HTTP
             jpg_path = JPG_FOLDER / frame.filename
             if jpg_path.exists():
                 try:
-                    gray = load_gray_vga(jpg_path)
-                    feats = extract_tile_features(gray)
-                    tile_mean = feats['mean']
+                    y_arr, u_arr, v_arr = load_yuv_vga(jpg_path)
+                    feats = extract_tile_features_yuv(y_arr, u_arr, v_arr)
+                    tile_mean_y = feats['mean_y']
+                    tile_mean_u = feats['mean_u']
+                    tile_mean_v = feats['mean_v']
                     gm = feats['global_mean']
                 except Exception as exc:
                     print(f"  ERR   {frame.filename}: {exc}", flush=True)
                     errors += 1
                     continue
             else:
-                # Try HTTP fetch from production server
                 server_base = os.getenv('PHOTO_SERVER', 'http://192.168.1.110:8000').rstrip('/')
                 url = f"{server_base}/static/{frame.filename}"
                 try:
@@ -140,37 +163,48 @@ def run_backfill(dry_run: bool = False) -> None:
                     from PIL import Image as PILImage
                     resp = requests.get(url, timeout=15)
                     resp.raise_for_status()
-                    img = PILImage.open(io.BytesIO(resp.content)).convert('L').resize((640, 480))
-                    frame_arr = np.asarray(img, dtype=np.uint8)
-                    feats = extract_tile_features(frame_arr)
-                    tile_mean = feats['mean']
+                    ycbcr = PILImage.open(io.BytesIO(resp.content)).convert('YCbCr').resize((640, 480))
+                    arr = np.asarray(ycbcr, dtype=np.uint8)
+                    feats = extract_tile_features_yuv(arr[:, :, 0], arr[:, :, 1], arr[:, :, 2])
+                    tile_mean_y = feats['mean_y']
+                    tile_mean_u = feats['mean_u']
+                    tile_mean_v = feats['mean_v']
                     gm = feats['global_mean']
                 except Exception as exc:
                     print(f"  MISS  {frame.filename}: {exc}", flush=True)
                     errors += 1
                     continue
 
-        # dt since previous frame
-        if prev_ts is not None and frame.captured_at is not None:
-            dt = max(0.0, (frame.captured_at - prev_ts).total_seconds())
+        # ── dt since previous frame ───────────────────────────────────────────
+        if prev_burst_ts is not None and frame.captured_at is not None:
+            dt = max(0.0, (frame.captured_at - prev_burst_ts).total_seconds())
         else:
             dt = float('inf')
 
-        # --- Burst pre-filter ----------------------------------------------------
+        # ── Burst pre-filter ──────────────────────────────────────────────────
         burst = burst_classify(
-            tile_mean, float(gm),
-            prev_tile_mean, prev_gm,
+            tile_mean_y, float(gm),
+            prev_burst_tile_mean_y, prev_burst_gm,
             dt, burst_cfg,
+            tile_mean_u=tile_mean_u,
+            tile_mean_v=tile_mean_v,
+            prev_tile_mean_u=prev_burst_tile_mean_u,
+            prev_tile_mean_v=prev_burst_tile_mean_v,
         )
 
-        hour = frame.captured_at.hour if frame.captured_at else 12
-        bucket = bg_model.bucket_for(tile_mean)
-        bg_prev = prev_tile_mean_by_bucket.get(bucket)
-        was_warmup = bg_model.warmup_remaining(bucket) > 0
-        bg_model.observe(bucket)
+        # ── Background model ──────────────────────────────────────────────────
+        pb_name = bg_model.photo_bucket_for(gm)
+        pb = photo_bucket_idx(pb_name)
+        sb = bg_model.scene_bucket_for(pb, tile_mean_y)
+        prev_cell = prev_tile_mean_by_cell.get((pb, sb))
+        bg_prev_y = prev_cell[0] if prev_cell is not None else None
+        was_warmup = bg_model.warmup_remaining(pb, sb) > 0
+        bg_model.observe(pb, sb)
 
-        # Snapshot model means BEFORE any update — what z-scores were computed from
-        model_means_flat: list[int] = bg_model.mean[bucket].flatten().round().astype(int).tolist()
+        # Snapshot model means BEFORE any update — these are what z-scores were computed from
+        model_means_y_flat: list[int] = bg_model.mean_y[pb, sb].flatten().round().astype(int).tolist()
+        model_means_u_flat: list[int] = bg_model.mean_u[pb, sb].flatten().round().astype(int).tolist()
+        model_means_v_flat: list[int] = bg_model.mean_v[pb, sb].flatten().round().astype(int).tolist()
 
         bg_pred = None
         burst_suppresses = (burst.label == 'suppress'
@@ -179,39 +213,65 @@ def run_backfill(dry_run: bool = False) -> None:
             result = 'clouds'
             stage = burst.trigger
         else:
-            bg_pred = classify(tile_mean, hour, bg_model, cc_cfg, prev_tile_mean=bg_prev)
+            bg_pred = classify(
+                tile_mean_y, bg_model, cc_cfg,
+                prev_tile_mean=bg_prev_y,
+                tile_mean_u=tile_mean_u,
+                tile_mean_v=tile_mean_v,
+            )
             result = bg_pred.label
             stage = bg_pred.trigger
-            if was_warmup or bg_pred.label == 'clouds' or bg_pred.trigger in ('SCENE_DRIFT', 'NIGHT'):
-                bg_model.update(bucket, tile_mean)
-            if bg_pred.trigger == 'SCENE_DRIFT':
-                bg_model.reset_warmup(bucket)
-            prev_tile_mean_by_bucket[bucket] = tile_mean
 
-        # Advance burst state for next iteration
-        prev_tile_mean = tile_mean
-        prev_gm = float(gm)
-        prev_ts = frame.captured_at
+            # Mirror firmware update policy: only RTC frames update the model.
+            if meta.get('source') == 'rtc' and (
+                was_warmup
+                or bg_pred.label == 'clouds'
+                or bg_pred.trigger in ('SCENE_DRIFT', 'NIGHT')
+            ):
+                bg_model.update(pb, sb, tile_mean_y, tile_mean_u, tile_mean_v)
+            if bg_pred.trigger == 'SCENE_DRIFT' and meta.get('source') == 'rtc':
+                bg_model.reset_warmup(pb, sb)
 
-        # --- Build the canonical meta payload ----------------------------------
-        tile_means_flat: list[int] = tile_mean.flatten().round().astype(int).tolist()
+            prev_tile_mean_by_cell[(pb, sb)] = (tile_mean_y, tile_mean_u, tile_mean_v)
+
+        # Advance burst state for next iteration (all frames, not just RTC)
+        prev_burst_tile_mean_y = tile_mean_y
+        prev_burst_tile_mean_u = tile_mean_u
+        prev_burst_tile_mean_v = tile_mean_v
+        prev_burst_gm = float(gm)
+        prev_burst_ts = frame.captured_at
+
+        # ── Build canonical meta payload ──────────────────────────────────────
+        tile_means_y_flat: list[int] = tile_mean_y.flatten().round().astype(int).tolist()
+        tile_means_u_flat = (tile_mean_u.flatten().round().astype(int).tolist()
+                             if tile_mean_u is not None else None)
+        tile_means_v_flat = (tile_mean_v.flatten().round().astype(int).tolist()
+                             if tile_mean_v is not None else None)
 
         new_fields: dict = {
-            'tile_means':       tile_means_flat,
-            'model_tile_means': model_means_flat,
-            'global_mean':      gm,
-            'photo_mode':       _photo_mode(gm),
-            'result':           result,
-            'stage':            stage,
-            'warmup':           bool(was_warmup),
-            'prev_valid':       bool(bg_prev is not None),
-            'burst_trigger':    burst.trigger,
-            'burst_label':      burst.label,
-            'burst_gm_diff':    round(burst.gm_diff, 1),
-            'burst_n_changed':  int(burst.n_changed),
-            'burst_n_dark':     int(burst.n_dark),
-            'simulated':        True,
+            'tile_means':          tile_means_y_flat,
+            'model_tile_means':    model_means_y_flat,
+            'model_tile_means_u':  model_means_u_flat,
+            'model_tile_means_v':  model_means_v_flat,
+            'global_mean':         gm,
+            'photo_bucket':        _photo_bucket(gm),
+            'result':              result,
+            'stage':               stage,
+            'warmup':              bool(was_warmup),
+            'prev_valid':          bool(prev_cell is not None),
+            'burst_trigger':       burst.trigger,
+            'burst_label':         burst.label,
+            'burst_gm_diff':       round(burst.gm_diff, 1),
+            'burst_n_changed':     int(burst.n_changed),
+            'burst_n_dark':        int(burst.n_dark),
+            'burst_n_chroma':      int(burst.n_chroma_changed),
+            'simulated':           True,
         }
+        if tile_means_u_flat is not None:
+            new_fields['tile_means_u'] = tile_means_u_flat
+        if tile_means_v_flat is not None:
+            new_fields['tile_means_v'] = tile_means_v_flat
+
         if bg_pred is not None:
             new_fields['ratio']           = round(float(bg_pred.anomaly_ratio), 3)
             new_fields['new_dark_tiles']  = int(bg_pred.new_dark_tiles)
@@ -219,8 +279,8 @@ def run_backfill(dry_run: bool = False) -> None:
             new_fields['dark_tiles']      = int(bg_pred.dark_tiles)
             new_fields['dark_blob_max']   = int(bg_pred.dark_blob_max)
             new_fields['scene_bucket']    = int(bg_pred.scene_bucket)
+            new_fields['n_chroma_changed'] = int(bg_pred.n_chroma_changed)
         else:
-            # Burst-suppressed: no bg model output, zero out the bg-only stats
             new_fields['ratio']          = 0.0
             new_fields['new_dark_tiles'] = 0
             new_fields['dark_anomalous'] = 0
@@ -232,7 +292,8 @@ def run_backfill(dry_run: bool = False) -> None:
         patched = {**meta, **new_fields}
 
         ts_str = frame.captured_at.strftime('%Y-%m-%d %H:%M') if frame.captured_at else '?'
-        print(f"  {'DRY' if dry_run else 'UPD'} {frame.filename} {ts_str}"
+        src = meta.get('source', '?')
+        print(f"  {'DRY' if dry_run else 'UPD'} {frame.filename} {ts_str} [{src}]"
               f"  burst={burst.trigger:<17} bg={stage:<12} result={result}", flush=True)
 
         if not dry_run:
@@ -252,8 +313,6 @@ def run_backfill(dry_run: bool = False) -> None:
 def main() -> None:
     ap = argparse.ArgumentParser(description='Clean canonical recompute of pipeline meta from JPGs')
     ap.add_argument('--dry-run', action='store_true', help='Print changes without writing to DB')
-    # Accepted for backwards-compat with /admin/backfill endpoint; no longer meaningful
-    # (every run unconditionally reprocesses every frame with a JPG).
     ap.add_argument('--force', action='store_true', help=argparse.SUPPRESS)
     args = ap.parse_args()
     run_backfill(dry_run=args.dry_run)

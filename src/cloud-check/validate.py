@@ -41,11 +41,11 @@ if str(_here) not in sys.path:
 if str(_server_dir) not in sys.path:
     sys.path.insert(0, str(_server_dir))
 
-from cloud_check.background import BackgroundModel
+from cloud_check.background import BackgroundModel, photo_bucket_idx
 from cloud_check.burst_filter import BurstConfig, burst_classify
 from cloud_check.classifier import classify, ClassifierResult
 from cloud_check.config import Config
-from cloud_check.features import extract_tile_features, load_gray_vga
+from cloud_check.features import extract_tile_features_yuv
 from db import BwFrame, Session
 
 # Burst stages that suppress without needing dt_seconds — ESP implements these
@@ -115,17 +115,17 @@ def _compare(check: dict, esp_val: Any, py_val: Any) -> dict | None:
     return None
 
 
-def _get_py_field(result: ClassifierResult, py_field: str, tile_mean: np.ndarray) -> Any:
+def _get_py_field(result: ClassifierResult, py_field: str, tile_mean_y: np.ndarray) -> Any:
     """Extract a Python-side value by field name.
 
-    'global_mean' is not a ClassifierResult field; compute it from tile_mean.
+    'global_mean' is not a ClassifierResult field; compute it from tile_mean_y.
     """
     if py_field == 'global_mean':
-        return int(float(tile_mean.mean()))  # truncate, matches ESP integer division (gm_sum / CC_NUM_TILES)
+        return int(float(tile_mean_y.mean()))  # truncate, matches ESP integer division (gm_sum / CC_NUM_TILES)
     return getattr(result, py_field, None)
 
 
-def _get_py_field_burst(burst_trigger: str, py_field: str, tile_mean: np.ndarray) -> Any:
+def _get_py_field_burst(burst_trigger: str, py_field: str, tile_mean_y: np.ndarray) -> Any:
     """Extract a Python-side value for a burst-suppressed frame.
 
     Only label, trigger/stage, and global_mean are meaningful for burst frames;
@@ -136,7 +136,7 @@ def _get_py_field_burst(burst_trigger: str, py_field: str, tile_mean: np.ndarray
     if py_field == 'trigger':
         return burst_trigger
     if py_field == 'global_mean':
-        return int(float(tile_mean.mean()))
+        return int(float(tile_mean_y.mean()))
     return None   # ratio, warmup, etc. — N/A for burst stage
 
 
@@ -157,29 +157,32 @@ def run(config_path: str | None = None) -> list[dict]:
     # Build Python Config from config overrides (defaults match ESP constants).
     pc = cfg_raw.get('python_config', {})
     py_cfg = Config(
-        num_time_buckets        = pc.get('num_time_buckets',         1),
-        warmup_frames_per_bucket= pc.get('warmup_frames_per_bucket', 8),
-        ema_alpha               = pc.get('ema_alpha',                0.15),
-        var_floor               = pc.get('var_floor',                36.0),
-        init_var                = pc.get('init_var',                 256.0),
-        tile_z_threshold        = pc.get('tile_z_threshold',         2.5),
-        quiet_anomaly_ratio     = pc.get('quiet_anomaly_ratio',      0.20),
-        dark_object_min_delta   = pc.get('dark_object_min_delta',    35.0),
-        dark_object_min_tiles   = pc.get('dark_object_min_tiles',    1),
-        temporal_dark_delta     = pc.get('temporal_dark_delta',      20.0),
-        scene_drift_min_tiles   = pc.get('scene_drift_min_tiles',    4),
-        night_brightness_threshold  = pc.get('night_brightness_threshold', 70.0),
-        indirect_light_threshold    = pc.get('indirect_light_threshold',   95.0),
-        spot_change_max_tiles       = pc.get('spot_change_max_tiles',      2),
-        spot_change_tile_delta      = pc.get('spot_change_tile_delta',     15.0),
-        spot_change_global_stability= pc.get('spot_change_global_stability', 10.0),
-        spot_change_max_noisy_tiles = pc.get('spot_change_max_noisy_tiles', 20),
+        num_photo_buckets        = pc.get('num_photo_buckets',        3),
+        num_scene_buckets        = pc.get('num_scene_buckets',        1),
+        bright_photo_threshold   = pc.get('bright_photo_threshold',   160),
+        lowlight_photo_threshold = pc.get('lowlight_photo_threshold', 80),
+        warmup_frames_per_bucket = pc.get('warmup_frames_per_bucket', 4),
+        ema_alpha                = pc.get('ema_alpha',                0.15),
+        var_floor                = pc.get('var_floor',                36.0),
+        init_var                 = pc.get('init_var',                 256.0),
+        tile_z_threshold         = pc.get('tile_z_threshold',         3.0),
+        quiet_anomaly_ratio      = pc.get('quiet_anomaly_ratio',      0.25),
+        dark_object_min_delta    = pc.get('dark_object_min_delta',    20.0),
+        dark_object_min_tiles    = pc.get('dark_object_min_tiles',    1),
+        temporal_dark_delta      = pc.get('temporal_dark_delta',      20.0),
+        scene_drift_min_tiles    = pc.get('scene_drift_min_tiles',    4),
+        night_brightness_threshold = pc.get('night_brightness_threshold', 70.0),
+        chroma_dark_obj_gate_sq  = pc.get('chroma_dark_obj_gate_sq',  64),
     )
 
     model = BackgroundModel(py_cfg)
     burst_cfg = BurstConfig()
-    prev_tile_mean: np.ndarray | None = None
-    prev_burst_tile_mean: np.ndarray | None = None
+    prev_tile_mean_y: np.ndarray | None = None
+    prev_tile_mean_u: np.ndarray | None = None
+    prev_tile_mean_v: np.ndarray | None = None
+    prev_burst_tile_mean_y: np.ndarray | None = None
+    prev_burst_tile_mean_u: np.ndarray | None = None
+    prev_burst_tile_mean_v: np.ndarray | None = None
     prev_burst_gm: float | None = None
     prev_burst_ts: datetime | None = None
     results: list[dict] = []
@@ -219,15 +222,26 @@ def run(config_path: str | None = None) -> list[dict]:
 
         for frame in frames:
             meta = frame.meta or {}
-            hour = frame.captured_at.hour if frame.captured_at else 12
 
             # ── feature extraction ─────────────────────────────────────────
-            # Prefer ESP's own tile_means (identical input → pure logic parity).
-            # Fall back to extracting from JPEG (tests extraction + logic).
-            esp_tile_means = meta.get('tile_means')
+            # Prefer ESP's own tile_means_y/u/v (identical input → pure logic parity).
+            # Fall back to JPEG decode from the server (tests full extraction + logic).
+            esp_tile_means_y = meta.get('tile_means')
+            esp_tile_means_u = meta.get('tile_means_u')
+            esp_tile_means_v = meta.get('tile_means_v')
             expected = py_cfg.grid_h * py_cfg.grid_w
-            if esp_tile_means and isinstance(esp_tile_means, list) and len(esp_tile_means) == expected:
-                tile_mean = np.array(esp_tile_means, dtype=np.float32).reshape(py_cfg.grid_h, py_cfg.grid_w)
+            if (esp_tile_means_y and isinstance(esp_tile_means_y, list)
+                    and len(esp_tile_means_y) == expected):
+                tile_mean_y = np.array(esp_tile_means_y, dtype=np.float32).reshape(
+                    py_cfg.grid_h, py_cfg.grid_w)
+                tile_mean_u = (
+                    np.array(esp_tile_means_u, dtype=np.float32).reshape(py_cfg.grid_h, py_cfg.grid_w)
+                    if esp_tile_means_u and len(esp_tile_means_u) == expected else None
+                )
+                tile_mean_v = (
+                    np.array(esp_tile_means_v, dtype=np.float32).reshape(py_cfg.grid_h, py_cfg.grid_w)
+                    if esp_tile_means_v and len(esp_tile_means_v) == expected else None
+                )
             else:
                 url = f"{server_base}/static/{frame.filename}"
                 try:
@@ -235,11 +249,12 @@ def run(config_path: str | None = None) -> list[dict]:
                     resp.raise_for_status()
                     import io
                     from PIL import Image as PILImage
-                    img = PILImage.open(io.BytesIO(resp.content))
-                    gray = img.convert('L').resize((640, 480))
-                    frame_arr = np.asarray(gray, dtype=np.uint8)
-                    feats = extract_tile_features(frame_arr)
-                    tile_mean = feats['mean']
+                    ycbcr = PILImage.open(io.BytesIO(resp.content)).convert('YCbCr').resize((640, 480))
+                    arr = np.asarray(ycbcr, dtype=np.uint8)
+                    feats = extract_tile_features_yuv(arr[:, :, 0], arr[:, :, 1], arr[:, :, 2])
+                    tile_mean_y = feats['mean_y']
+                    tile_mean_u = feats['mean_u']
+                    tile_mean_v = feats['mean_v']
                 except Exception as exc:
                     fetch_err = {'key': '_fetch', 'esp_val': None,
                                  'py_val': None, 'delta': str(exc), 'match': False}
@@ -252,7 +267,7 @@ def run(config_path: str | None = None) -> list[dict]:
                     continue
 
             # ── run burst pre-filter ──────────────────────────────────────
-            burst_gm = float(tile_mean.mean())
+            burst_gm = float(tile_mean_y.mean())
             if prev_burst_ts is not None and frame.captured_at is not None:
                 burst_dt = (frame.captured_at.replace(tzinfo=None)
                             - prev_burst_ts.replace(tzinfo=None)).total_seconds()
@@ -262,11 +277,17 @@ def run(config_path: str | None = None) -> list[dict]:
                 burst_dt = float('inf')
 
             burst_result = burst_classify(
-                tile_mean, burst_gm, prev_burst_tile_mean, prev_burst_gm,
+                tile_mean_y, burst_gm, prev_burst_tile_mean_y, prev_burst_gm,
                 burst_dt, burst_cfg,
+                tile_mean_u=tile_mean_u,
+                tile_mean_v=tile_mean_v,
+                prev_tile_mean_u=prev_burst_tile_mean_u,
+                prev_tile_mean_v=prev_burst_tile_mean_v,
             )
             # Always update burst state (mirrors ESP save_prev — every frame)
-            prev_burst_tile_mean = tile_mean
+            prev_burst_tile_mean_y = tile_mean_y
+            prev_burst_tile_mean_u = tile_mean_u
+            prev_burst_tile_mean_v = tile_mean_v
             prev_burst_gm = burst_gm
             prev_burst_ts = frame.captured_at
 
@@ -282,23 +303,36 @@ def run(config_path: str | None = None) -> list[dict]:
                 # Background model does not run on the ESP for these frames;
                 # skip model.observe/update.  Still advance prev_tile_mean so
                 # the temporal check on the next frame matches ESP behaviour.
-                prev_tile_mean = tile_mean
+                prev_tile_mean_y = tile_mean_y
+                prev_tile_mean_u = tile_mean_u
+                prev_tile_mean_v = tile_mean_v
             else:
                 # ── Background model ──────────────────────────────────────
-                bucket = model.bucket_for(tile_mean)
-                model.observe(bucket)
-                py_result = classify(tile_mean, hour, model, py_cfg, prev_tile_mean=prev_tile_mean)
+                pb_name = model.photo_bucket_for(burst_gm)
+                pb = photo_bucket_idx(pb_name)
+                sb = model.scene_bucket_for(pb, tile_mean_y)
+                was_warmup = model.warmup_remaining(pb, sb) > 0
+                model.observe(pb, sb)
+                py_result = classify(
+                    tile_mean_y, model, py_cfg,
+                    prev_tile_mean=prev_tile_mean_y,
+                    tile_mean_u=tile_mean_u,
+                    tile_mean_v=tile_mean_v,
+                )
 
-                # Update model (mirrors pipeline.py update policy)
-                was_warmup = model.warmup_remaining(bucket) > 0
-                if was_warmup or py_result.label == 'clouds' or py_result.trigger in (
-                    'SCENE_DRIFT', 'NIGHT'
+                # Update policy mirrors ESP: only RTC frames update the model.
+                if meta.get('source') == 'rtc' and (
+                    was_warmup
+                    or py_result.label == 'clouds'
+                    or py_result.trigger in ('SCENE_DRIFT', 'NIGHT')
                 ):
-                    model.update(bucket, tile_mean)
-                if py_result.trigger == 'SCENE_DRIFT':
-                    model.reset_warmup(bucket)
+                    model.update(pb, sb, tile_mean_y, tile_mean_u, tile_mean_v)
+                if py_result.trigger == 'SCENE_DRIFT' and meta.get('source') == 'rtc':
+                    model.reset_warmup(pb, sb)
 
-                prev_tile_mean = tile_mean
+                prev_tile_mean_y = tile_mean_y
+                prev_tile_mean_u = tile_mean_u
+                prev_tile_mean_v = tile_mean_v
 
             # ── compare configured checks ─────────────────────────────────
             checks_detail = []
@@ -311,11 +345,11 @@ def run(config_path: str | None = None) -> list[dict]:
                     continue   # ESP didn't emit this key — skip silently
 
                 if burst_suppresses:
-                    py_val = _get_py_field_burst(burst_result.trigger, py_field, tile_mean)
+                    py_val = _get_py_field_burst(burst_result.trigger, py_field, tile_mean_y)
                     if py_val is None:
                         continue   # field not meaningful for burst frames
                 else:
-                    py_val = _get_py_field(py_result, py_field, tile_mean)
+                    py_val = _get_py_field(py_result, py_field, tile_mean_y)
 
                 m = _compare(check, esp_val, py_val)
                 if m:

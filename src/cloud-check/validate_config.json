@@ -11,20 +11,22 @@
 
   "python_config": {
     "_comment": "Must mirror ESP firmware constants in cloud_check.c / config.h exactly.",
-    "num_time_buckets": 1,
+    "num_photo_buckets": 3,
+    "num_scene_buckets": 1,
+    "bright_photo_threshold": 160,
+    "lowlight_photo_threshold": 80,
     "warmup_frames_per_bucket": 4,
     "ema_alpha": 0.15,
     "var_floor": 36.0,
     "init_var": 256.0,
     "tile_z_threshold": 3.0,
     "quiet_anomaly_ratio": 0.25,
-    "dark_object_min_delta": 35.0,
+    "dark_object_min_delta": 20.0,
     "dark_object_min_tiles": 1,
     "temporal_dark_delta": 20.0,
     "scene_drift_min_tiles": 4,
     "night_brightness_threshold": 70.0,
-    "indirect_light_threshold": 0.0,
-    "spot_change_max_tiles": 0
+    "chroma_dark_obj_gate_sq": 64
   },
 
   "checks": [
@@ -37,6 +39,12 @@
     {
       "esp_key": "stage",
       "py_field": "trigger",
+      "type": "exact"
+    },
+    {
+      "_comment": "photo-bucket string (NORMAL | BRIGHT | LOWLIGHT)",
+      "esp_key": "photo_bucket",
+      "py_field": "photo_bucket",
       "type": "exact"
     },
     {

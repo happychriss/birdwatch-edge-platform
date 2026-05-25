@@ -28,7 +28,7 @@ if str(_here) not in sys.path:
     sys.path.insert(0, str(_here))
 
 from cloud_check.burst_filter import BurstConfig, BurstResult, burst_classify
-from cloud_check.features import FRAME_W, FRAME_H, GRID_W, GRID_H
+from cloud_check.features import FRAME_W, FRAME_H, GRID_W, GRID_H, extract_tile_features_yuv
 
 _candidates = [Path('/workspace/training-data'), Path(__file__).parents[2] / 'training-data']
 TRAINING_DATA = next((p for p in _candidates if p.exists()), _candidates[0])
@@ -44,17 +44,16 @@ PROCESS_FOLDERS = [
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 
-def load_tile_means(path: Path) -> tuple[np.ndarray, float]:
-    """Return (tile_mean (GRID_H×GRID_W float32), global_mean float)."""
+def load_tile_means(path: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray, float]:
+    """Return (tile_mean_y, tile_mean_u, tile_mean_v, global_mean).
+
+    All tile arrays are (GRID_H×GRID_W float32). BT.601 YCbCr, U/V centered at 128.
+    """
     with Image.open(path) as im:
-        gray = im.convert('L').resize((FRAME_W, FRAME_H), Image.Resampling.BILINEAR)
-        arr = np.asarray(gray, dtype=np.float32)
-    tile_h = FRAME_H // GRID_H
-    tile_w = FRAME_W // GRID_W
-    tiles = arr[:GRID_H * tile_h, :GRID_W * tile_w]
-    tiles = tiles.reshape(GRID_H, tile_h, GRID_W, tile_w).transpose(0, 2, 1, 3)
-    means = tiles.reshape(GRID_H, GRID_W, -1).mean(axis=2)
-    return means, float(arr.mean())
+        ycbcr = im.convert('YCbCr').resize((FRAME_W, FRAME_H), Image.Resampling.BILINEAR)
+        arr = np.asarray(ycbcr, dtype=np.uint8)
+    feats = extract_tile_features_yuv(arr[:, :, 0], arr[:, :, 1], arr[:, :, 2])
+    return feats['mean_y'], feats['mean_u'], feats['mean_v'], float(feats['global_mean'])
 
 
 @dataclass
@@ -100,15 +99,17 @@ def run_folder(
         files.sort(key=lambda p: p.name)
 
     rows: list[EvalRow] = []
-    prev_tile_mean: np.ndarray | None = None
+    prev_tile_mean_y: np.ndarray | None = None
+    prev_tile_mean_u: np.ndarray | None = None
+    prev_tile_mean_v: np.ndarray | None = None
     prev_gm: float | None = None
     prev_ts: datetime | None = None
 
     for path in files:
-        tile_mean, gm = load_tile_means(path)
+        tile_mean_y, tile_mean_u, tile_mean_v, gm = load_tile_means(path)
         ts = _ts_from_name(path.name)
 
-        if prev_ts is None or prev_tile_mean is None:
+        if prev_ts is None or prev_tile_mean_y is None:
             dt = float('inf')
         else:
             dt = (ts - prev_ts).total_seconds()
@@ -120,7 +121,11 @@ def run_folder(
                     dt = float('inf')
 
         result = burst_classify(
-            tile_mean, gm, prev_tile_mean, prev_gm, dt, cfg
+            tile_mean_y, gm, prev_tile_mean_y, prev_gm, dt, cfg,
+            tile_mean_u=tile_mean_u,
+            tile_mean_v=tile_mean_v,
+            prev_tile_mean_u=prev_tile_mean_u,
+            prev_tile_mean_v=prev_tile_mean_v,
         )
         gm_diff = abs(gm - prev_gm) if prev_gm is not None else 0.0
 
@@ -138,11 +143,13 @@ def run_folder(
             mark = '✓' if rows[-1].correct else '✗'
             print(f"  {mark} {path.name:35s}  dt={dt:6.0f}s  gm={gm:6.1f}  "
                   f"Δgm={gm_diff:+6.1f}  n={result.n_changed:3d}  nd={result.n_dark:3d}  "
-                  f"blob={result.blob_max:3d}  "
+                  f"nc={result.n_chroma_changed:3d}  blob={result.blob_max:3d}  "
                   f"{result.trigger:<17s}  → {result.label}")
 
         # Always update prev from the most recently captured frame
-        prev_tile_mean = tile_mean
+        prev_tile_mean_y = tile_mean_y
+        prev_tile_mean_u = tile_mean_u
+        prev_tile_mean_v = tile_mean_v
         prev_gm = gm
         prev_ts = ts
 
@@ -166,22 +173,30 @@ def run_process_combined(
     all_files.sort()
 
     rows: list[EvalRow] = []
-    prev_tile_mean: np.ndarray | None = None
+    prev_tile_mean_y: np.ndarray | None = None
+    prev_tile_mean_u: np.ndarray | None = None
+    prev_tile_mean_v: np.ndarray | None = None
     prev_gm: float | None = None
     prev_ts: datetime | None = None
 
     for _, path in all_files:
-        tile_mean, gm = load_tile_means(path)
+        tile_mean_y, tile_mean_u, tile_mean_v, gm = load_tile_means(path)
         ts = _ts_from_name(path.name)
 
-        if prev_ts is None or prev_tile_mean is None:
+        if prev_ts is None or prev_tile_mean_y is None:
             dt = float('inf')
         else:
             dt = (ts - prev_ts).total_seconds()
             if dt < 0:
                 dt = float('inf')  # separate session ordered by mtime but reverse capture order
 
-        result = burst_classify(tile_mean, gm, prev_tile_mean, prev_gm, dt, cfg)
+        result = burst_classify(
+            tile_mean_y, gm, prev_tile_mean_y, prev_gm, dt, cfg,
+            tile_mean_u=tile_mean_u,
+            tile_mean_v=tile_mean_v,
+            prev_tile_mean_u=prev_tile_mean_u,
+            prev_tile_mean_v=prev_tile_mean_v,
+        )
         gm_diff = abs(gm - prev_gm) if prev_gm is not None else 0.0
 
         rows.append(EvalRow(
@@ -198,10 +213,12 @@ def run_process_combined(
             mark = '✓' if rows[-1].correct else '✗'
             print(f"  {mark} {path.name:35s} [{path.parent.name:25s}]  "
                   f"dt={dt:7.0f}s  gm={gm:6.1f}  Δgm={gm_diff:+6.1f}  "
-                  f"n={result.n_changed:3d}  nd={result.n_dark:3d}  blob={result.blob_max:3d}  "
-                  f"{result.trigger:<17s}  → {result.label}")
+                  f"n={result.n_changed:3d}  nd={result.n_dark:3d}  nc={result.n_chroma_changed:3d}  "
+                  f"blob={result.blob_max:3d}  {result.trigger:<17s}  → {result.label}")
 
-        prev_tile_mean = tile_mean
+        prev_tile_mean_y = tile_mean_y
+        prev_tile_mean_u = tile_mean_u
+        prev_tile_mean_v = tile_mean_v
         prev_gm = gm
         prev_ts = ts
 
