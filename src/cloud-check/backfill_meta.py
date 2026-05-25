@@ -96,7 +96,6 @@ def run_backfill(dry_run: bool = False) -> None:
     print(f"JPG folder: {JPG_FOLDER}", flush=True)
 
     # Match firmware: 3 photo-buckets × 1 scene-bucket, warmup=4.
-    # No centroid pre-seeding — the first 4 RTC frames per bucket warm the model.
     cc_cfg = Config(
         num_photo_buckets=3,
         num_scene_buckets=1,
@@ -106,6 +105,29 @@ def run_backfill(dry_run: bool = False) -> None:
     )
     burst_cfg = BurstConfig()
     bg_model = BackgroundModel(cc_cfg)
+
+    # ── Pre-seed model from corpus averages ───────────────────────────────────
+    # Starting the EMA at 128 (flat grey) means the model takes many RTC frames
+    # to converge toward the actual scene.  For buckets with few qualifying frames
+    # (especially LOWLIGHT at dusk), this leaves the model far above the real
+    # scene mean, causing hundreds of false "dark" tiles.
+    # Fix: compute the per-tile mean of all available frames per photo-bucket and
+    # use that as the initial seed.  count is NOT incremented — the cell stays in
+    # WARMUP, so the EMA still refines it from actual RTC frames.
+    _corpus_y: dict[str, list[np.ndarray]] = {}
+    for f in frames:
+        m = f.meta or {}
+        pb = m.get('photo_bucket') or _photo_bucket(m.get('global_mean', 128))
+        tm = m.get('tile_means')
+        if pb and tm and len(tm) == cc_cfg.grid_h * cc_cfg.grid_w:
+            _corpus_y.setdefault(pb, []).append(
+                np.array(tm, dtype=np.float32).reshape(cc_cfg.grid_h, cc_cfg.grid_w)
+            )
+    for pb_name, arrs in _corpus_y.items():
+        pb_idx = photo_bucket_idx(pb_name)
+        seed_y = np.stack(arrs).mean(axis=0)
+        bg_model.seed_from_corpus(pb_idx, 0, seed_y)
+        print(f"  Seeded {pb_name} model from {len(arrs)} frames (tile mean={seed_y.mean():.1f})", flush=True)
 
     # Per-cell (photo_bucket × scene_bucket) previous tile means for temporal check
     prev_tile_mean_by_cell: dict[tuple[int, int], tuple[np.ndarray, np.ndarray, np.ndarray]] = {}

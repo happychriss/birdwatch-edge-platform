@@ -52,7 +52,7 @@ class BackgroundModel:
         W = self.cfg.grid_w
         shape = (P, S, H, W)
         # Y centered at 128, U/V also at 128 (BT.601 with +128 offset). Initial mean is
-        # neutral grey for all three.
+        # neutral grey — callers should override with seed_from_corpus() before replay.
         self.mean_y = np.full(shape, 128.0, dtype=np.float32)
         self.mean_u = np.full(shape, 128.0, dtype=np.float32)
         self.mean_v = np.full(shape, 128.0, dtype=np.float32)
@@ -140,10 +140,40 @@ class BackgroundModel:
         return du * du + dv * dv
 
     def warmup_remaining(self, pb_idx: int, sb_idx: int) -> int:
+        """Frames remaining until this cell exits warmup.
+
+        Uses the actual model-update count (count[...].max()), NOT the
+        observation count (bucket_seen). A cell that only sees DUPLICATE or
+        DARK_OBJ frames never gets real background updates — keeping it in
+        WARMUP ensures the first clean frame forces an update and prevents the
+        model from being permanently stuck at the default-128 seed.
+        """
         need = self.cfg.warmup_frames_per_bucket
-        seen = int(self.bucket_seen[pb_idx, sb_idx])
-        return max(0, need - seen)
+        updated = int(self.count[pb_idx, sb_idx].max())
+        return max(0, need - updated)
 
     def reset_warmup(self, pb_idx: int, sb_idx: int) -> None:
         """Force the cell back into warmup — used after SCENE_DRIFT."""
         self.bucket_seen[pb_idx, sb_idx] = 0
+        self.count[pb_idx, sb_idx] = 0  # warmup_remaining uses count, so reset it
+
+    def seed_from_corpus(
+        self,
+        pb_idx: int,
+        sb_idx: int,
+        tile_mean_y: np.ndarray,
+        tile_mean_u: np.ndarray | None = None,
+        tile_mean_v: np.ndarray | None = None,
+    ) -> None:
+        """Directly set the model mean from a pre-computed corpus average.
+
+        Called once before the EMA replay loop in the backfill / warm_live_model
+        to replace the default-128 seed with a per-tile estimate derived from
+        historical data. Does NOT increment count — the cell starts in WARMUP and
+        EMA updates push it toward the true background from here.
+        """
+        self.mean_y[pb_idx, sb_idx] = tile_mean_y.reshape(self.cfg.grid_h, self.cfg.grid_w)
+        if tile_mean_u is not None:
+            self.mean_u[pb_idx, sb_idx] = tile_mean_u.reshape(self.cfg.grid_h, self.cfg.grid_w)
+        if tile_mean_v is not None:
+            self.mean_v[pb_idx, sb_idx] = tile_mean_v.reshape(self.cfg.grid_h, self.cfg.grid_w)

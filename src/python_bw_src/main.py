@@ -85,6 +85,27 @@ def _warm_live_model():
         loc_burst_gm = loc_burst_ts = None
         loc_tile_by_cell: dict = {}
 
+        # Pre-seed the background model from per-bucket corpus averages.
+        # Without this the model starts at 128 (flat grey) and needs many RTC
+        # frames to converge — LOWLIGHT in particular has very few qualifying
+        # frames and ends up stuck far above the real scene mean.
+        _corpus_y: dict[str, list] = {}
+        for _f in frames:
+            _m = _f.meta or {}
+            _pb = _m.get('photo_bucket')
+            _tm = _m.get('tile_means')
+            if _pb and _tm and len(_tm) == grid_size:
+                _corpus_y.setdefault(_pb, []).append(
+                    _np.array(_tm, dtype=_np.float32).reshape(_bg_cfg.grid_h, _bg_cfg.grid_w)
+                )
+        for _pb_name, _arrs in _corpus_y.items():
+            try:
+                _pb_i = _pb_idx(_pb_name)
+                _seed = _np.stack(_arrs).mean(axis=0)
+                _live_model.seed_from_corpus(_pb_i, 0, _seed)
+            except Exception:
+                pass
+
         for frame in frames:
             if not frame.meta:
                 continue
