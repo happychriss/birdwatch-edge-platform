@@ -164,6 +164,7 @@ static time_t rtc_compute_next(i2c_dev_t *rtc)
 
     setenv("TZ", BW_TZ_BERLIN, 1);
     tzset();
+    now_local.tm_isdst = -1;   // DS3231 has no DST state; let mktime determine from date
     time_t now_utc = mktime(&now_local);
     if (now_utc <= 0) {
         ESP_LOGE(TAG, "DS3231 time not set");
@@ -236,6 +237,7 @@ static void rtc_arm_alarm(i2c_dev_t *rtc, time_t next_utc)
     struct tm next_local;
     localtime_r(&next_utc, &next_local);
     ds3231_clear_alarm_flags(rtc, DS3231_ALARM_1);
+    ESP_LOGI(TAG, "DS3231 alarm 1 cleared — INT/SQW HIGH, Q1 ON, TPS22918 OFF");
     esp_err_t err = ds3231_set_alarm(rtc, DS3231_ALARM_1, &next_local,
                                      DS3231_ALARM1_MATCH_SECMINHOUR, NULL, 0);
     if (err == ESP_OK) {
@@ -402,6 +404,7 @@ static void run_normal_cycle(void)
         // Cloud-check values (result, stage, global_mean, ratio, tile_means, …) were
         // already added inside bw_cc_assess().  These three are added once here.
         bw_tele_f("battery",      (double)battery_v);
+        bw_tele_i("wifi_rssi",    bw_wifi_get_rssi());
         bw_tele_s("trigger",      trigger);
         bw_tele_s("source",       s_wakeup_source == BW_WAKE_RTC ? "rtc" : "pir");
         bw_tele_s("rtc_time",     s_rtc_now_str);

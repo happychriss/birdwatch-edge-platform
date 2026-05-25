@@ -32,6 +32,7 @@ static int                   s_retry;
 static esp_netif_t          *s_netif;
 static bool                  s_inited;
 static bw_wifi_fail_reason_t s_fail_reason = BW_WIFI_FAIL_TIMEOUT;
+static int8_t                s_rssi        = 0;
 static TimerHandle_t         s_backoff_timer;
 
 // Deferred retry called by s_backoff_timer — safe to call esp_wifi_connect() from timer task.
@@ -262,7 +263,8 @@ static esp_err_t try_connect(const uint8_t *bssid)
     if (bits & BIT_CONNECTED) {
         wifi_ap_record_t ap = {0};
         if (esp_wifi_sta_get_ap_info(&ap) == ESP_OK) {
-            ESP_LOGI(TAG, "connected  bssid=%02x:%02x:%02x:%02x:%02x:%02x  rssi=%d  ch=%d  auth=%s",
+            s_rssi = ap.rssi;
+            ESP_LOGI(TAG, "connected  bssid=%02x:%02x:%02x:%02x:%02x:%02x  rssi=%d dBm  ch=%d  auth=%s",
                      ap.bssid[0], ap.bssid[1], ap.bssid[2],
                      ap.bssid[3], ap.bssid[4], ap.bssid[5],
                      ap.rssi, ap.primary, authmode_str(ap.authmode));
@@ -338,4 +340,9 @@ void bw_wifi_get_ip(char *out, size_t out_len)
 bw_wifi_fail_reason_t bw_wifi_last_fail_reason(void)
 {
     return s_fail_reason;
+}
+
+int8_t bw_wifi_get_rssi(void)
+{
+    return s_rssi;
 }

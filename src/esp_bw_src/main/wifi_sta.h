@@ -37,3 +37,6 @@ typedef enum {
 } bw_wifi_fail_reason_t;
 
 bw_wifi_fail_reason_t bw_wifi_last_fail_reason(void);
+
+// RSSI (dBm) from the last successful connection; 0 if never connected.
+int8_t bw_wifi_get_rssi(void);
