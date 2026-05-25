@@ -70,6 +70,15 @@
 // Camera server mode auto-shutdown if /stop never arrives.
 #define BW_CAM_SERVER_TIMEOUT_MS 600000  // 10 min
 
+// ─── RTC time sync from NTP ─────────────────────────────────────────────────
+// Set to 1 to sync the DS3231 from NTP on the next boot (requires WiFi).
+// Set to 0 (normal operation) to trust the RTC as-is.
+// Workflow: set to 1 → build → flash → confirm serial log → set back to 0 → flash.
+#define BW_RTC_SYNC_FROM_NTP  0
+
+// Berlin timezone rule (CET/CEST) — used by alarm scheduling and NTP sync.
+#define BW_TZ_BERLIN  "CET-1CEST,M3.5.0,M10.5.0/3"
+
 // ─── Germany geolocation — sunrise/sunset for RTC alarm scheduling ─────────
 // Central Germany: Berlin/Frankfurt approx.  Used by solar_utc_minutes() in main.c
 // to bound periodic RTC wakeups to daylight hours only.

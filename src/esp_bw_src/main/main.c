@@ -61,52 +61,21 @@
 
 #include <i2cdev.h>
 #include <ds3231.h>
+#if BW_RTC_SYNC_FROM_NTP
 #include "esp_sntp.h"
+#endif
 
 static const char *TAG = "MAIN";
 
-// ─── DS3231 NTP sync ──────────────────────────────────────────────────────────
-// Syncs the DS3231 RTC from NTP once per week or after a firmware flash.
-// Stores Berlin local time in the RTC (Europe/Berlin = CET/CEST).
-// Tracks last-sync epoch in NVS key "rtc_sync" (namespace "bw_meta").
+// ─── DS3231 NTP sync (manual, build-time opt-in) ─────────────────────────────
+// Enabled by setting BW_RTC_SYNC_FROM_NTP 1 in config.h.
+// Fetches NTP time and writes Berlin local time to DS3231 once per boot.
+// Normal operation: BW_RTC_SYNC_FROM_NTP 0 — RTC is trusted as-is.
 
-#define BW_NTP_SERVER         "pool.ntp.org"
-#define BW_NTP_TIMEOUT_MS     10000
-#define BW_RTC_SYNC_INTERVAL  (7u * 24u * 3600u)  // seconds
-#define BW_TZ_BERLIN          "CET-1CEST,M3.5.0,M10.5.0/3"
+#if BW_RTC_SYNC_FROM_NTP
+#define BW_NTP_SERVER     "pool.ntp.org"
+#define BW_NTP_TIMEOUT_MS  10000
 
-// Returns true if DS3231 time is > 7 days past last NVS-recorded sync, or never synced.
-static bool rtc_sync_needed(bool force)
-{
-    if (force) return true;
-
-    uint32_t last_sync = 0;
-    nvs_handle_t h;
-    if (nvs_open("bw_meta", NVS_READONLY, &h) == ESP_OK) {
-        nvs_get_u32(h, "rtc_sync", &last_sync);
-        nvs_close(h);
-    }
-    if (last_sync == 0) return true;
-
-    setenv("TZ", BW_TZ_BERLIN, 1);
-    tzset();
-    bool needs = true;
-    {
-        i2c_dev_t rtc = {0};
-        if (ds3231_init_desc(&rtc, I2C_NUM_0, BW_DS3231_SDA_GPIO, BW_DS3231_SCL_GPIO) == ESP_OK) {
-            struct tm t;
-            if (ds3231_get_time(&rtc, &t) == ESP_OK) {
-                time_t ds_now = mktime(&t);
-                needs = (ds_now <= 0) || ((ds_now - (time_t)last_sync) >= (time_t)BW_RTC_SYNC_INTERVAL);
-            }
-            ds3231_free_desc(&rtc);
-        }
-    }
-    return needs;
-}
-
-// Fetches time from NTP, writes Berlin local time to DS3231, updates NVS last-sync.
-// Must be called with WiFi connected.
 static void rtc_sync_from_ntp(void)
 {
     ESP_LOGI(TAG, "DS3231 NTP sync → %s", BW_NTP_SERVER);
@@ -137,17 +106,14 @@ static void rtc_sync_from_ntp(void)
 
     i2c_dev_t rtc = {0};
     if (ds3231_init_desc(&rtc, I2C_NUM_0, BW_DS3231_SDA_GPIO, BW_DS3231_SCL_GPIO) == ESP_OK) {
-        if (ds3231_set_time(&rtc, &local_tm) == ESP_OK) {
-            nvs_handle_t h;
-            if (nvs_open("bw_meta", NVS_READWRITE, &h) == ESP_OK) {
-                nvs_set_u32(h, "rtc_sync", (uint32_t)now_utc);
-                nvs_commit(h);
-                nvs_close(h);
-            }
-        }
+        if (ds3231_set_time(&rtc, &local_tm) == ESP_OK)
+            ESP_LOGI(TAG, "DS3231 updated from NTP");
+        else
+            ESP_LOGE(TAG, "DS3231 set_time failed");
         ds3231_free_desc(&rtc);
     }
 }
+#endif /* BW_RTC_SYNC_FROM_NTP */
 
 // Compile-time build fingerprint — unique per rebuild (changes __DATE__/__TIME__).
 static const char   s_fw_build[]  = __DATE__ " " __TIME__;
@@ -181,7 +147,8 @@ static int solar_utc_minutes(int doy, bool is_sunset)
     return (int)(is_sunset ? noon + 4.0f * ha : noon - 4.0f * ha);
 }
 
-// Formatted next-wakeup time for telemetry (populated by rtc_compute_next()).
+// Formatted RTC and next-wakeup times for telemetry (populated by rtc_compute_next()).
+static char s_rtc_now_str[32]    = "?";
 static char s_next_wakeup_str[32] = "?";
 
 // Reads DS3231, computes next wakeup UTC clamped to daylight, logs the
@@ -204,6 +171,11 @@ static time_t rtc_compute_next(i2c_dev_t *rtc)
     }
     ESP_LOGI(TAG, "RTC now: %04d-%02d-%02d %02d:%02d:%02d local",
              now_local.tm_year+1900, now_local.tm_mon+1, now_local.tm_mday,
+             now_local.tm_hour, now_local.tm_min, now_local.tm_sec);
+    snprintf(s_rtc_now_str, sizeof(s_rtc_now_str),
+             "%04d-%02d-%02d %02d:%02d:%02d",
+             (now_local.tm_year+1900) % 10000,
+             now_local.tm_mon+1, now_local.tm_mday,
              now_local.tm_hour, now_local.tm_min, now_local.tm_sec);
 
     uint8_t cycle_min = BW_ALARM_CYCLE_MIN_DEFAULT;
@@ -391,9 +363,9 @@ static void run_normal_cycle(void)
     bw_blink(BW_BLINK_WIFI_OK);
     ESP_LOGI(TAG, "WiFi up");
 
-    // Sync DS3231 from NTP once per week or after a fresh flash.
-    if (rtc_sync_needed(s_fresh_flash))
-        rtc_sync_from_ntp();
+#if BW_RTC_SYNC_FROM_NTP
+    rtc_sync_from_ntp();
+#endif
 
     // Flush any errors from previous failed cycles to the server now that we
     // have connectivity.  Posted as a status row (no image) in the debug field.
@@ -432,6 +404,7 @@ static void run_normal_cycle(void)
         bw_tele_f("battery",      (double)battery_v);
         bw_tele_s("trigger",      trigger);
         bw_tele_s("source",       s_wakeup_source == BW_WAKE_RTC ? "rtc" : "pir");
+        bw_tele_s("rtc_time",     s_rtc_now_str);
         bw_tele_s("next_wakeup",  s_next_wakeup_str);
         bw_tele_s("photo_mode",   photo_mode_str);
         if (s_fresh_flash) {
