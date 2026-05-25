@@ -209,6 +209,10 @@
   <button class="btn btn-pir" onclick="location.href='/set_status?status=PIR_Sensor'">PIR Sensor</button>
   <button class="btn btn-backfill" id="btn-backfill" onclick="runBackfill(false)" title="Simulate burst+bg pipeline on old frames">Backfill old</button>
   <span id="backfill-status" style="font-size:12px;color:#556;"></span>
+  <div style="display:flex;gap:4px;">
+    <button class="view-btn active" id="btn-sim-mode" onclick="applySimEspMode('sim')" title="Show server-simulated results" style="font-size:12px;padding:6px 11px;font-weight:700;">SIM</button>
+    <button class="view-btn"        id="btn-esp-mode" onclick="applySimEspMode('esp')" title="Show raw ESP firmware results"  style="font-size:12px;padding:6px 11px;font-weight:700;">ESP</button>
+  </div>
   <div class="view-toggle">
     <button class="view-btn" id="btn-tiles" onclick="toggleAlwaysTiles()" title="Always show tile overlay">&#9783;</button>
     <button class="view-btn active" id="btn-grid" onclick="setView('grid')" title="Grid view">⊞</button>
@@ -259,6 +263,7 @@
 <div class="grid" id="photo-grid">
 {% for entry in entries %}
   {% set meta = entry.meta or {} %}
+  {% set esp_meta = meta.get('esp_meta') or {} %}
   {% set result = meta.get('result', 'unknown') %}
   {% set card_cls = 'result-' + result if result in ('clouds', 'process') else 'result-unknown' %}
 
@@ -272,7 +277,10 @@
           <img src="{{ url_for('static', filename=entry.filename) }}" loading="lazy" alt="frame"
                data-tiles="{{ meta.get('tile_means') | tojson }}"
                data-model="{{ meta.get('model_tile_means') | tojson }}"
-               data-gm="{{ meta.get('global_mean', 128) }}">
+               data-gm="{{ meta.get('global_mean', 128) }}"
+               data-tiles-esp="{{ esp_meta.get('tile_means') | tojson }}"
+               data-model-esp="{{ esp_meta.get('model_tile_means') | tojson }}"
+               data-gm-esp="{{ esp_meta.get('global_mean', 128) }}">
           <canvas class="card-tile-canvas"></canvas>
         </div>
         {% if lbl %}<span class="label-flag flag-{{ lbl }}">{{ lbl }}</span>{% endif %}
@@ -283,9 +291,15 @@
     {% endif %}
     <div class="info">
       <div class="date-text">{{ entry.captured_at.strftime("%d.%m.%y %H:%M") if entry.captured_at else '—' }}</div>
-      <div class="row">
+      <div class="row sim-badges">
         {{ render_badges(meta, spec, order) }}
       </div>
+      {% if esp_meta %}
+      <div class="row esp-badges" style="display:none">
+        <span class="badge" style="background:#e67e22;color:#fff;font-size:9px;padding:1px 4px;">ESP</span>
+        {{ render_badges(esp_meta, spec, order) }}
+      </div>
+      {% endif %}
     </div>
   </div>
 {% endfor %}
@@ -335,17 +349,41 @@ function submitFilters() {
   location.href = '/?src=' + encodeURIComponent(src) + '&lbl=' + encodeURIComponent(lbl);
 }
 
+// ── SIM/ESP mode ──────────────────────────────────────────────────────────
+let _cardMode = localStorage.getItem('bw_sim_mode') || 'sim';
+
+function applySimEspMode(mode) {
+  _cardMode = mode;
+  localStorage.setItem('bw_sim_mode', mode);
+  const btnSim = document.getElementById('btn-sim-mode');
+  const btnEsp = document.getElementById('btn-esp-mode');
+  if (btnSim) { mode === 'sim' ? btnSim.classList.add('active') : btnSim.classList.remove('active'); }
+  if (btnEsp) { mode === 'esp' ? btnEsp.classList.add('active') : btnEsp.classList.remove('active'); }
+  document.querySelectorAll('.sim-badges').forEach(el => { el.style.display = mode === 'sim' ? '' : 'none'; });
+  document.querySelectorAll('.esp-badges').forEach(el => { el.style.display = mode === 'esp' ? '' : 'none'; });
+  if (document.getElementById('photo-grid').classList.contains('always-tiles')) {
+    document.querySelectorAll('.card-img-wrap').forEach(wrap => {
+      const img = wrap.querySelector('img');
+      const canvas = wrap.querySelector('canvas');
+      if (img && canvas) drawCardTiles(img, canvas);
+    });
+  }
+}
+
 // ── Always-tiles toggle ───────────────────────────────────────────────────
 const TILE_COLS = 20, TILE_ROWS = 15;
 const DARK_DELTA = 20;
 
 function drawCardTiles(img, canvas) {
-  const tilesRaw = img.getAttribute('data-tiles');
+  const useEsp = (_cardMode === 'esp');
+  const tilesAttr = useEsp ? 'data-tiles-esp' : 'data-tiles';
+  const tilesRaw = img.getAttribute(tilesAttr);
   if (!tilesRaw || tilesRaw === 'null') return;
   let tiles; try { tiles = JSON.parse(tilesRaw); } catch(e) { return; }
-  const modelRaw = img.getAttribute('data-model');
-  let model = null; try { model = modelRaw ? JSON.parse(modelRaw) : null; } catch(e) {}
-  const gm = parseFloat(img.getAttribute('data-gm') || '128');
+  const modelAttr = useEsp ? 'data-model-esp' : 'data-model';
+  const modelRaw = img.getAttribute(modelAttr);
+  let model = null; try { model = modelRaw && modelRaw !== 'null' ? JSON.parse(modelRaw) : null; } catch(e) {}
+  const gm = parseFloat(img.getAttribute(useEsp ? 'data-gm-esp' : 'data-gm') || '128');
   const w = img.offsetWidth, h = img.offsetHeight;
   if (!w || !h) return;
   canvas.width = w; canvas.height = h;
@@ -404,6 +442,7 @@ function toggleAlwaysTiles() {
 }
 
 (function(){ if (localStorage.getItem('bw_always_tiles') === '1') applyAlwaysTiles(true); })();
+(function(){ applySimEspMode(_cardMode); })();
 
 function openPhoto(url, label, saved) {
   if (!url) return;

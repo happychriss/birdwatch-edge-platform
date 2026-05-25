@@ -203,7 +203,7 @@
       {% else %}
         <span class="nav-btn disabled">next &#8594;</span>
       {% endif %}
-      {% if entry.meta and entry.meta.get('tile_means') %}
+      {% if entry.meta and (entry.meta.get('tile_means') or (entry.meta.get('esp_meta') or {}).get('tile_means')) %}
       <button class="nav-btn" id="btn-tiles" onclick="toggleTiles()">&#9783; Tiles</button>
       {% endif %}
       {% if entry.meta and entry.meta.get('esp_meta') %}
@@ -319,18 +319,40 @@ const MODEL_TILE_MEANS = {{ model_tile_means | tojson }};
 const GLOBAL_MEAN      = {{ (entry.meta.get('global_mean', 128) if entry.meta else 128) | tojson }};
 const DARK_TILES_COUNT = {{ (entry.meta.get('dark_tiles', 0) if entry.meta else 0) | tojson }};
 const NEW_DARK_COUNT   = {{ (entry.meta.get('new_dark_tiles', 0) if entry.meta else 0) | tojson }};
+
+// ESP raw tile data (null when esp_meta absent)
+{% set _esp = (entry.meta.get('esp_meta') or {}) if entry.meta else {} %}
+const TILE_MEANS_ESP       = {{ _esp.get('tile_means') | tojson }};
+const MODEL_TILE_MEANS_ESP = {{ _esp.get('model_tile_means') | tojson }};
+const GLOBAL_MEAN_ESP      = {{ _esp.get('global_mean', 128) | tojson }};
+
+// Active SIM/ESP mode — read from global preference stored in localStorage
+let _activeMode = localStorage.getItem('bw_sim_mode') || 'sim';
+
 // 20×15 = 300 tiles (current firmware), 16×12 = 192 (legacy)
-const TILE_COLS = (TILE_MEANS && TILE_MEANS.length === 192) ? 16 : 20;
-const TILE_ROWS = (TILE_MEANS && TILE_MEANS.length === 192) ? 12 : 15;
+const _refTiles = TILE_MEANS || TILE_MEANS_ESP;
+const TILE_COLS = (_refTiles && _refTiles.length === 192) ? 16 : 20;
+const TILE_ROWS = (_refTiles && _refTiles.length === 192) ? 12 : 15;
 const DARK_DELTA_MODEL = 20;   // matches CC_DARK_DELTA_MODEL in firmware and config.py
 const DARK_DELTA_PREV  = 20;   // matches CC_DARK_DELTA_PREV
 
 let tilesOn = false;
 
+function _getActiveTileData() {
+  const useSim = (_activeMode !== 'esp') || !TILE_MEANS_ESP;
+  return {
+    tiles:  useSim ? TILE_MEANS       : TILE_MEANS_ESP,
+    model:  useSim ? MODEL_TILE_MEANS : MODEL_TILE_MEANS_ESP,
+    gm:     useSim ? GLOBAL_MEAN      : GLOBAL_MEAN_ESP,
+    prev:   useSim ? PREV_TILE_MEANS  : null,
+  };
+}
+
 function drawTiles() {
+  const {tiles, model: modelArr, gm, prev: prevArr} = _getActiveTileData();
   const img    = document.getElementById('frame-img');
   const canvas = document.getElementById('tile-canvas');
-  if (!img || !canvas || !TILE_MEANS) return;
+  if (!img || !canvas || !tiles) return;
   const w = img.offsetWidth, h = img.offsetHeight;
   if (!w || !h) return;
   canvas.width  = w;
@@ -340,16 +362,16 @@ function drawTiles() {
   const tw = w / TILE_COLS, th = h / TILE_ROWS;
   // Font sized so 3 lines fit vertically in each tile
   const fs = Math.max(6, Math.min(9, Math.floor(th / 4.2)));
-  const hasPrev  = PREV_TILE_MEANS  && PREV_TILE_MEANS.length  === TILE_MEANS.length;
-  const hasModel = MODEL_TILE_MEANS && MODEL_TILE_MEANS.length === TILE_MEANS.length;
+  const hasPrev  = prevArr  && prevArr.length  === tiles.length;
+  const hasModel = modelArr && modelArr.length === tiles.length;
 
   for (let row = 0; row < TILE_ROWS; row++) {
     for (let col = 0; col < TILE_COLS; col++) {
       const idx      = row * TILE_COLS + col;
-      const val      = TILE_MEANS[idx];
-      const modelRef = hasModel ? MODEL_TILE_MEANS[idx] : GLOBAL_MEAN;
+      const val      = tiles[idx];
+      const modelRef = hasModel ? modelArr[idx] : gm;
       const dModel   = val - modelRef;   // negative = tile darker than model/global (z uses this)
-      const dPrev    = hasPrev ? val - PREV_TILE_MEANS[idx] : null;
+      const dPrev    = hasPrev ? val - prevArr[idx] : null;
       const darkDelta = modelRef - val;  // positive = tile darker than model → drives red fill
       const x = col * tw, y = row * th;
 
@@ -419,8 +441,11 @@ function toggleTiles() {
 
 window.addEventListener('resize', function() { if (tilesOn) drawTiles(); });
 
+// Initialize view from global preference before tiles are drawn
+if (_activeMode !== 'sim') setView(_activeMode);
+
 // Tiles on by default — wait for image to be loaded so offsetWidth/Height are valid
-if (TILE_MEANS) {
+if (_refTiles) {
   const _img = document.getElementById('frame-img');
   if (_img) {
     if (_img.complete && _img.naturalWidth) { toggleTiles(); }
@@ -433,7 +458,8 @@ const _tooltip = document.getElementById('tile-tooltip');
 const _imgWrap = document.getElementById('img-wrap');
 if (_imgWrap) {
   _imgWrap.addEventListener('mousemove', function(e) {
-    if (!tilesOn || !TILE_MEANS) { _tooltip.style.display = 'none'; return; }
+    const {tiles: _tt, model: _tm, gm: _tgm, prev: _tp} = _getActiveTileData();
+    if (!tilesOn || !_tt) { _tooltip.style.display = 'none'; return; }
     const img  = document.getElementById('frame-img');
     const rect = img.getBoundingClientRect();
     const x = e.clientX - rect.left, y = e.clientY - rect.top;
@@ -443,19 +469,20 @@ if (_imgWrap) {
     const col = Math.min(TILE_COLS - 1, Math.floor(x / rect.width  * TILE_COLS));
     const row = Math.min(TILE_ROWS - 1, Math.floor(y / rect.height * TILE_ROWS));
     const idx = row * TILE_COLS + col;
-    const val = TILE_MEANS[idx];
+    const val = _tt[idx];
     const sign = v => (v >= 0 ? '+' : '') + Math.round(v);
-    const hasM = MODEL_TILE_MEANS && MODEL_TILE_MEANS.length === TILE_MEANS.length;
-    const modelRef = hasM ? MODEL_TILE_MEANS[idx] : GLOBAL_MEAN;
+    const hasM = _tm && _tm.length === _tt.length;
+    const modelRef = hasM ? _tm[idx] : _tgm;
     const dModel = val - modelRef;
     const darkObj = (modelRef - val) >= DARK_DELTA_MODEL;
+    const modeTag = _activeMode === 'esp' ? ' [ESP]' : '';
     let lines = [
-      `tile [${row},${col}]   DN: ${Math.round(val)}`,
+      `tile [${row},${col}]   DN: ${Math.round(val)}${modeTag}`,
       `Δ ${hasM ? 'model' : 'global'}: ${sign(dModel)}  (${dModel >= 0 ? 'brighter' : 'darker'} than ${hasM ? 'bg model' : 'scene avg'})${darkObj ? '  ★ DARK_OBJ' : ''}`,
     ];
-    if (PREV_TILE_MEANS && PREV_TILE_MEANS.length === TILE_MEANS.length) {
-      const dPrev = val - PREV_TILE_MEANS[idx];
-      const newDark = (PREV_TILE_MEANS[idx] - val) >= DARK_DELTA_PREV;
+    if (_tp && _tp.length === _tt.length) {
+      const dPrev = val - _tp[idx];
+      const newDark = (_tp[idx] - val) >= DARK_DELTA_PREV;
       lines.push(`Δ prev:    ${sign(dPrev)}  (${dPrev >= 0 ? 'brighter' : 'darker'})${newDark ? '  ★ new dark' : ''}`);
     }
     lines.push(`─── frame dark_tiles: ${DARK_TILES_COUNT}  new_dark: ${NEW_DARK_COUNT}`);
@@ -519,7 +546,8 @@ function setView(mode) {
   const espTable  = document.getElementById('view-esp-table');
   const btnSim    = document.getElementById('btn-view-sim');
   const btnEsp    = document.getElementById('btn-view-esp');
-  if (!espBadges) return;  // no esp_meta present
+  // If this frame has no esp_meta, silently fall back to sim
+  if (mode === 'esp' && !espBadges) mode = 'sim';
   const showSim = (mode === 'sim');
   if (simBadges) simBadges.style.display = showSim ? '' : 'none';
   if (simTable)  simTable.style.display  = showSim ? '' : 'none';
@@ -527,6 +555,9 @@ function setView(mode) {
   if (espTable)  espTable.style.display  = showSim ? 'none' : '';
   if (btnSim) { btnSim.style.background = showSim ? '#d5f5e3' : ''; btnSim.style.color = showSim ? '#1e8449' : ''; btnSim.style.borderColor = showSim ? '#a5d6a7' : ''; }
   if (btnEsp) { btnEsp.style.background = showSim ? '' : '#fde8d8'; btnEsp.style.color = showSim ? '' : '#c0392b'; btnEsp.style.borderColor = showSim ? '' : '#e59866'; }
+  _activeMode = mode;
+  localStorage.setItem('bw_sim_mode', mode);
+  if (tilesOn) drawTiles();
 }
 
 // ── Keyboard ──────────────────────────────────────────────────────────────────
@@ -542,7 +573,7 @@ document.addEventListener('keydown', function(e) {
   if (e.key === 'ArrowLeft'  && _prevUrl) { location.href = _prevUrl; return; }
   if (e.key === 'ArrowRight' && _nextUrl) { location.href = _nextUrl; return; }
   if (e.key === 'Escape') { location.href = '/'; return; }
-  if (e.key === 't' || e.key === 'T') { if (TILE_MEANS) toggleTiles(); return; }
+  if (e.key === 't' || e.key === 'T') { if (_refTiles) toggleTiles(); return; }
 
   if (e.key === ' ') {
     e.preventDefault();
