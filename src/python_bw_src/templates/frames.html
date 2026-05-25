@@ -267,7 +267,7 @@
     {% if entry.filename %}
       {% set lbl = meta.get('label') %}
       {% set dl  = meta.get('downloaded_at') %}
-      <a href="/frame_detail?id={{ entry.id }}" style="position:relative;display:block;">
+      <a href="/frame_detail?id={{ entry.id }}&src={{ src_param }}&lbl={{ lbl_param }}" style="position:relative;display:block;">
         <div class="card-img-wrap">
           <img src="{{ url_for('static', filename=entry.filename) }}" loading="lazy" alt="frame"
                data-tiles="{{ meta.get('tile_means') | tojson }}"

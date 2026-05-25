@@ -123,19 +123,22 @@ def run_backfill(dry_run: bool = False) -> None:
         meta = dict(frame.meta or {})
 
         # ── Feature extraction ────────────────────────────────────────────────
-        # Prefer stored tile_means_y/u/v from DB (written by firmware or prev backfill).
-        # Falls back to JPEG decode from local disk or HTTP.
+        # Use stored tile_means_y/u/v from DB only when they come from the new
+        # SXGA firmware (presence of tile_means_u confirms new firmware — old
+        # firmware emitted only Y from a QQVGA lightcheck that was often
+        # overexposed at noon, making its values unreliable for model analysis).
+        # If only Y is present (old firmware), fall through to JPEG decode so
+        # the backfill always works in the correct SXGA pixel space.
         esp_tm_y = meta.get('tile_means')
         esp_tm_u = meta.get('tile_means_u')
         esp_tm_v = meta.get('tile_means_v')
         expected_tiles = cc_cfg.grid_h * cc_cfg.grid_w
+        has_yuv = (esp_tm_y and isinstance(esp_tm_y, list) and len(esp_tm_y) == expected_tiles
+                   and esp_tm_u and isinstance(esp_tm_u, list) and len(esp_tm_u) == expected_tiles)
 
-        if esp_tm_y and isinstance(esp_tm_y, list) and len(esp_tm_y) == expected_tiles:
+        if has_yuv:
             tile_mean_y = np.array(esp_tm_y, dtype=np.float32).reshape(cc_cfg.grid_h, cc_cfg.grid_w)
-            tile_mean_u = (
-                np.array(esp_tm_u, dtype=np.float32).reshape(cc_cfg.grid_h, cc_cfg.grid_w)
-                if esp_tm_u and len(esp_tm_u) == expected_tiles else None
-            )
+            tile_mean_u = np.array(esp_tm_u, dtype=np.float32).reshape(cc_cfg.grid_h, cc_cfg.grid_w)
             tile_mean_v = (
                 np.array(esp_tm_v, dtype=np.float32).reshape(cc_cfg.grid_h, cc_cfg.grid_w)
                 if esp_tm_v and len(esp_tm_v) == expected_tiles else None

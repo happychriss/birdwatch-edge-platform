@@ -28,11 +28,25 @@ _live_ready  = False
 _live_model  = None
 _live_lock   = threading.Lock()
 _bg_cfg      = None
+_burst_cfg   = None
+
+# Burst filter live state — all guarded by _live_lock
+_prev_burst_y:  object = None   # np.ndarray | None
+_prev_burst_u:  object = None
+_prev_burst_v:  object = None
+_prev_burst_gm: object = None   # float | None
+_prev_burst_ts: object = None   # datetime | None
+_prev_tile_by_cell: dict = {}   # (pb, sb) -> (y_arr, u_arr, v_arr)
+
+_BURST_SUPPRESS_STAGES = frozenset({'DUPLICATE', 'BRIGHT_STABLE'})
 
 try:
     import numpy as _np
     from cloud_check.background import BackgroundModel as _BackgroundModel, photo_bucket_idx as _pb_idx
     from cloud_check.config import Config as _BgConfig
+    from cloud_check.burst_filter import BurstConfig as _BurstConfig, burst_classify as _burst_classify
+    from cloud_check.classifier import classify as _classify
+    from cloud_check.features import load_yuv_vga as _load_yuv_vga, extract_tile_features_yuv as _extract_tile_features_yuv
     _bg_cfg     = _BgConfig(
         num_photo_buckets=3,
         num_scene_buckets=1,
@@ -41,6 +55,7 @@ try:
         warmup_frames_per_bucket=4,
     )
     _live_model = _BackgroundModel(_bg_cfg)
+    _burst_cfg  = _BurstConfig()
     _LIVE_OK    = True
     print("[live_model] cloud_check loaded OK", flush=True)
 except Exception as _import_exc:
@@ -54,8 +69,9 @@ def _should_update(meta: dict) -> bool:
 
 
 def _warm_live_model():
-    """Replay tile_means from DB in chronological order to reconstruct bg model state."""
-    global _live_ready
+    """Replay tile_means from DB in chronological order to reconstruct bg model + burst state."""
+    global _live_ready, _prev_burst_y, _prev_burst_u, _prev_burst_v
+    global _prev_burst_gm, _prev_burst_ts, _prev_tile_by_cell
     if not _LIVE_OK:
         return
     try:
@@ -65,6 +81,10 @@ def _warm_live_model():
                   .all())
         n = 0
         grid_size = _bg_cfg.grid_h * _bg_cfg.grid_w
+        loc_burst_y = loc_burst_u = loc_burst_v = None
+        loc_burst_gm = loc_burst_ts = None
+        loc_tile_by_cell: dict = {}
+
         for frame in frames:
             if not frame.meta:
                 continue
@@ -90,13 +110,69 @@ def _warm_live_model():
                     _live_model.update(pb, sb, arr_y, arr_u, arr_v)
                 if meta.get('stage') == 'SCENE_DRIFT' and meta.get('source') == 'rtc':
                     _live_model.reset_warmup(pb, sb)
+
+            # Track burst state for all frames
+            loc_burst_y  = arr_y
+            loc_burst_u  = arr_u
+            loc_burst_v  = arr_v
+            loc_burst_gm = float(gm)
+            loc_burst_ts = frame.captured_at
+
+            # Track prev_tile_by_cell for non-burst-suppressed frames
+            burst_trig = meta.get('burst_trigger', '')
+            if burst_trig not in _BURST_SUPPRESS_STAGES:
+                loc_tile_by_cell[(pb, sb)] = (arr_y, arr_u, arr_v)
+
             n += 1
+
+        # Publish final burst state atomically
+        with _live_lock:
+            _prev_burst_y  = loc_burst_y
+            _prev_burst_u  = loc_burst_u
+            _prev_burst_v  = loc_burst_v
+            _prev_burst_gm = loc_burst_gm
+            _prev_burst_ts = loc_burst_ts
+            _prev_tile_by_cell = loc_tile_by_cell
+
         _live_ready = True
         print(f"[live_model] warmed up on {n} frames", flush=True)
     except Exception as exc:
         print(f"[live_model] warmup error: {exc}", flush=True)
     finally:
         Session.remove()  # remove thread-local session from scoped_session registry
+
+
+def _get_tile_features(meta: dict, jpg_path) -> 'tuple':
+    """Extract (arr_y, arr_u, arr_v, gm) from ESP meta or by decoding the JPEG.
+
+    Prefers ESP-provided YUV tile means (new firmware, tile_means_u present).
+    Falls back to JPEG decode so old-firmware frames still get server-side analysis.
+    Returns (None, None, None, None) on failure.
+    """
+    gsz = _bg_cfg.grid_h * _bg_cfg.grid_w
+    esp_y = meta.get('tile_means')
+    esp_u = meta.get('tile_means_u')
+    esp_v = meta.get('tile_means_v')
+
+    if (esp_y and isinstance(esp_y, list) and len(esp_y) == gsz
+            and esp_u and isinstance(esp_u, list) and len(esp_u) == gsz):
+        arr_y = _np.array(esp_y, dtype=_np.float32).reshape(_bg_cfg.grid_h, _bg_cfg.grid_w)
+        arr_u = _np.array(esp_u, dtype=_np.float32).reshape(_bg_cfg.grid_h, _bg_cfg.grid_w)
+        arr_v = (_np.array(esp_v, dtype=_np.float32).reshape(_bg_cfg.grid_h, _bg_cfg.grid_w)
+                 if esp_v and isinstance(esp_v, list) and len(esp_v) == gsz else None)
+        gm = int(float(arr_y.mean()))
+        return arr_y, arr_u, arr_v, gm
+
+    from pathlib import Path as _Path
+    p = _Path(jpg_path) if not hasattr(jpg_path, 'exists') else jpg_path
+    if p.exists():
+        try:
+            y_arr, u_arr, v_arr = _load_yuv_vga(p)
+            feats = _extract_tile_features_yuv(y_arr, u_arr, v_arr)
+            return feats['mean_y'], feats['mean_u'], feats['mean_v'], feats['global_mean']
+        except Exception:
+            pass
+    return None, None, None, None
 
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -421,6 +497,7 @@ def process_frame_upload():
     'captured_at' are promoted to columns for fast filtering.
     """
     global global_status
+    global _prev_burst_y, _prev_burst_u, _prev_burst_v, _prev_burst_gm, _prev_burst_ts
     try:
         image = request.files.get('image')
         if not image:
@@ -457,6 +534,9 @@ def process_frame_upload():
         except (json.JSONDecodeError, ValueError):
             meta = {}
 
+        # Snapshot raw ESP payload before any server-side modification
+        esp_meta = dict(meta)
+
         captured_at_str = meta.get('captured_at')
         if captured_at_str:
             try:
@@ -466,36 +546,123 @@ def process_frame_upload():
         else:
             captured_at = datetime.now()
 
-        result = meta.get('result')
+        # ── Server-side pipeline (shadow mode) ───────────────────────────────
+        # Re-run burst + background-model classification using the live Python model.
+        # Overwrites algorithm fields in meta; preserves manual/external fields.
+        # Raw ESP values are preserved under meta['esp_meta'] for comparison.
+        if _LIVE_OK and _live_ready:
+            arr_y, arr_u, arr_v, gm = _get_tile_features(meta, file_path)
+            if arr_y is not None:
+                try:
+                    with _live_lock:
+                        # dt since previous burst frame
+                        dt = float('inf')
+                        if _prev_burst_ts is not None and captured_at is not None:
+                            dt = max(0.0, (captured_at - _prev_burst_ts).total_seconds())
 
-        # Inject server-computed model_tile_means when ESP hasn't sent it yet.
-        # Once the ESP firmware is updated to emit model_tile_means, this branch
-        # is skipped ('model_tile_means' already in meta).
-        if _LIVE_OK and _live_ready and 'model_tile_means' not in meta:
-            _tm_y = meta.get('tile_means')
-            _gsz  = _bg_cfg.grid_h * _bg_cfg.grid_w
-            if _tm_y and len(_tm_y) == _gsz:
-                _arr_y = _np.array(_tm_y, dtype=_np.float32).reshape(
-                             _bg_cfg.grid_h, _bg_cfg.grid_w)
-                _tm_u  = meta.get('tile_means_u')
-                _arr_u = (_np.array(_tm_u, dtype=_np.float32).reshape(_bg_cfg.grid_h, _bg_cfg.grid_w)
-                          if _tm_u and len(_tm_u) == _gsz else None)
-                _tm_v  = meta.get('tile_means_v')
-                _arr_v = (_np.array(_tm_v, dtype=_np.float32).reshape(_bg_cfg.grid_h, _bg_cfg.grid_w)
-                          if _tm_v and len(_tm_v) == _gsz else None)
-                _gm = meta.get('global_mean', int(_arr_y.mean()))
-                with _live_lock:
-                    _pb_name = _live_model.photo_bucket_for(_gm)
-                    _pb = _pb_idx(_pb_name)
-                    _sb = _live_model.scene_bucket_for(_pb, _arr_y)
-                    _live_model.observe(_pb, _sb)
-                    # Snapshot BEFORE update — mirrors what z-scores were computed from
-                    _snap = _live_model.mean_y[_pb, _sb].flatten().round().astype(int).tolist()
-                    if _should_update(meta):
-                        _live_model.update(_pb, _sb, _arr_y, _arr_u, _arr_v)
-                    if meta.get('stage') == 'SCENE_DRIFT' and meta.get('source') == 'rtc':
-                        _live_model.reset_warmup(_pb, _sb)
-                meta['model_tile_means'] = _snap
+                        burst = _burst_classify(
+                            arr_y, float(gm),
+                            _prev_burst_y, _prev_burst_gm,
+                            dt, _burst_cfg,
+                            tile_mean_u=arr_u, tile_mean_v=arr_v,
+                            prev_tile_mean_u=_prev_burst_u, prev_tile_mean_v=_prev_burst_v,
+                        )
+
+                        pb_name = _live_model.photo_bucket_for(gm)
+                        pb = _pb_idx(pb_name)
+                        sb = _live_model.scene_bucket_for(pb, arr_y)
+                        prev_cell = _prev_tile_by_cell.get((pb, sb))
+                        bg_prev_y = prev_cell[0] if prev_cell is not None else None
+                        was_warmup = _live_model.warmup_remaining(pb, sb) > 0
+                        _live_model.observe(pb, sb)
+
+                        # Snapshot model BEFORE update (drives tile overlay Δm display)
+                        snap_y = _live_model.mean_y[pb, sb].flatten().round().astype(int).tolist()
+                        snap_u = _live_model.mean_u[pb, sb].flatten().round().astype(int).tolist()
+                        snap_v = _live_model.mean_v[pb, sb].flatten().round().astype(int).tolist()
+
+                        burst_suppresses = (burst.label == 'suppress'
+                                            and burst.trigger in _BURST_SUPPRESS_STAGES)
+                        if burst_suppresses:
+                            srv_result = 'clouds'
+                            srv_stage  = burst.trigger
+                            bg_pred    = None
+                        else:
+                            bg_pred = _classify(
+                                arr_y, _live_model, _bg_cfg,
+                                prev_tile_mean=bg_prev_y,
+                                tile_mean_u=arr_u, tile_mean_v=arr_v,
+                            )
+                            srv_result = bg_pred.label
+                            srv_stage  = bg_pred.trigger
+
+                            source = meta.get('source')
+                            if source == 'rtc' and (
+                                was_warmup
+                                or bg_pred.label == 'clouds'
+                                or bg_pred.trigger in ('SCENE_DRIFT', 'NIGHT')
+                            ):
+                                _live_model.update(pb, sb, arr_y, arr_u, arr_v)
+                            if bg_pred.trigger == 'SCENE_DRIFT' and source == 'rtc':
+                                _live_model.reset_warmup(pb, sb)
+                            _prev_tile_by_cell[(pb, sb)] = (arr_y, arr_u, arr_v)
+
+                        # Advance burst state for next frame
+                        _prev_burst_y  = arr_y
+                        _prev_burst_u  = arr_u
+                        _prev_burst_v  = arr_v
+                        _prev_burst_gm = float(gm)
+                        _prev_burst_ts = captured_at
+
+                    # Build server-computed fields
+                    new_fields: dict = {
+                        'tile_means':         arr_y.flatten().round().astype(int).tolist(),
+                        'model_tile_means':   snap_y,
+                        'model_tile_means_u': snap_u,
+                        'model_tile_means_v': snap_v,
+                        'global_mean':        int(gm),
+                        'photo_bucket':       pb_name,
+                        'result':             srv_result,
+                        'stage':              srv_stage,
+                        'warmup':             bool(was_warmup),
+                        'prev_valid':         bool(prev_cell is not None),
+                        'burst_trigger':      burst.trigger,
+                        'burst_label':        burst.label,
+                        'burst_gm_diff':      round(burst.gm_diff, 1),
+                        'burst_n_changed':    int(burst.n_changed),
+                        'burst_n_dark':       int(burst.n_dark),
+                        'burst_n_chroma':     int(burst.n_chroma_changed),
+                        'simulated':          True,
+                    }
+                    if arr_u is not None:
+                        new_fields['tile_means_u'] = arr_u.flatten().round().astype(int).tolist()
+                    if arr_v is not None:
+                        new_fields['tile_means_v'] = arr_v.flatten().round().astype(int).tolist()
+                    if bg_pred is not None:
+                        new_fields.update({
+                            'ratio':           round(float(bg_pred.anomaly_ratio), 3),
+                            'new_dark_tiles':  int(bg_pred.new_dark_tiles),
+                            'dark_anomalous':  int(bg_pred.anomaly_mask.sum()),
+                            'dark_tiles':      int(bg_pred.dark_tiles),
+                            'dark_blob_max':   int(bg_pred.dark_blob_max),
+                            'scene_bucket':    int(bg_pred.scene_bucket),
+                            'n_chroma_changed': int(bg_pred.n_chroma_changed),
+                        })
+                    else:
+                        new_fields.update({
+                            'ratio': 0.0, 'new_dark_tiles': 0,
+                            'dark_anomalous': 0, 'dark_tiles': 0, 'dark_blob_max': 0,
+                        })
+
+                    # Merge: server values overwrite ESP values; preserve manual keys
+                    meta = {**meta, **new_fields}
+                    print(f"[sim] {filename} burst={burst.trigger} bg={srv_stage} result={srv_result}",
+                          flush=True)
+                except Exception as _pipe_exc:
+                    print(f"[sim] pipeline error for {filename}: {_pipe_exc}", flush=True)
+
+        meta['esp_meta'] = esp_meta   # always store raw ESP snapshot
+        result = meta.get('result')
 
         frame = BwFrame(
             captured_at=captured_at,
@@ -618,6 +785,8 @@ def frames_index():
 
 @app.route('/frame_detail')
 def frame_detail():
+    from sqlalchemy import or_, and_, false as sql_false
+
     entry_id = request.args.get('id', type=int)
     if entry_id is None:
         return redirect('/frames')
@@ -626,12 +795,48 @@ def frame_detail():
     if not entry:
         return "Not found", 404
 
-    prev_entry = (session.query(BwFrame)
-                  .filter(BwFrame.id < entry_id)
-                  .order_by(BwFrame.id.desc()).first())
-    next_entry = (session.query(BwFrame)
-                  .filter(BwFrame.id > entry_id)
-                  .order_by(BwFrame.id.asc()).first())
+    # Respect gallery filter params so prev/next stays within the filtered set
+    src_param = request.args.get('src', 'pir,rtc')
+    lbl_param = request.args.get('lbl', 'bird,ignore,special,cloud,none')
+    src_active = set(src_param.split(',')) if src_param else {'pir', 'rtc'}
+    lbl_active = set(lbl_param.split(',')) if lbl_param else {'bird', 'ignore', 'special', 'cloud', 'none'}
+
+    def _apply_filters(q):
+        show_pir = 'pir' in src_active
+        show_rtc = 'rtc' in src_active
+        if not (show_pir and show_rtc):
+            if not show_pir and not show_rtc:
+                q = q.filter(sql_false())
+            elif show_pir:
+                q = q.filter(or_(BwFrame.meta['source'].astext == 'pir',
+                                 BwFrame.meta['source'].astext.is_(None)))
+            else:
+                q = q.filter(BwFrame.meta['source'].astext == 'rtc')
+
+        all_lbl = lbl_active >= {'bird', 'ignore', 'special', 'cloud', 'none'}
+        if not all_lbl:
+            clauses = []
+            if 'cloud' in lbl_active:
+                clauses.append(BwFrame.result == 'clouds')
+            proc = []
+            if 'bird'    in lbl_active: proc.append(BwFrame.meta['label'].astext == 'bird')
+            if 'ignore'  in lbl_active: proc.append(BwFrame.meta['label'].astext == 'ignore')
+            if 'special' in lbl_active: proc.append(BwFrame.meta['label'].astext == 'special')
+            if 'none'    in lbl_active: proc.append(and_(BwFrame.meta['label'].astext.is_(None), BwFrame.result != 'clouds'))
+            if proc:
+                clauses.append(or_(*proc))
+            q = q.filter(or_(*clauses)) if clauses else q.filter(sql_false())
+        return q
+
+    prev_q = _apply_filters(session.query(BwFrame).filter(BwFrame.id < entry_id))
+    next_q = _apply_filters(session.query(BwFrame).filter(BwFrame.id > entry_id))
+    prev_entry = prev_q.order_by(BwFrame.id.desc()).first()
+    next_entry = next_q.order_by(BwFrame.id.asc()).first()
+
+    # Filter suffix to append to prev/next nav URLs
+    filter_qs = ''
+    if src_param != 'pir,rtc' or lbl_param != 'bird,ignore,special,cloud,none':
+        filter_qs = f'&src={src_param}&lbl={lbl_param}'
 
     time_diff = None
     if prev_entry and entry.captured_at and prev_entry.captured_at:
@@ -650,6 +855,7 @@ def frame_detail():
                            entry=entry,
                            prev_id=prev_entry.id if prev_entry else None,
                            next_id=next_entry.id if next_entry else None,
+                           filter_qs=filter_qs,
                            time_diff=time_diff,
                            spec=DISPLAY_SPEC,
                            order=DISPLAY_ORDER,

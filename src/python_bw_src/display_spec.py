@@ -184,6 +184,12 @@ DISPLAY_SPEC: dict = {
         "type": "hide_values",
         "hide_values": ["Boot", "PIR", "Timer", "Camera Start", "Camera Stop"],
     },
+    # Raw ESP payload stored on every /frame upload for SIM vs ESP comparison.
+    # Rendered as a collapsible block; the frame_detail toggle uses it directly.
+    "esp_meta": {
+        "type": "detail_only",
+        "desc": "Raw ESP payload snapshot (before server-side reprocessing). View with the ESP toggle button above.",
+    },
 }
 
 # Key display order for the card info panel (unlisted keys are appended after).

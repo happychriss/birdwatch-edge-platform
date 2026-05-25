@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>BirdWatch — parity validation</title>
+<title>BirdWatch — Validate</title>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body { background: #eef2f7; color: #2c3e50; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; font-size: 13px; }
@@ -104,14 +104,23 @@
 <!-- ── Header ── -->
 <header>
   <a class="back-btn" href="/">&#8592; Back</a>
-  <span class="header-title">Parity Validation</span>
+  <span class="header-title">Validate — last 24 h</span>
 </header>
 
 <div class="controls">
-  <button class="btn btn-run" id="run-btn" onclick="runValidation()">&#9654; Run validation</button>
+  <button class="btn btn-run" id="run-btn" onclick="runValidation()">&#9654; Run</button>
   <span class="status-msg {% if running %}status-running{% endif %}" id="status-msg">
     {% if running %}running…{% elif results %}last run: {{ results | length }} frame(s) checked{% else %}not yet run{% endif %}
   </span>
+  <!-- Result-type filter (client-side) -->
+  {% if results and not (results | selectattr('error', 'defined') | list) %}
+  <span style="margin-left:auto;display:flex;gap:6px;align-items:center;font-size:12px;color:#556;">
+    <span>Show:</span>
+    <button class="btn" id="filt-all"     onclick="setResultFilter('all')"     style="padding:4px 10px;font-size:12px;min-height:0;background:#1a6fa8;color:#fff;border-color:#1a6fa8;">All</button>
+    <button class="btn" id="filt-process" onclick="setResultFilter('process')" style="padding:4px 10px;font-size:12px;min-height:0;">Process</button>
+    <button class="btn" id="filt-clouds"  onclick="setResultFilter('clouds')"  style="padding:4px 10px;font-size:12px;min-height:0;">Clouds</button>
+  </span>
+  {% endif %}
 </div>
 
 {% if results %}
@@ -143,19 +152,21 @@
         <tbody>
           {% for r in results %}
           {% set has_mm = r.mismatches | length > 0 %}
-          <tr class="frame-sep {{ 'frame-fail' if has_mm else 'frame-ok' }}">
+          {% set r_result = r.get('result', '') %}
+          <tr class="frame-sep {{ 'frame-fail' if has_mm else 'frame-ok' }}" data-result="{{ r_result }}">
             <td colspan="4">
               Frame <a href="/frame_detail?id={{ r.frame_id }}">#{{ r.frame_id }}</a>
               &nbsp;&#8212;&nbsp; {{ r.captured_at }}
+              {% if r_result %}<span class="sep-badge" style="background:{{ '#d5f5e3' if r_result == 'process' else '#d6eaf8' }};color:{{ '#1e8449' if r_result == 'process' else '#1a6fa8' }}">{{ r_result }}</span>{% endif %}
               {% if has_mm %}
                 <span class="sep-badge sep-fail">{{ r.mismatches | length }} mismatch{{ 'es' if r.mismatches | length != 1 }}</span>
               {% else %}
-                <span class="sep-badge sep-ok">&#10003; all match</span>
+                <span class="sep-badge sep-ok">&#10003; match</span>
               {% endif %}
             </td>
           </tr>
           {% for c in r.checks %}
-          <tr class="{{ 'row-match' if c.match else 'row-mismatch' }}">
+          <tr class="{{ 'row-match' if c.match else 'row-mismatch' }}" data-result="{{ r_result }}">
             <td><span class="check-key">{{ c.key }}</span></td>
             <td class="{{ 'val-match' if c.match else 'val-mismatch' }}">{{ c.esp_val }}</td>
             <td class="{{ 'val-match' if c.match else 'val-mismatch' }}">{{ c.py_val }}</td>
@@ -176,6 +187,20 @@
 {% endif %}
 
 <script>
+let _resultFilter = 'all';
+function setResultFilter(mode) {
+  _resultFilter = mode;
+  ['all','process','clouds'].forEach(m => {
+    const btn = document.getElementById('filt-' + m);
+    if (!btn) return;
+    if (m === mode) { btn.style.background='#1a6fa8'; btn.style.color='#fff'; btn.style.borderColor='#1a6fa8'; }
+    else            { btn.style.background=''; btn.style.color=''; btn.style.borderColor=''; }
+  });
+  document.querySelectorAll('tr[data-result]').forEach(tr => {
+    const r = tr.getAttribute('data-result');
+    tr.style.display = (mode === 'all' || r === mode || r === '') ? '' : 'none';
+  });
+}
 function runValidation() {
   document.getElementById('status-msg').textContent = 'starting…';
   document.getElementById('status-msg').className = 'status-msg status-running';

@@ -194,17 +194,21 @@
     <!-- ── Navbar ── -->
     <div class="navbar">
       {% if prev_id %}
-        <a class="nav-btn" href="/frame_detail?id={{ prev_id }}">&#8592; prev</a>
+        <a class="nav-btn" href="/frame_detail?id={{ prev_id }}{{ filter_qs }}">&#8592; prev</a>
       {% else %}
         <span class="nav-btn disabled">&#8592; prev</span>
       {% endif %}
       {% if next_id %}
-        <a class="nav-btn" href="/frame_detail?id={{ next_id }}">next &#8594;</a>
+        <a class="nav-btn" href="/frame_detail?id={{ next_id }}{{ filter_qs }}">next &#8594;</a>
       {% else %}
         <span class="nav-btn disabled">next &#8594;</span>
       {% endif %}
       {% if entry.meta and entry.meta.get('tile_means') %}
       <button class="nav-btn" id="btn-tiles" onclick="toggleTiles()">&#9783; Tiles</button>
+      {% endif %}
+      {% if entry.meta and entry.meta.get('esp_meta') %}
+      <button class="nav-btn" id="btn-view-sim" onclick="setView('sim')" style="background:#d5f5e3;color:#1e8449;border-color:#a5d6a7;font-size:11px;padding:6px 12px;">SIM</button>
+      <button class="nav-btn" id="btn-view-esp" onclick="setView('esp')" style="font-size:11px;padding:6px 12px;">ESP</button>
       {% endif %}
       <span class="nav-spacer"></span>
       <span class="nav-hint">&#8592; &#8594; navigate &nbsp;·&nbsp; <kbd style="font-size:10px;border:1px solid #ccc;padding:1px 4px;border-radius:3px;background:#f4f6f7;">T</kbd> tiles</span>
@@ -255,15 +259,34 @@
         {% if entry.filename %}<br><span style="font-size:10px;color:#8a9bb0">{{ entry.filename }}</span>{% endif %}
       </div>
       {% if entry.meta %}
-      <div style="margin:5px 0 4px;line-height:2.0;">
-        {{ render_key_badges(entry.meta, spec, ['result','stage','burst_trigger','source','photo_bucket','battery','fresh_flash','simulated','label']) }}
+      {% set esp_meta_snap = entry.meta.get('esp_meta', {}) %}
+      {% set _badge_keys = ['result','stage','burst_trigger','source','photo_bucket','battery','fresh_flash','simulated','label'] %}
+
+      <!-- SIM view (server-recomputed, default) -->
+      <div id="view-sim-badges" style="margin:5px 0 4px;line-height:2.0;">
+        {{ render_key_badges(entry.meta, spec, _badge_keys) }}
       </div>
-      <details class="meta-details" open>
+      <details class="meta-details" id="view-sim-table" open>
         <summary>Parameters &amp; intermediates</summary>
         <table class="meta-table">
           {{ render_rows(entry.meta, spec, order) }}
         </table>
       </details>
+
+      <!-- ESP view (raw firmware payload, shown when user clicks ESP button) -->
+      {% if esp_meta_snap %}
+      <div id="view-esp-badges" style="margin:5px 0 4px;line-height:2.0;display:none;">
+        <span class="badge" style="background:#f39c12;color:#fff;font-size:10px;">ESP RAW</span>
+        {{ render_key_badges(esp_meta_snap, spec, _badge_keys) }}
+      </div>
+      <details class="meta-details" id="view-esp-table" style="display:none" open>
+        <summary>ESP parameters (firmware-reported)</summary>
+        <table class="meta-table">
+          {{ render_rows(esp_meta_snap, spec, order) }}
+        </table>
+      </details>
+      {% endif %}
+
       {% endif %}
     </div>
 
@@ -488,9 +511,27 @@ function _refreshLabelBar() {
   }
 }
 
+// ── SIM / ESP view toggle ─────────────────────────────────────────────────────
+function setView(mode) {
+  const simBadges = document.getElementById('view-sim-badges');
+  const simTable  = document.getElementById('view-sim-table');
+  const espBadges = document.getElementById('view-esp-badges');
+  const espTable  = document.getElementById('view-esp-table');
+  const btnSim    = document.getElementById('btn-view-sim');
+  const btnEsp    = document.getElementById('btn-view-esp');
+  if (!espBadges) return;  // no esp_meta present
+  const showSim = (mode === 'sim');
+  if (simBadges) simBadges.style.display = showSim ? '' : 'none';
+  if (simTable)  simTable.style.display  = showSim ? '' : 'none';
+  if (espBadges) espBadges.style.display = showSim ? 'none' : '';
+  if (espTable)  espTable.style.display  = showSim ? 'none' : '';
+  if (btnSim) { btnSim.style.background = showSim ? '#d5f5e3' : ''; btnSim.style.color = showSim ? '#1e8449' : ''; btnSim.style.borderColor = showSim ? '#a5d6a7' : ''; }
+  if (btnEsp) { btnEsp.style.background = showSim ? '' : '#fde8d8'; btnEsp.style.color = showSim ? '' : '#c0392b'; btnEsp.style.borderColor = showSim ? '' : '#e59866'; }
+}
+
 // ── Keyboard ──────────────────────────────────────────────────────────────────
-const _nextUrl = {% if next_id %}'/frame_detail?id={{ next_id }}'{% else %}null{% endif %};
-const _prevUrl = {% if prev_id %}'/frame_detail?id={{ prev_id }}'{% else %}null{% endif %};
+const _nextUrl = {% if next_id %}'/frame_detail?id={{ next_id }}{{ filter_qs }}'{% else %}null{% endif %};
+const _prevUrl = {% if prev_id %}'/frame_detail?id={{ prev_id }}{{ filter_qs }}'{% else %}null{% endif %};
 const _goNext  = _nextUrl ? () => { location.href = _nextUrl; } : null;
 
 document.addEventListener('keydown', function(e) {

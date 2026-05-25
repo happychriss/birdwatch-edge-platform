@@ -365,6 +365,7 @@ def run(config_path: str | None = None) -> list[dict]:
             results.append({
                 'frame_id':   frame.id,
                 'captured_at': frame.captured_at.strftime('%d.%m.%y %H:%M:%S'),
+                'result':     frame.result or '',
                 'checks':     checks_detail,
                 'mismatches': mismatches,
             })

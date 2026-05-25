@@ -196,28 +196,32 @@ static time_t rtc_compute_next(i2c_dev_t *rtc)
     int doy        = gm.tm_yday + 1;
     int next_utc_m = gm.tm_hour * 60 + gm.tm_min;
 
-    int sunrise_m = solar_utc_minutes(doy, false);
     int sunset_m  = solar_utc_minutes(doy, true);
-    if (sunrise_m < 0)     sunrise_m = 0;
     if (sunset_m > 24*60)  sunset_m  = 24*60;
 
-    bool night = (next_utc_m < sunrise_m || next_utc_m >= sunset_m);
+    // Evening capture window: [sunset, sunset + BW_EVENING_WIN_POST_MIN) UTC
+    int win_end_m = sunset_m + BW_EVENING_WIN_POST_MIN;
 
-    if (night) {
+    bool in_window = (next_utc_m >= sunset_m && next_utc_m < win_end_m);
+
+    if (!in_window) {
+        // Outside evening window — defer to the next sunset
         time_t day_start = (next_utc / 86400) * 86400;
-        if (next_utc_m >= sunset_m) {
+        if (next_utc_m >= win_end_m) {
+            // Past today's window: advance to tomorrow
             day_start += 86400;
             gmtime_r(&day_start, &gm);
-            doy       = gm.tm_yday + 1;
-            sunrise_m = solar_utc_minutes(doy, false);
-            if (sunrise_m < 0) sunrise_m = 0;
+            doy      = gm.tm_yday + 1;
+            sunset_m = solar_utc_minutes(doy, true);
+            if (sunset_m > 24*60) sunset_m = 24*60;
+            win_end_m = sunset_m + BW_EVENING_WIN_POST_MIN;
         }
-        next_utc = day_start + (time_t)sunrise_m * 60;
-        ESP_LOGI(TAG, "alarm: NIGHT — sunset %02d:%02d UTC → sunrise %02d:%02d UTC (doy %d)",
-                 sunset_m/60, sunset_m%60, sunrise_m/60, sunrise_m%60, doy);
+        next_utc = day_start + (time_t)sunset_m * 60;
+        ESP_LOGI(TAG, "alarm: outside evening window → next sunset %02d:%02d UTC (doy %d)",
+                 sunset_m/60, sunset_m%60, doy);
     } else {
-        ESP_LOGI(TAG, "alarm: DAYTIME — window %02d:%02d–%02d:%02d UTC, cycle=%d min",
-                 sunrise_m/60, sunrise_m%60, sunset_m/60, sunset_m%60, cycle_min);
+        ESP_LOGI(TAG, "alarm: EVENING — %02d:%02d–%02d:%02d UTC, cycle=%d min",
+                 sunset_m/60, sunset_m%60, win_end_m/60, win_end_m%60, cycle_min);
     }
 
     struct tm next_local;
