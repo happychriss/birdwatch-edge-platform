@@ -526,11 +526,68 @@ def frames_index():
     per_page = 100
     offset = (page - 1) * per_page
 
-    total = session.query(BwFrame).count()
+    # ── Filters ──────────────────────────────────────────────────────────────
+    # Source checkboxes: ?src=pir,rtc  (defaults: both on)
+    src_param  = request.args.get('src', 'pir,rtc')
+    src_active = set(src_param.split(',')) if src_param else set()
+    show_pir   = 'pir' in src_active
+    show_rtc   = 'rtc' in src_active
+
+    # Label checkboxes: ?lbl=bird,ignore,special,cloud,none  (defaults: all on)
+    lbl_param    = request.args.get('lbl', 'bird,ignore,special,cloud,none')
+    lbl_active   = set(lbl_param.split(',')) if lbl_param else set()
+    show_bird    = 'bird'    in lbl_active
+    show_deleted = 'ignore'  in lbl_active
+    show_special = 'special' in lbl_active
+    show_cloud   = 'cloud'   in lbl_active   # result='clouds'
+    show_none    = 'none'    in lbl_active   # unlabeled process frames
+
+    from sqlalchemy import or_, and_, false as sql_false, true as sql_true
+
+    q = session.query(BwFrame)
+
+    # Source filter (PIR frames may have source missing/null — treat those as pir)
+    if not (show_pir and show_rtc):
+        if not show_pir and not show_rtc:
+            q = q.filter(sql_false())
+        elif show_pir and not show_rtc:
+            q = q.filter(or_(
+                BwFrame.meta['source'].astext == 'pir',
+                BwFrame.meta['source'].astext.is_(None),
+            ))
+        else:  # rtc only
+            q = q.filter(BwFrame.meta['source'].astext == 'rtc')
+
+    # Label / result filter
+    all_lbl = show_bird and show_deleted and show_special and show_cloud and show_none
+    if not all_lbl:
+        lbl_clauses = []
+        if show_cloud:
+            lbl_clauses.append(BwFrame.result == 'clouds')
+        # Process frames filtered by label
+        process_clauses = []
+        if show_bird:
+            process_clauses.append(BwFrame.meta['label'].astext == 'bird')
+        if show_deleted:
+            process_clauses.append(BwFrame.meta['label'].astext == 'ignore')
+        if show_special:
+            process_clauses.append(BwFrame.meta['label'].astext == 'special')
+        if show_none:
+            process_clauses.append(and_(
+                BwFrame.meta['label'].astext.is_(None),
+                BwFrame.result != 'clouds',
+            ))
+        if process_clauses:
+            lbl_clauses.append(or_(*process_clauses))
+        if lbl_clauses:
+            q = q.filter(or_(*lbl_clauses))
+        else:
+            q = q.filter(sql_false())
+
+    total      = q.count()
     total_pages = max(1, (total + per_page - 1) // per_page)
-    entries = (session.query(BwFrame)
-               .order_by(BwFrame.captured_at.desc())
-               .offset(offset).limit(per_page).all())
+    page       = min(page, total_pages)
+    entries    = q.order_by(BwFrame.captured_at.desc()).offset((page - 1) * per_page).limit(per_page).all()
 
     latest = (session.query(BwFrame)
               .filter(BwFrame.filename.isnot(None))
@@ -552,7 +609,11 @@ def frames_index():
                            last_seen=last_seen,
                            last_seen_detail=last_seen_detail,
                            spec=DISPLAY_SPEC,
-                           order=DISPLAY_ORDER)
+                           order=DISPLAY_ORDER,
+                           src_active=src_active,
+                           lbl_active=lbl_active,
+                           src_param=src_param,
+                           lbl_param=lbl_param)
 
 
 @app.route('/frame_detail')

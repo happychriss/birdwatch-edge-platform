@@ -75,6 +75,25 @@
   }
   .view-btn.active { background: #1a6fa8; color: #fff; border-color: #1a6fa8; }
 
+  /* ── Filter bar ── */
+  .filter-bar {
+    background: #f7fbff; border-bottom: 1px solid #dce8f0;
+    padding: 7px 18px; display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+    font-size: 12px; color: #556;
+  }
+  .filter-group { display: flex; align-items: center; gap: 8px; }
+  .filter-label { font-weight: 700; color: #8a9bb0; text-transform: uppercase;
+                  font-size: 10px; letter-spacing: 0.5px; white-space: nowrap; }
+  .filter-cb { display: flex; align-items: center; gap: 3px; cursor: pointer; white-space: nowrap; }
+  .filter-cb input[type=checkbox] { width: 14px; height: 14px; cursor: pointer; accent-color: #1a6fa8; }
+  .filter-cb.cb-pir    input { accent-color: #c0392b; }
+  .filter-cb.cb-rtc    input { accent-color: #1a7d5c; }
+  .filter-cb.cb-bird   input { accent-color: #27ae60; }
+  .filter-cb.cb-ignore input { accent-color: #7f8c8d; }
+  .filter-cb.cb-special input { accent-color: #f39c12; }
+  .filter-cb.cb-cloud  input { accent-color: #2980b9; }
+  .filter-sep { width: 1px; height: 22px; background: #dce8f0; }
+
   /* ── Card grid ── */
   .grid { display: flex; flex-wrap: wrap; gap: 10px; padding: 14px 18px; }
 
@@ -91,6 +110,10 @@
   .card.result-unknown  { border-top-color: #aab; }
 
   .card img { width: 100%; display: block; }
+  .card-img-wrap { position: relative; }
+  .card-tile-canvas { position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+                      pointer-events: none; display: none; }
+  .always-tiles .card-tile-canvas { display: block; }
   .no-photo { width: 100%; height: 70px; background: #eef2f7; display: flex;
               align-items: center; justify-content: center; color: #aab; font-size: 11px; }
 
@@ -187,10 +210,50 @@
   <button class="btn btn-backfill" id="btn-backfill" onclick="runBackfill(false)" title="Simulate burst+bg pipeline on old frames">Backfill old</button>
   <span id="backfill-status" style="font-size:12px;color:#556;"></span>
   <div class="view-toggle">
+    <button class="view-btn" id="btn-tiles" onclick="toggleAlwaysTiles()" title="Always show tile overlay">&#9783;</button>
     <button class="view-btn active" id="btn-grid" onclick="setView('grid')" title="Grid view">⊞</button>
     <button class="view-btn"        id="btn-list" onclick="setView('list')" title="List view">☰</button>
   </div>
 </div>
+
+<!-- ── Filter bar ── -->
+<form class="filter-bar" id="filter-form" method="get" action="/">
+  <span class="filter-label">Source</span>
+  <div class="filter-group">
+    <label class="filter-cb cb-pir">
+      <input type="checkbox" name="src_pir" value="1" onchange="submitFilters()"
+             {{ 'checked' if 'pir' in src_active }}>PIR
+    </label>
+    <label class="filter-cb cb-rtc">
+      <input type="checkbox" name="src_rtc" value="1" onchange="submitFilters()"
+             {{ 'checked' if 'rtc' in src_active }}>Reference&nbsp;(RTC)
+    </label>
+  </div>
+  <div class="filter-sep"></div>
+  <span class="filter-label">Training</span>
+  <div class="filter-group">
+    <label class="filter-cb cb-bird">
+      <input type="checkbox" name="lbl_bird" value="1" onchange="submitFilters()"
+             {{ 'checked' if 'bird' in lbl_active }}>Bird
+    </label>
+    <label class="filter-cb cb-ignore">
+      <input type="checkbox" name="lbl_ignore" value="1" onchange="submitFilters()"
+             {{ 'checked' if 'ignore' in lbl_active }}>Deleted
+    </label>
+    <label class="filter-cb cb-special">
+      <input type="checkbox" name="lbl_special" value="1" onchange="submitFilters()"
+             {{ 'checked' if 'special' in lbl_active }}>Special
+    </label>
+    <label class="filter-cb cb-cloud">
+      <input type="checkbox" name="lbl_cloud" value="1" onchange="submitFilters()"
+             {{ 'checked' if 'cloud' in lbl_active }}>Cloud
+    </label>
+    <label class="filter-cb">
+      <input type="checkbox" name="lbl_none" value="1" onchange="submitFilters()"
+             {{ 'checked' if 'none' in lbl_active }}>Unlabeled
+    </label>
+  </div>
+</form>
 
 <!-- ── Photo grid ── -->
 <div class="grid" id="photo-grid">
@@ -205,7 +268,13 @@
       {% set lbl = meta.get('label') %}
       {% set dl  = meta.get('downloaded_at') %}
       <a href="/frame_detail?id={{ entry.id }}" style="position:relative;display:block;">
-        <img src="{{ url_for('static', filename=entry.filename) }}" loading="lazy" alt="frame">
+        <div class="card-img-wrap">
+          <img src="{{ url_for('static', filename=entry.filename) }}" loading="lazy" alt="frame"
+               data-tiles="{{ meta.get('tile_means') | tojson }}"
+               data-model="{{ meta.get('model_tile_means') | tojson }}"
+               data-gm="{{ meta.get('global_mean', 128) }}">
+          <canvas class="card-tile-canvas"></canvas>
+        </div>
         {% if lbl %}<span class="label-flag flag-{{ lbl }}">{{ lbl }}</span>{% endif %}
         {% if dl %}<span class="label-flag flag-saved">saved</span>{% endif %}
       </a>
@@ -224,9 +293,10 @@
 
 <!-- ── Pagination ── -->
 <div class="pagination">
-  {% if page > 1 %}<a href="/?page={{ page - 1 }}">← prev</a>{% endif %}
+  {% set fq = '&src=' + src_param + '&lbl=' + lbl_param %}
+  {% if page > 1 %}<a href="/?page={{ page - 1 }}{{ fq }}">← prev</a>{% endif %}
   <span class="current">page {{ page }} of {{ total_pages }}</span>
-  {% if page < total_pages %}<a href="/?page={{ page + 1 }}">next →</a>{% endif %}
+  {% if page < total_pages %}<a href="/?page={{ page + 1 }}{{ fq }}">next →</a>{% endif %}
 </div>
 
 <!-- ── Lightbox ── -->
@@ -248,6 +318,92 @@ function setView(v) {
   localStorage.setItem('bw_view', v);
 }
 (function(){ const s = localStorage.getItem('bw_view'); if (s === 'list') setView('list'); })();
+
+// ── Filter form submission ─────────────────────────────────────────────────
+function submitFilters() {
+  const form = document.getElementById('filter-form');
+  const srcParts = [], lblParts = [];
+  if (form.querySelector('[name=src_pir]').checked)    srcParts.push('pir');
+  if (form.querySelector('[name=src_rtc]').checked)    srcParts.push('rtc');
+  if (form.querySelector('[name=lbl_bird]').checked)   lblParts.push('bird');
+  if (form.querySelector('[name=lbl_ignore]').checked) lblParts.push('ignore');
+  if (form.querySelector('[name=lbl_special]').checked) lblParts.push('special');
+  if (form.querySelector('[name=lbl_cloud]').checked)  lblParts.push('cloud');
+  if (form.querySelector('[name=lbl_none]').checked)   lblParts.push('none');
+  const src = srcParts.join(',') || 'pir';  // avoid empty string breaking defaults
+  const lbl = lblParts.join(',') || 'none';
+  location.href = '/?src=' + encodeURIComponent(src) + '&lbl=' + encodeURIComponent(lbl);
+}
+
+// ── Always-tiles toggle ───────────────────────────────────────────────────
+const TILE_COLS = 20, TILE_ROWS = 15;
+const DARK_DELTA = 20;
+
+function drawCardTiles(img, canvas) {
+  const tilesRaw = img.getAttribute('data-tiles');
+  if (!tilesRaw || tilesRaw === 'null') return;
+  let tiles; try { tiles = JSON.parse(tilesRaw); } catch(e) { return; }
+  const modelRaw = img.getAttribute('data-model');
+  let model = null; try { model = modelRaw ? JSON.parse(modelRaw) : null; } catch(e) {}
+  const gm = parseFloat(img.getAttribute('data-gm') || '128');
+  const w = img.offsetWidth, h = img.offsetHeight;
+  if (!w || !h) return;
+  canvas.width = w; canvas.height = h;
+  const ctx = canvas.getContext('2d');
+  ctx.clearRect(0, 0, w, h);
+  const tw = w / TILE_COLS, th = h / TILE_ROWS;
+  const hasModel = model && model.length === tiles.length;
+  for (let i = 0; i < tiles.length; i++) {
+    const col = i % TILE_COLS, row = Math.floor(i / TILE_COLS);
+    const val = tiles[i];
+    const ref = hasModel ? model[i] : gm;
+    const dark = ref - val;
+    const x = col * tw, y = row * th;
+    if (dark >= DARK_DELTA) {
+      const a = Math.min(0.72, 0.40 + (dark - DARK_DELTA) / 60);
+      ctx.fillStyle = `rgba(210,50,50,${a.toFixed(2)})`;
+      ctx.fillRect(x, y, tw, th);
+    } else if (dark >= 10) {
+      const a = (dark - 10) / (DARK_DELTA - 10) * 0.32;
+      ctx.fillStyle = `rgba(220,130,30,${a.toFixed(2)})`;
+      ctx.fillRect(x, y, tw, th);
+    } else if (dark <= -10) {
+      const a = Math.min(0.32, (-dark - 10) / 70);
+      ctx.fillStyle = `rgba(50,110,220,${a.toFixed(2)})`;
+      ctx.fillRect(x, y, tw, th);
+    }
+  }
+}
+
+function applyAlwaysTiles(on) {
+  const grid = document.getElementById('photo-grid');
+  if (on) {
+    grid.classList.add('always-tiles');
+    grid.querySelectorAll('.card-img-wrap').forEach(wrap => {
+      const img = wrap.querySelector('img');
+      const canvas = wrap.querySelector('canvas');
+      if (!img || !canvas) return;
+      if (img.complete && img.naturalWidth) { drawCardTiles(img, canvas); }
+      else { img.addEventListener('load', () => drawCardTiles(img, canvas), {once: true}); }
+    });
+  } else {
+    grid.classList.remove('always-tiles');
+    grid.querySelectorAll('.card-tile-canvas').forEach(c => {
+      const ctx = c.getContext('2d');
+      if (ctx) ctx.clearRect(0, 0, c.width, c.height);
+    });
+  }
+  const btn = document.getElementById('btn-tiles');
+  if (btn) { on ? btn.classList.add('active') : btn.classList.remove('active'); }
+  localStorage.setItem('bw_always_tiles', on ? '1' : '0');
+}
+
+function toggleAlwaysTiles() {
+  const on = !document.getElementById('photo-grid').classList.contains('always-tiles');
+  applyAlwaysTiles(on);
+}
+
+(function(){ if (localStorage.getItem('bw_always_tiles') === '1') applyAlwaysTiles(true); })();
 
 function openPhoto(url, label, saved) {
   if (!url) return;

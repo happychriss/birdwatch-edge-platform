@@ -87,6 +87,14 @@ DISPLAY_SPEC: dict = {
         },
         "fallback": ("#eee", "#778"),
     },
+    "source": {
+        "type": "badge",
+        "colors": {
+            "pir": ("#fde8d8", "#c0392b"),
+            "rtc": ("#d1f2eb", "#1a7d5c"),
+        },
+        "fallback": ("#eee", "#778"),
+    },
     "trigger": {
         "type": "hide_values",
         "hide_values": ["Boot", "PIR", "Timer", "Camera Start", "Camera Stop"],
@@ -162,7 +170,7 @@ DISPLAY_SPEC: dict = {
 
 # Key display order for the card info panel (unlisted keys are appended after).
 DISPLAY_ORDER = [
-    "result", "stage", "burst_trigger", "photo_bucket", "photo_mode", "fresh_flash", "simulated",
+    "result", "stage", "burst_trigger", "source", "photo_bucket", "photo_mode", "fresh_flash", "simulated",
     "battery", "trigger",
     "scene_bucket", "global_mean", "ratio", "dark_tiles", "new_dark_tiles", "dark_blob_max",
     "n_chroma_changed", "burst_n_changed", "burst_n_dark", "burst_n_chroma",
