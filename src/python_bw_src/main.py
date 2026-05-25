@@ -28,18 +28,29 @@ _live_ready  = False
 _live_model  = None
 _live_lock   = threading.Lock()
 _bg_cfg      = None
-_UPDATE_STAGES = {'NIGHT', 'WARMUP', 'QUIET', 'SCENE_DRIFT'}
 
 try:
     import numpy as _np
-    from cloud_check.background import BackgroundModel as _BackgroundModel
+    from cloud_check.background import BackgroundModel as _BackgroundModel, photo_bucket_idx as _pb_idx
     from cloud_check.config import Config as _BgConfig
-    _bg_cfg     = _BgConfig(num_time_buckets=1, warmup_frames_per_bucket=0)
+    _bg_cfg     = _BgConfig(
+        num_photo_buckets=3,
+        num_scene_buckets=1,
+        bright_photo_threshold=160,
+        lowlight_photo_threshold=80,
+        warmup_frames_per_bucket=4,
+    )
     _live_model = _BackgroundModel(_bg_cfg)
     _LIVE_OK    = True
     print("[live_model] cloud_check loaded OK", flush=True)
 except Exception as _import_exc:
     print(f"[live_model] disabled — {_import_exc}", flush=True)
+
+
+def _should_update(meta: dict) -> bool:
+    """Mirror firmware update policy: only RTC frames that warrant it update the model."""
+    return (meta.get('source') == 'rtc'
+            and meta.get('stage') in ('WARMUP', 'QUIET', 'SCENE_DRIFT', 'NIGHT'))
 
 
 def _warm_live_model():
@@ -57,19 +68,28 @@ def _warm_live_model():
         for frame in frames:
             if not frame.meta:
                 continue
-            tile_means = frame.meta.get('tile_means')
-            if not tile_means or len(tile_means) != grid_size:
+            meta = frame.meta
+            tile_means_y = meta.get('tile_means')
+            if not tile_means_y or len(tile_means_y) != grid_size:
                 continue
-            stage = frame.meta.get('stage', '')
-            hour  = frame.captured_at.hour if frame.captured_at else 12
-            arr   = _np.array(tile_means, dtype=_np.float32).reshape(
+            arr_y = _np.array(tile_means_y, dtype=_np.float32).reshape(
                         _bg_cfg.grid_h, _bg_cfg.grid_w)
+            tm_u = meta.get('tile_means_u')
+            arr_u = (_np.array(tm_u, dtype=_np.float32).reshape(_bg_cfg.grid_h, _bg_cfg.grid_w)
+                     if tm_u and len(tm_u) == grid_size else None)
+            tm_v = meta.get('tile_means_v')
+            arr_v = (_np.array(tm_v, dtype=_np.float32).reshape(_bg_cfg.grid_h, _bg_cfg.grid_w)
+                     if tm_v and len(tm_v) == grid_size else None)
+            gm = meta.get('global_mean', int(arr_y.mean()))
             with _live_lock:
-                _live_model.observe(hour)
-                if stage in _UPDATE_STAGES:
-                    _live_model.update(hour, arr)
-                if stage == 'SCENE_DRIFT':
-                    _live_model.reset_warmup(hour)
+                pb_name = _live_model.photo_bucket_for(gm)
+                pb = _pb_idx(pb_name)
+                sb = _live_model.scene_bucket_for(pb, arr_y)
+                _live_model.observe(pb, sb)
+                if _should_update(meta):
+                    _live_model.update(pb, sb, arr_y, arr_u, arr_v)
+                if meta.get('stage') == 'SCENE_DRIFT' and meta.get('source') == 'rtc':
+                    _live_model.reset_warmup(pb, sb)
             n += 1
         _live_ready = True
         print(f"[live_model] warmed up on {n} frames", flush=True)
@@ -452,21 +472,29 @@ def process_frame_upload():
         # Once the ESP firmware is updated to emit model_tile_means, this branch
         # is skipped ('model_tile_means' already in meta).
         if _LIVE_OK and _live_ready and 'model_tile_means' not in meta:
-            _tm = meta.get('tile_means')
-            if _tm and len(_tm) == _bg_cfg.grid_h * _bg_cfg.grid_w:
-                _arr  = _np.array(_tm, dtype=_np.float32).reshape(
-                            _bg_cfg.grid_h, _bg_cfg.grid_w)
-                _hour = captured_at.hour
-                _stg  = meta.get('stage', '')
+            _tm_y = meta.get('tile_means')
+            _gsz  = _bg_cfg.grid_h * _bg_cfg.grid_w
+            if _tm_y and len(_tm_y) == _gsz:
+                _arr_y = _np.array(_tm_y, dtype=_np.float32).reshape(
+                             _bg_cfg.grid_h, _bg_cfg.grid_w)
+                _tm_u  = meta.get('tile_means_u')
+                _arr_u = (_np.array(_tm_u, dtype=_np.float32).reshape(_bg_cfg.grid_h, _bg_cfg.grid_w)
+                          if _tm_u and len(_tm_u) == _gsz else None)
+                _tm_v  = meta.get('tile_means_v')
+                _arr_v = (_np.array(_tm_v, dtype=_np.float32).reshape(_bg_cfg.grid_h, _bg_cfg.grid_w)
+                          if _tm_v and len(_tm_v) == _gsz else None)
+                _gm = meta.get('global_mean', int(_arr_y.mean()))
                 with _live_lock:
-                    _live_model.observe(_hour)
-                    _bkt  = _live_model._idx(_hour)
+                    _pb_name = _live_model.photo_bucket_for(_gm)
+                    _pb = _pb_idx(_pb_name)
+                    _sb = _live_model.scene_bucket_for(_pb, _arr_y)
+                    _live_model.observe(_pb, _sb)
                     # Snapshot BEFORE update — mirrors what z-scores were computed from
-                    _snap = _live_model.mean[_bkt].flatten().round().astype(int).tolist()
-                    if _stg in _UPDATE_STAGES:
-                        _live_model.update(_hour, _arr)
-                    if _stg == 'SCENE_DRIFT':
-                        _live_model.reset_warmup(_hour)
+                    _snap = _live_model.mean_y[_pb, _sb].flatten().round().astype(int).tolist()
+                    if _should_update(meta):
+                        _live_model.update(_pb, _sb, _arr_y, _arr_u, _arr_v)
+                    if meta.get('stage') == 'SCENE_DRIFT' and meta.get('source') == 'rtc':
+                        _live_model.reset_warmup(_pb, _sb)
                 meta['model_tile_means'] = _snap
 
         frame = BwFrame(

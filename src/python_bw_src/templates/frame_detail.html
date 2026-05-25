@@ -233,6 +233,8 @@
 <script>
 // ── Tile overlay ─────────────────────────────────────────────────────────────
 const TILE_MEANS       = {{ (entry.meta.get('tile_means') if entry.meta else None) | tojson }};
+const TILE_MEANS_U     = {{ (entry.meta.get('tile_means_u') if entry.meta else None) | tojson }};
+const TILE_MEANS_V     = {{ (entry.meta.get('tile_means_v') if entry.meta else None) | tojson }};
 const PREV_TILE_MEANS  = {{ prev_tile_means | tojson }};
 const MODEL_TILE_MEANS = {{ model_tile_means | tojson }};
 const GLOBAL_MEAN      = {{ (entry.meta.get('global_mean', 128) if entry.meta else 128) | tojson }};

@@ -78,6 +78,15 @@ DISPLAY_SPEC: dict = {
         },
         "fallback": ("#eee", "#778"),
     },
+    "photo_bucket": {
+        "type": "badge",
+        "colors": {
+            "BRIGHT":   ("#fff3cd", "#856404"),
+            "NORMAL":   ("#d6eaf8", "#1a6fa8"),
+            "LOWLIGHT": ("#e8e8e8", "#555555"),
+        },
+        "fallback": ("#eee", "#778"),
+    },
     "trigger": {
         "type": "hide_values",
         "hide_values": ["Boot", "PIR", "Timer", "Camera Start", "Camera Stop"],
@@ -99,16 +108,18 @@ DISPLAY_SPEC: dict = {
         "fallback": ("#eee", "#778"),
     },
     # Numeric intermediates — shown as plain numbers, no badge.
-    "global_mean":     {"type": "numeric"},
-    "ratio":           {"type": "format_val", "format": "{:.3f}"},
-    "dark_anomalous":  {"type": "numeric"},
-    "dark_tiles":      {"type": "numeric"},
-    "new_dark_tiles":  {"type": "numeric"},
-    "warmup":          {"type": "numeric"},
-    "prev_valid":      {"type": "numeric"},
-    "burst_n_changed": {"type": "numeric"},
-    "burst_n_dark":    {"type": "numeric"},
-    "dark_blob_max":   {"type": "numeric"},
+    "global_mean":       {"type": "numeric"},
+    "ratio":             {"type": "format_val", "format": "{:.3f}"},
+    "dark_anomalous":    {"type": "numeric"},
+    "dark_tiles":        {"type": "numeric"},
+    "new_dark_tiles":    {"type": "numeric"},
+    "warmup":            {"type": "numeric"},
+    "prev_valid":        {"type": "numeric"},
+    "burst_n_changed":   {"type": "numeric"},
+    "burst_n_dark":      {"type": "numeric"},
+    "burst_n_chroma":    {"type": "numeric"},
+    "n_chroma_changed":  {"type": "numeric"},
+    "dark_blob_max":     {"type": "numeric"},
     # Simulated marker — shown when meta was computed by backfill_meta.py, not firmware.
     "simulated": {
         "type": "badge_if",
@@ -118,8 +129,12 @@ DISPLAY_SPEC: dict = {
         "text_color": "#fff",
     },
     # Large arrays — hide from card view, show collapsed in detail view only.
-    "tile_means":        {"type": "detail_only"},
-    "model_tile_means":  {"type": "detail_only"},
+    "tile_means":           {"type": "detail_only"},
+    "tile_means_u":         {"type": "detail_only"},
+    "tile_means_v":         {"type": "detail_only"},
+    "model_tile_means":     {"type": "detail_only"},
+    "model_tile_means_u":   {"type": "detail_only"},
+    "model_tile_means_v":   {"type": "detail_only"},
     # Backfill-computed fields — suppress from card badge row; visible in detail table.
     "downloaded_at": {"type": "plain"},
     "burst_label":   {"type": "plain"},
@@ -147,8 +162,8 @@ DISPLAY_SPEC: dict = {
 
 # Key display order for the card info panel (unlisted keys are appended after).
 DISPLAY_ORDER = [
-    "result", "stage", "burst_trigger", "photo_mode", "fresh_flash", "simulated",
+    "result", "stage", "burst_trigger", "photo_bucket", "photo_mode", "fresh_flash", "simulated",
     "battery", "trigger",
     "scene_bucket", "global_mean", "ratio", "dark_tiles", "new_dark_tiles", "dark_blob_max",
-    "burst_n_changed", "burst_n_dark",
+    "n_chroma_changed", "burst_n_changed", "burst_n_dark", "burst_n_chroma",
 ]
