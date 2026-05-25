@@ -47,9 +47,8 @@ def _warm_live_model():
     global _live_ready
     if not _LIVE_OK:
         return
-    local_session = Session()
     try:
-        frames = (local_session.query(BwFrame)
+        frames = (Session().query(BwFrame)
                   .filter(BwFrame.filename.isnot(None))
                   .order_by(BwFrame.captured_at.asc())
                   .all())
@@ -77,7 +76,7 @@ def _warm_live_model():
     except Exception as exc:
         print(f"[live_model] warmup error: {exc}", flush=True)
     finally:
-        local_session.close()
+        Session.remove()  # remove thread-local session from scoped_session registry
 
 # ─────────────────────────────────────────────────────────────────────────────
 
