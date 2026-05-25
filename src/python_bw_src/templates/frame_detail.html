@@ -29,20 +29,37 @@
   .header-title { font-size: 15px; font-weight: 700; margin-left: 4px; }
   .header-id { margin-left: auto; font-size: 12px; opacity: 0.75; white-space: nowrap; }
 
+  /* ── Main two-column layout ── */
+  .main-content {
+    flex: 1; display: flex; flex-direction: column; min-height: 0;
+  }
+  @media (min-width: 960px) {
+    .main-content { flex-direction: row; align-items: stretch; }
+    .left-panel  { flex: 1 1 55%; display: flex; flex-direction: column; min-width: 0; }
+    .right-panel { flex: 0 0 45%; max-width: 45%; display: flex; flex-direction: column;
+                   border-left: 1px solid #dce8f0; overflow-y: auto; }
+  }
+  @media (max-width: 959px) {
+    .left-panel  { display: flex; flex-direction: column; }
+    .right-panel { display: flex; flex-direction: column; }
+  }
+
   /* ── Details panel ── */
   .details {
     background: #fff; border-bottom: 1px solid #dce8f0;
-    padding: 10px 18px;
+    padding: 10px 14px;
   }
-  .date-row { font-size: 12px; color: #556; margin-bottom: 8px; }
+  .date-row { font-size: 12px; color: #556; margin-bottom: 6px; }
   .time-diff { font-size: 11px; color: #8a9bb0; margin-left: 8px; }
 
   /* meta table */
-  .meta-table { border-collapse: collapse; width: 100%; max-width: 600px; font-size: 12px; }
-  .meta-table td { padding: 3px 8px; vertical-align: top; }
-  .meta-key { color: #8a9bb0; text-transform: uppercase; font-size: 10px; letter-spacing: 0.4px;
-              white-space: nowrap; width: 120px; }
-  .meta-val { color: #2c3e50; }
+  .meta-table { border-collapse: collapse; width: 100%; font-size: 12px; }
+  .meta-table td { padding: 3px 6px; vertical-align: top; }
+  .meta-key  { color: #8a9bb0; text-transform: uppercase; font-size: 10px; letter-spacing: 0.4px;
+               white-space: nowrap; width: 110px; }
+  .meta-val  { color: #2c3e50; white-space: nowrap; }
+  .meta-desc { color: #9aa; font-size: 10px; font-style: italic; padding-left: 8px;
+               line-height: 1.5; white-space: normal; }
   .badge {
     padding: 2px 9px; border-radius: 10px; font-size: 11px;
     font-weight: 700; letter-spacing: 0.3px; text-transform: uppercase;
@@ -52,10 +69,10 @@
   details summary { cursor: pointer; color: #1a6fa8; font-size: 11px; }
 
   /* ── Collapsible meta panel ── */
-  .meta-details { margin-top: 8px; }
+  .meta-details { margin-top: 6px; }
   .meta-details > summary {
-    cursor: pointer; color: #1a6fa8; font-size: 13px; font-weight: 600;
-    padding: 6px 0; user-select: none; list-style: none;
+    cursor: pointer; color: #1a6fa8; font-size: 12px; font-weight: 600;
+    padding: 5px 0; user-select: none; list-style: none;
     display: flex; align-items: center; gap: 6px;
   }
   .meta-details > summary::-webkit-details-marker { display: none; }
@@ -84,14 +101,14 @@
   /* ── Photo + tile overlay ── */
   .photo-wrap {
     flex: 1; display: flex; align-items: center; justify-content: center;
-    padding: 16px; background: #e8eff7;
+    padding: 12px; background: #e8eff7; min-height: 200px;
   }
   .img-wrap {
     position: relative; display: inline-block;
-    max-width: 100%; max-height: calc(100vh - 220px);
+    max-width: 100%; max-height: calc(100vh - 180px);
   }
   .img-wrap img {
-    display: block; max-width: 100%; max-height: calc(100vh - 220px);
+    display: block; max-width: 100%; max-height: calc(100vh - 180px);
     border-radius: 6px; box-shadow: 0 4px 24px rgba(41,128,185,0.15);
   }
   #tile-canvas {
@@ -99,6 +116,17 @@
     border-radius: 6px; display: none; pointer-events: none;
   }
   #tile-canvas.visible { display: block; }
+
+  /* ── Tile legend ── */
+  .tile-legend {
+    display: none; background: rgba(10,20,35,0.82); color: #e8f4fd;
+    padding: 7px 12px; font-size: 10px; font-family: monospace; line-height: 1.8;
+    border-top: 1px solid rgba(255,255,255,0.08);
+  }
+  .tile-legend.visible { display: block; }
+  .tile-legend-row { display: flex; align-items: center; gap: 8px; }
+  .tl-swatch { display: inline-block; width: 14px; height: 14px; border-radius: 2px;
+               flex-shrink: 0; vertical-align: middle; }
 
   /* ── Label / saved overlay on image ── */
   .img-label {
@@ -158,75 +186,103 @@
   <span class="header-id">id&nbsp;{{ entry.id }}</span>
 </header>
 
-<!-- ── Meta details ── -->
-<div class="details">
-  <div class="date-row">
-    <strong>{{ entry.captured_at.strftime("%d.%m.%Y %H:%M:%S") if entry.captured_at else '—' }}</strong>
-    {% if time_diff %}<span class="time-diff">Δ {{ time_diff }} since previous</span>{% endif %}
-    {% if entry.filename %}&nbsp;·&nbsp;<span style="font-size:11px;color:#8a9bb0">{{ entry.filename }}</span>{% endif %}
-  </div>
-  {% if entry.meta %}
-  <div style="margin:6px 0 4px;line-height:2.2;">
-    {{ render_key_badges(entry.meta, spec, ['result','stage','burst_trigger','source','photo_bucket','battery','fresh_flash','simulated','label']) }}
-  </div>
-  <details class="meta-details">
-    <summary>Parameters &amp; intermediates</summary>
-    <table class="meta-table">
-      {{ render_rows(entry.meta, spec, order) }}
-    </table>
-  </details>
-  {% endif %}
-</div>
+<div class="main-content">
 
-<!-- ── Label bar ── -->
-<div class="label-bar" id="label-bar">
-  {% set cur_lbl = (entry.meta or {}).get('label') %}
-  <button class="label-btn label-btn-bird    {{ 'active' if cur_lbl == 'bird'    }}" onclick="setLabel('bird')"   >Bird</button>
-  <button class="label-btn label-btn-special {{ 'active' if cur_lbl == 'special' }}" onclick="setLabel('special')">Special</button>
-  <button class="label-btn label-btn-ignore  {{ 'active' if cur_lbl == 'ignore'  }}" onclick="setLabel('ignore')" >Ignore</button>
-  {% set dl = (entry.meta or {}).get('downloaded_at') %}
-  {% if dl %}<span style="font-size:11px;color:#2980b9;font-weight:600;">saved {{ dl[:16] }}</span>{% endif %}
-  <span class="label-hint">
-    <kbd>Space</kbd> bird &nbsp; <kbd>S</kbd> special &nbsp; <kbd>Del</kbd> ignore &nbsp; <kbd>C</kbd> clear
-  </span>
-</div>
+  <!-- ══ LEFT: photo + nav ══ -->
+  <div class="left-panel">
 
-<!-- ── Navbar ── -->
-<div class="navbar">
-  {% if prev_id %}
-    <a class="nav-btn" href="/frame_detail?id={{ prev_id }}">&#8592; prev</a>
-  {% else %}
-    <span class="nav-btn disabled">&#8592; prev</span>
-  {% endif %}
-  {% if next_id %}
-    <a class="nav-btn" href="/frame_detail?id={{ next_id }}">next &#8594;</a>
-  {% else %}
-    <span class="nav-btn disabled">next &#8594;</span>
-  {% endif %}
-  {% if entry.meta and entry.meta.get('tile_means') %}
-  <button class="nav-btn" id="btn-tiles" onclick="toggleTiles()">&#9783; Tiles</button>
-  {% endif %}
-  <span class="nav-spacer"></span>
-  <span class="nav-hint">&#8592; &#8594; navigate &nbsp;·&nbsp; <kbd style="font-size:10px;border:1px solid #ccc;padding:1px 4px;border-radius:3px;background:#f4f6f7;">T</kbd> tiles</span>
-</div>
-
-<!-- ── Photo ── -->
-<div class="photo-wrap">
-  {% if entry.filename %}
-    {% set cur_lbl = (entry.meta or {}).get('label') %}
-    {% set dl = (entry.meta or {}).get('downloaded_at') %}
-    <div class="img-wrap" id="img-wrap">
-      <img id="frame-img" src="{{ url_for('static', filename=entry.filename) }}" alt="frame">
-      <canvas id="tile-canvas"></canvas>
-      <span id="label-overlay"
-            class="img-label{% if cur_lbl %} flag-{{ cur_lbl }}{% endif %}"
-            {% if not cur_lbl %}style="display:none"{% endif %}>{{ cur_lbl or '' }}</span>
-      {% if dl %}<span class="img-label img-label-right flag-saved">saved</span>{% endif %}
+    <!-- ── Navbar ── -->
+    <div class="navbar">
+      {% if prev_id %}
+        <a class="nav-btn" href="/frame_detail?id={{ prev_id }}">&#8592; prev</a>
+      {% else %}
+        <span class="nav-btn disabled">&#8592; prev</span>
+      {% endif %}
+      {% if next_id %}
+        <a class="nav-btn" href="/frame_detail?id={{ next_id }}">next &#8594;</a>
+      {% else %}
+        <span class="nav-btn disabled">next &#8594;</span>
+      {% endif %}
+      {% if entry.meta and entry.meta.get('tile_means') %}
+      <button class="nav-btn" id="btn-tiles" onclick="toggleTiles()">&#9783; Tiles</button>
+      {% endif %}
+      <span class="nav-spacer"></span>
+      <span class="nav-hint">&#8592; &#8594; navigate &nbsp;·&nbsp; <kbd style="font-size:10px;border:1px solid #ccc;padding:1px 4px;border-radius:3px;background:#f4f6f7;">T</kbd> tiles</span>
     </div>
-  {% else %}
-    <div class="no-photo">No image available</div>
-  {% endif %}
-</div>
+
+    <!-- ── Photo ── -->
+    <div class="photo-wrap">
+      {% if entry.filename %}
+        {% set cur_lbl = (entry.meta or {}).get('label') %}
+        {% set dl = (entry.meta or {}).get('downloaded_at') %}
+        <div class="img-wrap" id="img-wrap">
+          <img id="frame-img" src="{{ url_for('static', filename=entry.filename) }}" alt="frame">
+          <canvas id="tile-canvas"></canvas>
+          <span id="label-overlay"
+                class="img-label{% if cur_lbl %} flag-{{ cur_lbl }}{% endif %}"
+                {% if not cur_lbl %}style="display:none"{% endif %}>{{ cur_lbl or '' }}</span>
+          {% if dl %}<span class="img-label img-label-right flag-saved">saved</span>{% endif %}
+        </div>
+      {% else %}
+        <div class="no-photo">No image available</div>
+      {% endif %}
+    </div>
+
+    <!-- ── Tile legend (shown when tiles overlay is on) ── -->
+    <div class="tile-legend" id="tile-legend">
+      <div style="font-weight:700;margin-bottom:4px;opacity:0.8">Tile overlay — Y (luma) channel, BT.601</div>
+      <div class="tile-legend-row"><span class="tl-swatch" style="background:rgba(210,50,50,0.65)"></span> Y ≥ 20 DN <em>darker</em> than background model &nbsp;·&nbsp; DARK_OBJ algorithm threshold is 35 DN (z &gt; 3)</div>
+      <div class="tile-legend-row"><span class="tl-swatch" style="background:rgba(220,130,30,0.35)"></span> 10–20 DN darker than model &nbsp;·&nbsp; approaching threshold</div>
+      <div class="tile-legend-row"><span class="tl-swatch" style="background:rgba(50,110,220,0.32)"></span> ≥ 10 DN <em>brighter</em> than background model</div>
+      <div style="margin-top:5px;opacity:0.75">
+        Numbers per tile: &nbsp;<strong>Y</strong> = raw luma value (0–255) &nbsp;·&nbsp;
+        <strong>Δm</strong> = Y − model mean (+ brighter, − darker) &nbsp;·&nbsp;
+        <strong>Δp</strong> = Y − previous frame &nbsp;·&nbsp;
+        Hover tile for details
+      </div>
+    </div>
+
+  </div><!-- end left-panel -->
+
+  <!-- ══ RIGHT: details + labels ══ -->
+  <div class="right-panel">
+
+    <!-- ── Meta details ── -->
+    <div class="details">
+      <div class="date-row">
+        <strong>{{ entry.captured_at.strftime("%d.%m.%Y %H:%M:%S") if entry.captured_at else '—' }}</strong>
+        {% if time_diff %}<span class="time-diff">Δ {{ time_diff }} since previous</span>{% endif %}
+        {% if entry.filename %}<br><span style="font-size:10px;color:#8a9bb0">{{ entry.filename }}</span>{% endif %}
+      </div>
+      {% if entry.meta %}
+      <div style="margin:5px 0 4px;line-height:2.0;">
+        {{ render_key_badges(entry.meta, spec, ['result','stage','burst_trigger','source','photo_bucket','battery','fresh_flash','simulated','label']) }}
+      </div>
+      <details class="meta-details" open>
+        <summary>Parameters &amp; intermediates</summary>
+        <table class="meta-table">
+          {{ render_rows(entry.meta, spec, order) }}
+        </table>
+      </details>
+      {% endif %}
+    </div>
+
+    <!-- ── Label bar ── -->
+    <div class="label-bar" id="label-bar">
+      {% set cur_lbl = (entry.meta or {}).get('label') %}
+      <button class="label-btn label-btn-bird    {{ 'active' if cur_lbl == 'bird'    }}" onclick="setLabel('bird')"   >Bird</button>
+      <button class="label-btn label-btn-special {{ 'active' if cur_lbl == 'special' }}" onclick="setLabel('special')">Special</button>
+      <button class="label-btn label-btn-ignore  {{ 'active' if cur_lbl == 'ignore'  }}" onclick="setLabel('ignore')" >Ignore</button>
+      {% set dl = (entry.meta or {}).get('downloaded_at') %}
+      {% if dl %}<span style="font-size:11px;color:#2980b9;font-weight:600;">saved {{ dl[:16] }}</span>{% endif %}
+      <span class="label-hint">
+        <kbd>Space</kbd> bird &nbsp; <kbd>S</kbd> special &nbsp; <kbd>Del</kbd> ignore &nbsp; <kbd>C</kbd> clear
+      </span>
+    </div>
+
+  </div><!-- end right-panel -->
+
+</div><!-- end main-content -->
 
 <div id="tile-tooltip"></div>
 
@@ -325,13 +381,16 @@ function toggleTiles() {
   tilesOn = !tilesOn;
   const canvas = document.getElementById('tile-canvas');
   const btn    = document.getElementById('btn-tiles');
+  const legend = document.getElementById('tile-legend');
   if (tilesOn) {
     drawTiles();
     canvas.classList.add('visible');
     if (btn) btn.classList.add('active');
+    if (legend) legend.classList.add('visible');
   } else {
     canvas.classList.remove('visible');
     if (btn) btn.classList.remove('active');
+    if (legend) legend.classList.remove('visible');
   }
 }
 

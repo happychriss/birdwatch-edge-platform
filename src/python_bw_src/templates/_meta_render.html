@@ -130,6 +130,11 @@
   {% endfor %}
 {% endmacro %}
 
+{% macro _desc_td(rule) %}
+  {% set d = rule.get('desc', '') %}
+  {% if d %}<td class="meta-desc">{{ d }}</td>{% else %}<td class="meta-desc"></td>{% endif %}
+{% endmacro %}
+
 {% macro _row(k, val, spec) %}
   {% set rule = spec.get(k, {}) %}
   {% set rtype = rule.get('type', 'plain') %}
@@ -140,11 +145,13 @@
     <tr>
       <td class="meta-key">{{ k }}</td>
       <td class="meta-val"><details><summary>{{ val.__class__.__name__ }}[{{ val | length if val is iterable else '' }}]</summary><code>{{ val }}</code></details></td>
+      {{ _desc_td(rule) }}
     </tr>
   {% elif rtype == 'badge' %}
     <tr>
       <td class="meta-key">{{ k }}</td>
       <td class="meta-val">{{ _badge_from_rule(rule, val) }}</td>
+      {{ _desc_td(rule) }}
     </tr>
   {% elif rtype == 'stage_badge' %}
     {% set pal = rule.get('palette', {}) %}
@@ -152,6 +159,7 @@
     <tr>
       <td class="meta-key">{{ k }}</td>
       <td class="meta-val"><span class="badge" style="background:{{ col }};color:#fff">{{ val }}</span></td>
+      {{ _desc_td(rule) }}
     </tr>
   {% elif rtype == 'badge_if' %}
     <tr>
@@ -163,6 +171,7 @@
           {{ val }}
         {% endif %}
       </td>
+      {{ _desc_td(rule) }}
     </tr>
   {% elif rtype == 'format_val' %}
     {% set fmt = rule.get('format', '{}') %}
@@ -176,12 +185,14 @@
           {{ fmt.format(val) }}
         {% endif %}
       </td>
+      {{ _desc_td(rule) }}
     </tr>
   {% else %}
     {% if val is not none %}
     <tr>
       <td class="meta-key">{{ k }}</td>
       <td class="meta-val">{{ val }}</td>
+      <td class="meta-desc"></td>
     </tr>
     {% endif %}
   {% endif %}

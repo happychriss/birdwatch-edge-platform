@@ -16,6 +16,9 @@ format_val  : format string applied to the numeric value (Python str.format styl
 badge_if    : only render as a badge when the value equals "match_value".
 hide_values : list of values to suppress entirely (don't render a row at all).
 numeric     : display as plain number (no special styling).
+
+Optional "desc" key on any entry: one-line explanation shown as a grey third column
+in the frame_detail parameter table.
 """
 
 DISPLAY_SPEC: dict = {
@@ -26,6 +29,7 @@ DISPLAY_SPEC: dict = {
             "process": ("#d5f5e3", "#1e8449"),
         },
         "fallback": ("#eee", "#778"),
+        "desc": "Final decision — process: bird/event candidate uploaded; clouds: suppressed as false trigger",
     },
     "stage": {
         "type": "stage_badge",
@@ -49,6 +53,7 @@ DISPLAY_SPEC: dict = {
             "SAFE":           "#27ae60",
         },
         "fallback": "#aab",
+        "desc": "Pipeline stage: DARK_OBJ=dark blob, QUIET=scene calm, WARMUP=model warming up, DUPLICATE=identical re-fire, BRIGHTNESS_SHIFT=whole-scene shift, DIFFUSE=cloud shadow",
     },
     "burst_trigger": {
         "type": "stage_badge",
@@ -63,11 +68,16 @@ DISPLAY_SPEC: dict = {
             "SAFE":           "#27ae60",
         },
         "fallback": "#aab",
+        "desc": "Burst pre-filter result comparing Y tile means to the previous captured frame",
     },
-    "battery": {
-        "type": "format_val",
-        "format": "{:.2f} V",
-        "warn_below": 3.6,   # adds red tint when value < threshold
+    "source": {
+        "type": "badge",
+        "colors": {
+            "pir": ("#fde8d8", "#c0392b"),
+            "rtc": ("#d1f2eb", "#1a7d5c"),
+        },
+        "fallback": ("#eee", "#778"),
+        "desc": "Wakeup source — pir: motion sensor; rtc: scheduled 15-min reference cycle (only RTC frames update the background model)",
     },
     "photo_bucket": {
         "type": "badge",
@@ -77,32 +87,59 @@ DISPLAY_SPEC: dict = {
             "LOWLIGHT": ("#e8e8e8", "#555555"),
         },
         "fallback": ("#eee", "#778"),
+        "desc": "Exposure regime from metering shot — BRIGHT: gm ≥ 160, NORMAL: 80–159, LOWLIGHT: < 80. Selects the camera AEC profile and indexes the background model.",
     },
-    "source": {
-        "type": "badge",
-        "colors": {
-            "pir": ("#fde8d8", "#c0392b"),
-            "rtc": ("#d1f2eb", "#1a7d5c"),
-        },
-        "fallback": ("#eee", "#778"),
+    "battery": {
+        "type": "format_val",
+        "format": "{:.2f} V",
+        "warn_below": 3.6,
+        "desc": "Battery voltage at capture time. Below 3.6 V device may shut down mid-cycle.",
     },
-    "trigger": {
-        "type": "hide_values",
-        "hide_values": ["Boot", "PIR", "Timer", "Camera Start", "Camera Stop"],
+    "global_mean": {
+        "type": "numeric",
+        "desc": "Mean Y (luma) across all 300 tiles, 0–255. Used to pick photo_bucket (BRIGHT/NORMAL/LOWLIGHT) and to detect NIGHT (< 70).",
     },
-    # Numeric intermediates — shown as plain numbers, no badge.
-    "global_mean":       {"type": "numeric"},
-    "ratio":             {"type": "format_val", "format": "{:.3f}"},
+    "ratio": {
+        "type": "format_val",
+        "format": "{:.3f}",
+        "desc": "dark_tiles / 300. ≤ 0.25 → QUIET (suppress). Measures fraction of tiles with confirmed dark anomalies.",
+    },
+    "dark_tiles": {
+        "type": "numeric",
+        "desc": "Tiles with z-score > 3 AND ≥ 35 DN below model AND chroma shift. ≥ 1 required alongside new_dark_tiles to trigger DARK_OBJ.",
+    },
+    "new_dark_tiles": {
+        "type": "numeric",
+        "desc": "Tiles with z-score > 3 AND ≥ 20 DN below the *previous* frame. Must be ≥ 1 together with dark_tiles for DARK_OBJ — confirms the object is newly appeared.",
+    },
+    "dark_blob_max": {
+        "type": "numeric",
+        "desc": "Size of the largest spatially-connected cluster of dark tiles. Compact blobs (birds) score higher than diffuse cloud shadows.",
+    },
+    "n_chroma_changed": {
+        "type": "numeric",
+        "desc": "Tiles where ΔU² + ΔV² > 64 vs background model mean (chroma shift ≥ 8). Real objects (pigeons, people) shift chroma; cloud shadows do not.",
+    },
+    "burst_n_changed": {
+        "type": "numeric",
+        "desc": "Tiles where |Y_cur − Y_prev| > 12 DN (any direction vs previous frame). Zero → DUPLICATE suppression candidate.",
+    },
+    "burst_n_dark": {
+        "type": "numeric",
+        "desc": "Tiles that got ≥ 12 DN darker vs previous frame. ≥ 60 → DIFFUSE (cloud shadow sweeping full scene).",
+    },
+    "burst_n_chroma": {
+        "type": "numeric",
+        "desc": "Tiles where ΔU² + ΔV² > 64 vs previous frame. Must also be zero (alongside burst_n_changed) for DUPLICATE to fire.",
+    },
+    "burst_gm_diff": {
+        "type": "format_val",
+        "format": "{:.1f} DN",
+        "desc": "Global mean Y change vs previous frame. > 12 DN → BRIGHTNESS_SHIFT (whole-scene lighting event; passes through regardless of tile pattern).",
+    },
     "dark_anomalous":    {"type": "numeric"},
-    "dark_tiles":        {"type": "numeric"},
-    "new_dark_tiles":    {"type": "numeric"},
     "warmup":            {"type": "numeric"},
     "prev_valid":        {"type": "numeric"},
-    "burst_n_changed":   {"type": "numeric"},
-    "burst_n_dark":      {"type": "numeric"},
-    "burst_n_chroma":    {"type": "numeric"},
-    "n_chroma_changed":  {"type": "numeric"},
-    "dark_blob_max":     {"type": "numeric"},
     # Simulated marker — shown when meta was computed by backfill_meta.py, not firmware.
     "simulated": {
         "type": "badge_if",
@@ -110,18 +147,18 @@ DISPLAY_SPEC: dict = {
         "label": "SIM",
         "color": "#7d6608",
         "text_color": "#fff",
+        "desc": "Meta was re-derived from the JPEG by backfill_meta.py (Python simulation), not emitted by the ESP firmware.",
     },
     # Large arrays — hide from card view, show collapsed in detail view only.
-    "tile_means":           {"type": "detail_only"},
-    "tile_means_u":         {"type": "detail_only"},
-    "tile_means_v":         {"type": "detail_only"},
-    "model_tile_means":     {"type": "detail_only"},
+    "tile_means":           {"type": "detail_only", "desc": "300 Y (luma) tile means, 20×15 grid, uint8 (0–255). Drives the tile overlay Δm/Δp display."},
+    "tile_means_u":         {"type": "detail_only", "desc": "300 U (Cb) tile means, BT.601 full-range, centred at 128."},
+    "tile_means_v":         {"type": "detail_only", "desc": "300 V (Cr) tile means, BT.601 full-range, centred at 128."},
+    "model_tile_means":     {"type": "detail_only", "desc": "Background model Y means snapshot before this frame's update. Used for Δm in the tile overlay."},
     "model_tile_means_u":   {"type": "detail_only"},
     "model_tile_means_v":   {"type": "detail_only"},
     # Backfill-computed fields — suppress from card badge row; visible in detail table.
     "downloaded_at": {"type": "plain"},
-    "burst_label":   {"type": "plain"},
-    "burst_gm_diff": {"type": "format_val", "format": "{:.1f} DN"},
+    "burst_label":   {"type": "plain", "desc": "Burst filter decision label (mirrors burst_trigger stage name)."},
     # Firmware-flash marker — badge only on the first frame after a new build.
     "fresh_flash": {
         "type": "badge_if",
@@ -129,6 +166,7 @@ DISPLAY_SPEC: dict = {
         "label": "FLASHED",
         "color": "#6c3483",
         "text_color": "#fff",
+        "desc": "First frame captured after a new firmware flash. Background model was reset.",
     },
     "fw_build":    {"type": "detail_only"},
     # Manual annotation labels (set via keyboard in frame_detail view).
@@ -140,6 +178,11 @@ DISPLAY_SPEC: dict = {
             "ignore":  ("#f4f6f7", "#7f8c8d"),
         },
         "fallback": ("#eee", "#778"),
+        "desc": "Manual training label — bird: confirmed bird, special: noteworthy non-bird, ignore: delete/false positive.",
+    },
+    "trigger": {
+        "type": "hide_values",
+        "hide_values": ["Boot", "PIR", "Timer", "Camera Start", "Camera Stop"],
     },
 }
 
