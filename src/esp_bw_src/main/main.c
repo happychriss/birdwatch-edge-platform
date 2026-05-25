@@ -270,7 +270,8 @@ static void run_normal_cycle(void)
 {
     uint32_t causes = esp_sleep_get_wakeup_causes();
     const char *trigger = wakeup_to_trigger(causes);
-    ESP_LOGI(TAG, "─── normal cycle, trigger=%s ───", trigger);
+    ESP_LOGI(TAG, "─── normal cycle, trigger=%s source=%s ───",
+             trigger, s_wakeup_source == BW_WAKE_RTC ? "RTC" : "PIR");
 
     if (bw_adc_init() != ESP_OK) {
         ESP_LOGE(TAG, "ADC init failed — continuing without sensor data");
@@ -278,31 +279,34 @@ static void run_normal_cycle(void)
     float battery_v = bw_adc_read_battery_voltage();
     ESP_LOGI(TAG, "battery=%.3fV", battery_v);
 
-    // ── Cloud-check filter ─────────────────────────────────────────────────
-    // Runs on a QQVGA grayscale frame before the main JPEG capture.
-    // In debug mode the upload always proceeds; the decision is sent as
-    // metadata (cc_label / cc_stage) so the server can display it.
-    // To suppress uploads for cloud frames: check result.label == "clouds".
-    bw_cc_result_t cc;
-    if (bw_cc_assess(&cc) != ESP_OK) {
-        ESP_LOGW(TAG, "cloud-check failed — proceeding with upload");
-        strcpy(cc.label, "process");
-        strcpy(cc.stage, "CAM_ERR");
+    // ── Phase 1: Metering shot — LIGHTCHECK QQVGA → global_mean → photo_bucket ─
+    // A cheap QQVGA grayscale frame is captured to determine scene brightness
+    // before the full JPEG capture.  This avoids adapting the JPEG exposure from
+    // a JPEG that hasn't been taken yet.
+    bw_cam_mode_t photo_mode = BW_CAM_MODE_PHOTO;   // default: NORMAL
+    uint8_t gm_lightcheck    = 128;
+
+    if (bw_cam_init(BW_CAM_MODE_LIGHTCHECK) == ESP_OK) {
+        camera_fb_t *lc = bw_cam_capture();
+        if (lc && lc->len > 0) {
+            uint32_t sum = 0;
+            for (size_t i = 0; i < lc->len; i++) sum += lc->buf[i];
+            gm_lightcheck = (uint8_t)(sum / lc->len);
+        }
+        if (lc) bw_cam_capture_return(lc);
+        bw_cam_deinit();
+    } else {
+        ESP_LOGW(TAG, "LIGHTCHECK init failed — default NORMAL exposure");
     }
 
-    // ── Capture JPEG ───────────────────────────────────────────────────────
-    // Pick photo exposure mode from the ambient brightness the cloud-check
-    // frame already measured — no extra camera cycle needed.
-    bw_cam_mode_t photo_mode;
-    if      (cc.global_mean >= BW_BRIGHT_PHOTO_THRESHOLD)   photo_mode = BW_CAM_MODE_PHOTO_BRIGHT;
-    else if (cc.global_mean >= BW_LOWLIGHT_PHOTO_THRESHOLD) photo_mode = BW_CAM_MODE_PHOTO;
-    else                                                     photo_mode = BW_CAM_MODE_PHOTO_LOWLIGHT;
+    if      (gm_lightcheck >= BW_BRIGHT_PHOTO_THRESHOLD)   photo_mode = BW_CAM_MODE_PHOTO_BRIGHT;
+    else if (gm_lightcheck >= BW_LOWLIGHT_PHOTO_THRESHOLD) photo_mode = BW_CAM_MODE_PHOTO;
+    else                                                    photo_mode = BW_CAM_MODE_PHOTO_LOWLIGHT;
     const char *photo_mode_str = (photo_mode == BW_CAM_MODE_PHOTO_BRIGHT)   ? "BRIGHT"   :
                                  (photo_mode == BW_CAM_MODE_PHOTO_LOWLIGHT) ? "LOWLIGHT" : "NORMAL";
-    ESP_LOGI(TAG, "photo mode: %s (global_mean=%u bright>=%d normal>=%d)",
-             photo_mode_str, cc.global_mean,
-             BW_BRIGHT_PHOTO_THRESHOLD, BW_LOWLIGHT_PHOTO_THRESHOLD);
+    ESP_LOGI(TAG, "metering: gm=%u → photo_mode=%s", gm_lightcheck, photo_mode_str);
 
+    // ── Phase 2: JPEG capture at the selected exposure profile ────────────────
     if (bw_cam_init(photo_mode) != ESP_OK) {
         ESP_LOGE(TAG, "camera init failed");
         bw_diag_push("CAM_INIT_FAIL");
@@ -310,7 +314,7 @@ static void run_normal_cycle(void)
         bw_adc_deinit();
         return;
     }
-    bw_cam_discard_frames(6, 100);   // AEC settle after LIGHTCHECK→PHOTO mode switch (~600 ms at 16 MHz SXGA)
+    bw_cam_discard_frames(6, 100);   // AEC settle: ~600 ms at 16 MHz SXGA
     camera_fb_t *fb = bw_cam_capture();
     if (!fb) {
         ESP_LOGE(TAG, "no frame captured — aborting cycle");
@@ -321,8 +325,46 @@ static void run_normal_cycle(void)
         return;
     }
 
-    // Copy JPEG into a standalone PSRAM buffer and stop the camera immediately
-    // so the cam_task does not keep filling DMA buffers during the WiFi phase.
+    // ── Phase 3: On-device JPEG decode → per-tile YUV means ──────────────────
+    // tile arrays live on the stack (300 B each — fine for ESP32-S3's 8 KB task stack)
+    uint8_t tile_y[CC_NUM_TILES], tile_u[CC_NUM_TILES], tile_v[CC_NUM_TILES];
+    bool decode_ok = (bw_cam_jpeg_decode_to_tile_means(
+        fb->buf, fb->len, tile_y, tile_u, tile_v, CC_TILES_X, CC_TILES_Y) == ESP_OK);
+    if (!decode_ok) {
+        ESP_LOGW(TAG, "JPEG decode failed — treating frame as process (safety)");
+    }
+
+    // ── Phase 4: Cloud-check pipeline ─────────────────────────────────────────
+    bw_cc_result_t cc;
+    if (decode_ok) {
+        bw_cc_set_source(s_wakeup_source == BW_WAKE_RTC);
+        bw_cc_assess(tile_y, tile_u, tile_v, &cc);
+    } else {
+        // Decode failed: skip the model, upload unconditionally (safety bias)
+        bw_tele_reset();
+        bw_tele_s("result", "process");
+        bw_tele_s("stage",  "CAM_ERR");
+        bw_tele_s("photo_bucket", photo_mode_str);
+        bw_tele_i("global_mean", (long)gm_lightcheck);
+        strcpy(cc.label, "process");
+        strcpy(cc.stage, "CAM_ERR");
+        strncpy(cc.photo_bucket, photo_mode_str, sizeof(cc.photo_bucket) - 1);
+        cc.global_mean = gm_lightcheck;
+    }
+    ESP_LOGI(TAG, "cloud-check: bucket=%s gm=%u → %s (%s)",
+             cc.photo_bucket, cc.global_mean, cc.label, cc.stage);
+
+    // ── Phase 5: Suppress clouds — discard JPEG, skip upload ─────────────────
+    if (strcmp(cc.label, "clouds") == 0) {
+        bw_cam_capture_return(fb);
+        bw_cam_deinit();
+        bw_blink(BW_BLINK_CAM_OK);
+        ESP_LOGI(TAG, "suppressed as clouds → no upload");
+        bw_adc_deinit();
+        return;
+    }
+
+    // ── Phase 6: Copy JPEG to PSRAM, stop camera ──────────────────────────────
     size_t   img_len = fb->len;
     uint8_t *img     = heap_caps_malloc(img_len, MALLOC_CAP_SPIRAM);
     if (!img) {
@@ -399,17 +441,14 @@ static void run_normal_cycle(void)
             ESP_LOGI(TAG, "WiFi back up");
         }
         ESP_LOGI(TAG, "upload attempt %d/%d", attempt, BW_HTTP_MAX_RETRIES);
-        // photo_mode_str already set above
-        // Append per-cycle values that are only known after cc assess completes.
-        // Cloud-check values (result, stage, global_mean, ratio, tile_means, …) were
-        // already added inside bw_cc_assess().  These three are added once here.
+        // Cloud-check values (result, stage, global_mean, photo_bucket, tile_means, …)
+        // were already added inside bw_cc_assess().  Add the remaining cycle fields.
         bw_tele_f("battery",      (double)battery_v);
         bw_tele_i("wifi_rssi",    bw_wifi_get_rssi());
         bw_tele_s("trigger",      trigger);
         bw_tele_s("source",       s_wakeup_source == BW_WAKE_RTC ? "rtc" : "pir");
         bw_tele_s("rtc_time",     s_rtc_now_str);
         bw_tele_s("next_wakeup",  s_next_wakeup_str);
-        bw_tele_s("photo_mode",   photo_mode_str);
         if (s_fresh_flash) {
             bw_tele_b("fresh_flash", true);
             bw_tele_s("fw_build",   s_fw_build);

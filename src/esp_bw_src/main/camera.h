@@ -33,3 +33,15 @@ void bw_cam_discard_frames(int n, int delay_ms);
 
 // Switch frame size / pixel format on the fly (for camera-server mode).
 esp_err_t bw_cam_set_format(pixformat_t fmt, framesize_t size);
+
+// Decode a JPEG buffer into per-tile YUV means via TJpgDec ROM decoder.
+//   jpeg/len : bytes from the camera frame buffer
+//   tile_y/u/v : output arrays, each grid_w*grid_h uint8 elements
+//              BT.601 full-range: Y in [0,255], U/V in [0,255] centred at 128
+//   grid_w/h : tile grid dimensions (e.g. 20×15 for CC_TILES_X × CC_TILES_Y)
+// Returns ESP_OK on success, ESP_FAIL on JPEG decode error, ESP_ERR_NO_MEM
+// on allocation failure.  ~200 ms for SXGA at 16 MHz XCLK on ESP32-S3.
+esp_err_t bw_cam_jpeg_decode_to_tile_means(
+    const uint8_t *jpeg, size_t len,
+    uint8_t *tile_y, uint8_t *tile_u, uint8_t *tile_v,
+    int grid_w, int grid_h);

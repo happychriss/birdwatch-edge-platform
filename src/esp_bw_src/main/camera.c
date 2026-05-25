@@ -6,6 +6,10 @@
 #include "freertos/task.h"
 #include "esp_log.h"
 #include "esp_camera.h"
+#include "esp_heap_caps.h"
+#include <string.h>
+
+#include "esp32s3/rom/tjpgd.h"
 
 static const char *TAG = "CAM";
 
@@ -144,11 +148,11 @@ static void apply_lightcheck_settings(sensor_t *s)
     s->set_exposure_ctrl(s, 1);
     s->set_aec2(s, 0);
     s->set_ae_level(s, 0);
-    s->set_aec_value(s, 500);
+    s->set_aec_value(s, 300);   // was 500 — lower starting AEC avoids noon saturation
 
     s->set_gain_ctrl(s, 1);
     s->set_agc_gain(s, 0);
-    s->set_gainceiling(s, (gainceiling_t)4);
+    s->set_gainceiling(s, (gainceiling_t)2);  // 8x — was 32x which amplified noon saturation
 
     s->set_bpc(s, 0);
     s->set_wpc(s, 1);
@@ -208,6 +212,7 @@ esp_err_t bw_cam_init(bw_cam_mode_t mode)
 
     ESP_LOGI(TAG, "init mode=%s fmt=%d size=%d",
              mode == BW_CAM_MODE_PHOTO          ? "PHOTO" :
+             mode == BW_CAM_MODE_PHOTO_BRIGHT   ? "PHOTO_BRIGHT" :
              mode == BW_CAM_MODE_PHOTO_LOWLIGHT ? "PHOTO_LOWLIGHT" : "LIGHTCHECK",
              fmt, size);
 
@@ -286,5 +291,125 @@ esp_err_t bw_cam_set_format(pixformat_t fmt, framesize_t size)
     s->set_framesize(s, size);
     vTaskDelay(pdMS_TO_TICKS(100));
     ESP_LOGI(TAG, "format switched fmt=%d size=%d", fmt, size);
+    return ESP_OK;
+}
+
+// ── JPEG → tile YUV means (TJpgDec ROM decoder) ──────────────────────────────
+
+typedef struct {
+    uint32_t sum_r, sum_g, sum_b;
+    uint32_t count;
+} tile_acc_t;
+
+typedef struct {
+    const uint8_t *src;
+    size_t src_len, src_pos;
+    int grid_w, grid_h;
+    uint16_t img_w, img_h;
+    tile_acc_t *acc;
+} jpeg_ctx_t;
+
+static UINT jpeg_infunc(JDEC *jd, BYTE *buf, UINT nbytes)
+{
+    jpeg_ctx_t *ctx = (jpeg_ctx_t *)jd->device;
+    UINT remaining = (UINT)(ctx->src_len - ctx->src_pos);
+    if (nbytes > remaining) nbytes = remaining;
+    if (buf) memcpy(buf, ctx->src + ctx->src_pos, nbytes);
+    ctx->src_pos += nbytes;
+    return nbytes;
+}
+
+static UINT jpeg_outfunc(JDEC *jd, void *bitmap, JRECT *rect)
+{
+    jpeg_ctx_t *ctx = (jpeg_ctx_t *)jd->device;
+    const uint8_t *px = (const uint8_t *)bitmap;
+    int blk_w = rect->right  - rect->left + 1;
+    int blk_h = rect->bottom - rect->top  + 1;
+
+    for (int row = 0; row < blk_h; row++) {
+        for (int col = 0; col < blk_w; col++) {
+            int x = rect->left + col;
+            int y = rect->top  + row;
+            uint8_t r = *px++, g = *px++, b = *px++;
+            if (x >= ctx->img_w || y >= ctx->img_h) continue;
+
+            int tx = x * ctx->grid_w / ctx->img_w;
+            int ty = y * ctx->grid_h / ctx->img_h;
+            tile_acc_t *a = &ctx->acc[ty * ctx->grid_w + tx];
+            a->sum_r += r;
+            a->sum_g += g;
+            a->sum_b += b;
+            a->count++;
+        }
+    }
+    return 1;   // continue
+}
+
+esp_err_t bw_cam_jpeg_decode_to_tile_means(
+    const uint8_t *jpeg, size_t len,
+    uint8_t *tile_y, uint8_t *tile_u, uint8_t *tile_v,
+    int grid_w, int grid_h)
+{
+    int n_tiles = grid_w * grid_h;
+
+    tile_acc_t *acc = heap_caps_malloc((size_t)n_tiles * sizeof(tile_acc_t), MALLOC_CAP_INTERNAL);
+    if (!acc) {
+        ESP_LOGE(TAG, "decode: tile acc alloc failed (%d tiles)", n_tiles);
+        return ESP_ERR_NO_MEM;
+    }
+    memset(acc, 0, (size_t)n_tiles * sizeof(tile_acc_t));
+
+    jpeg_ctx_t ctx = {
+        .src = jpeg, .src_len = len, .src_pos = 0,
+        .grid_w = grid_w, .grid_h = grid_h,
+        .acc = acc,
+    };
+
+    static uint8_t s_jd_pool[4096];   // TJpgDec work area — 3100 B min, 4096 B safe
+    JDEC jd;
+    JRESULT r = jd_prepare(&jd, jpeg_infunc, s_jd_pool, sizeof(s_jd_pool), &ctx);
+    if (r != JDR_OK) {
+        ESP_LOGE(TAG, "jd_prepare failed: %d", (int)r);
+        free(acc);
+        return ESP_FAIL;
+    }
+
+    ctx.img_w = jd.width;
+    ctx.img_h = jd.height;
+    ESP_LOGI(TAG, "decode %ux%u JPEG → %dx%d tiles", jd.width, jd.height, grid_w, grid_h);
+
+    r = jd_decomp(&jd, jpeg_outfunc, 0);   // scale=0: full resolution
+    if (r != JDR_OK) {
+        ESP_LOGE(TAG, "jd_decomp failed: %d", (int)r);
+        free(acc);
+        return ESP_FAIL;
+    }
+
+    // Convert accumulated RGB sums to per-tile BT.601 YUV means.
+    // Averaging RGB then converting is mathematically equivalent to
+    // per-pixel conversion then averaging (BT.601 is linear).
+    for (int i = 0; i < n_tiles; i++) {
+        if (acc[i].count == 0) {
+            tile_y[i] = tile_u[i] = tile_v[i] = 128;
+            continue;
+        }
+        uint32_t r8 = acc[i].sum_r / acc[i].count;
+        uint32_t g8 = acc[i].sum_g / acc[i].count;
+        uint32_t b8 = acc[i].sum_b / acc[i].count;
+
+        // BT.601 full-range: Y=[0,255], U/V=[0,255] centred at 128
+        tile_y[i] = (uint8_t)((77u*r8 + 150u*g8 + 29u*b8) >> 8);
+
+        int uv;
+        uv = (-(int)(43*r8) - (int)(85*g8) + (int)(128*b8)) >> 8;
+        uv += 128;
+        tile_u[i] = (uint8_t)(uv < 0 ? 0 : uv > 255 ? 255 : uv);
+
+        uv = ((int)(128*r8) - (int)(107*g8) - (int)(21*b8)) >> 8;
+        uv += 128;
+        tile_v[i] = (uint8_t)(uv < 0 ? 0 : uv > 255 ? 255 : uv);
+    }
+
+    free(acc);
     return ESP_OK;
 }

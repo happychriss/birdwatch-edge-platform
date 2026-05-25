@@ -103,6 +103,12 @@
 #define BW_BRIGHT_PHOTO_THRESHOLD    160
 #define BW_LOWLIGHT_PHOTO_THRESHOLD   80
 
+// ─── Cloud-check chroma thresholds ─────────────────────────────────────────
+// Squared chroma distance (ΔU² + ΔV²) thresholds — avoids sqrt in inner loops.
+// Linear equivalent: BW_CC_CHROMA_DELTA_THR_SQ = 64 → threshold = 8 DN.
+#define BW_CC_CHROMA_DELTA_THR_SQ   64   // burst DUPLICATE gate: tile chroma-changed if ΔC² > this
+#define BW_CC_CHROMA_DOBJ_GATE_SQ   64   // DARK_OBJ chroma gate: tile qualifies only if ΔC² > this
+
 // ─── Camera AWB gain (Auto White Balance adaptive gain) ────────────────────
 // Set to 1 to let the OV2640 adapt gain per-channel based on scene content.
 // Set to 0 to use fixed Kelvin presets only (wb_mode per camera mode).
