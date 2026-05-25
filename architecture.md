@@ -32,21 +32,20 @@ src/
       ...
   cloud-check/         # Python algorithm package + tools
     cloud_check/       # importable package
-      classifier.py    # background-model decision tree
-      background.py    # EMA background model
-      burst_filter.py  # burst sequence filter
+      classifier.py    # background-model decision tree (3-channel YUV, photo-bucket × scene-bucket)
+      background.py    # EMA background model (shape: 3 photo-buckets × 1 scene-bucket × 15 × 20)
+      burst_filter.py  # burst sequence filter (chroma-aware DUPLICATE)
       config.py        # all thresholds and config
-      features.py      # tile extraction from grayscale frames
-      scene_buckets.py # K=4 centroid definitions
-    backfill_meta.py   # recompute all frame meta from DB tile_means
-    validate.py        # parity check: Python vs ESP telemetry
+      features.py      # tile extraction + BT.601 YCbCr conversion
+      scene_buckets.py # K=1 placeholder (forward-compat for K>1)
+    backfill_meta.py   # re-derive Y/U/V tile means + photo_bucket from stored JPEGs (PIL YCbCr)
+    validate.py        # parity check: Python simulation vs ESP telemetry
     sweep.py           # grid search over thresholds
   python_bw_src/       # Flask web server + gallery
-    serve.py           # routes: /frame, /upload, /gallery, /admin/...
-    db.py              # SQLAlchemy models (BwFrame, Session)
-    display_spec.py    # field rendering rules for the gallery
-    templates/         # Jinja2 HTML
-    backfill_meta.py   → symlink or reference to ../cloud-check/backfill_meta.py
+    main.py            # routes: /frame, /upload, /frames, /admin/...
+    db.py              # SQLAlchemy models (BwFrame, BwPhoto, Session)
+    display_spec.py    # field rendering rules for the gallery (badges, format_val, etc.)
+    templates/         # Jinja2 HTML (frame_detail.html, frames.html, _meta_render.html)
 ```
 
 **Consistency rule:** any change to the detection algorithm must be synced across all three projects. The Python reference is the truth; the ESP firmware is the deployed version.
@@ -81,22 +80,29 @@ Key `meta` fields:
 
 | Field | Source | Notes |
 |-------|--------|-------|
-| `global_mean` | firmware / backfill | Mean brightness of all 300 tiles (0–255) |
-| `tile_means` | firmware / backfill | Flat list of 300 tile means |
-| `model_tile_means` | backfill | Model snapshot before this frame's update |
+| `source` | firmware | `"pir"` (motion) or `"rtc"` (15-min reference cycle). Only RTC frames update background model. |
+| `photo_bucket` | firmware / backfill | Exposure regime: `"NORMAL"`, `"BRIGHT"`, `"LOWLIGHT"` — derived from metering shot `global_mean` |
+| `scene_bucket` | firmware / backfill | Shadow-pattern cluster index — always `0` (K=1 currently, forward-compat for K>1) |
+| `global_mean` | firmware / backfill | Mean Y (luma) across all 300 tiles (0–255) |
+| `tile_means` | firmware / backfill | 300-element uint8 array of Y tile means |
+| `tile_means_u` | firmware / backfill | 300-element uint8 array of U (Cb) tile means, BT.601, centred at 128 |
+| `tile_means_v` | firmware / backfill | 300-element uint8 array of V (Cr) tile means |
+| `model_tile_means` | firmware / backfill | 300-element Y background model snapshot (before this frame's update) |
 | `stage` | firmware / backfill | WARMUP, DARK_OBJ, QUIET, SCENE_DRIFT, AMBIGUOUS, NIGHT |
-| `result` | firmware / backfill | `process` or `clouds` |
-| `ratio` | backfill | Fraction of z-anomalous dark tiles |
-| `dark_tiles` | backfill | Tiles ≥ 20 DN below model (no z-gate) |
-| `new_dark_tiles` | backfill | Tiles ≥ 20 DN darker than previous frame |
-| `dark_blob_max` | backfill | Largest connected dark-delta blob (tiles) |
-| `scene_bucket` | backfill | K=4 lighting bucket (0=dim … 3=sun) |
-| `burst_trigger` | firmware / backfill | Burst pre-filter stage for this frame |
+| `result` | firmware / backfill | `"process"` or `"clouds"` |
+| `ratio` | firmware / backfill | dark_tiles / 300 |
+| `dark_tiles` | firmware / backfill | Tiles with z > 3 AND ≥ 35 DN below model AND chroma gate |
+| `new_dark_tiles` | firmware / backfill | Tiles with z > 3 AND ≥ 20 DN below previous frame |
+| `n_chroma_changed` | firmware / backfill | Tiles where ΔC² > 64 vs background model mean |
+| `dark_blob_max` | backfill only | Largest spatially-connected dark-delta region (tiles); Python-only, not on-device |
+| `burst_trigger` | firmware / backfill | Burst pre-filter stage (FIRST, BRIGHTNESS_SHIFT, DUPLICATE, BRIGHT_STABLE, DIFFUSE, SAFE) |
+| `burst_n_changed` | firmware | Tiles where \|Y_cur − Y_prev\| > 12 DN |
+| `burst_n_dark` | firmware | Tiles darkened by > 12 DN vs prev frame |
+| `burst_n_chroma` | firmware | Tiles where ΔU² + ΔV² > 64 vs prev frame |
 | `label` | manual (gallery UI) | `bird`, `ignore`, `special`, or absent |
-| `simulated` | backfill | True if meta was computed by backfill, not firmware |
-| `fresh_flash` | firmware | True on first frame after a new build |
+| `simulated` | backfill | True when meta was recomputed by `backfill_meta.py`, not emitted by firmware |
+| `fresh_flash` | firmware | True on first frame after a new firmware flash |
 | `battery` | firmware | Battery voltage in V |
-| `photo_mode` | firmware / backfill | `BRIGHT`, `NORMAL`, or `LOWLIGHT` |
 
 ---
 

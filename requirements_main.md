@@ -41,13 +41,18 @@ app_main():
   rtc_compute_next() → s_next_wakeup_str for telemetry
   run_normal_cycle():
     │
-    ├─ bw_cc_assess()   — QQVGA cloud-check filter
-    ├─ bw_cam_capture() — SXGA JPEG
+    ├─ bw_cam_init(LIGHTCHECK) → metering shot (QQVGA grayscale) → global_mean → photo_bucket
+    ├─ bw_cam_deinit() → bw_cam_init(<photo_bucket> JPEG SXGA profile)
+    ├─ bw_cam_capture() — SXGA JPEG (these bytes are what gets uploaded)
+    ├─ bw_cam_jpeg_decode_to_tile_means() — TJpgDec ROM → tile_y/u/v[300]
+    ├─ bw_cc_set_source(s_wakeup_source)
+    ├─ bw_cc_assess(tile_y, tile_u, tile_v, gm, &cc) — burst + background model
     ├─ bw_wifi_connect_blocking()
     ├─ rtc_sync_from_ntp() (weekly or after fresh flash)
-    ├─ bw_http_upload_image(meta_json, jpg)
-    │       meta includes: result, stage, global_mean, battery,
-    │                      source, next_wakeup, photo_mode, ...
+    ├─ bw_http_upload_image(meta_json, jpg)  ← all frames uploaded (process and clouds)
+    │       meta includes: result, stage, burst_trigger, source, photo_bucket,
+    │                      global_mean, battery, tile_means/u/v, model_tile_means,
+    │                      dark_tiles, n_chroma_changed, ratio, next_wakeup, ...
     │
     ├─── Server replies CAMERA_SERVER → live stream mode
     └─── Server replies PIR_SENSOR   → normal power-down
@@ -117,28 +122,58 @@ When the server instructs the device to enter camera server mode:
 | Field | Type | Description |
 |-------|------|-------------|
 | `result` | string | `"clouds"` or `"process"` |
-| `stage` | string | Cloud-check decision stage |
-| `global_mean` | int | Scene brightness 0–255 |
-| `source` | string | `"pir"` or `"rtc"` — what triggered this boot |
-| `next_wakeup` | string | `"YYYY-MM-DD HH:MM:SS"` Berlin local — next RTC alarm |
+| `stage` | string | Cloud-check decision stage (NIGHT, WARMUP, DARK_OBJ, QUIET, SCENE_DRIFT, AMBIGUOUS) |
+| `burst_trigger` | string | Burst pre-filter stage (FIRST, BRIGHTNESS_SHIFT, DUPLICATE, BRIGHT_STABLE, DIFFUSE, SAFE) |
+| `source` | string | `"pir"` or `"rtc"` — wakeup source (only RTC frames update background model) |
+| `photo_bucket` | string | Exposure regime: `"NORMAL"`, `"BRIGHT"`, or `"LOWLIGHT"` |
+| `global_mean` | int | Mean Y luma across all 300 tiles (0–255) |
 | `battery` | float | Battery voltage (V) |
-| `photo_mode` | string | `"NORMAL"`, `"BRIGHT"`, or `"LOWLIGHT"` |
-| `trigger` | string | `"Boot"` (legacy field) |
+| `next_wakeup` | string | `"YYYY-MM-DD HH:MM:SS"` Berlin local — next RTC alarm |
+| `tile_means` | uint8[300] | Y (luma) tile means, 20×15 grid |
+| `tile_means_u` | uint8[300] | U (Cb) tile means, BT.601 full-range, centred at 128 |
+| `tile_means_v` | uint8[300] | V (Cr) tile means |
+| `model_tile_means` | uint8[300] | Background model Y snapshot before this frame's update |
+| `dark_tiles` | int | Tiles with z > 3 AND ≥ 35 DN below model AND chroma gate |
+| `new_dark_tiles` | int | Tiles with z > 3 AND ≥ 20 DN below prev frame |
+| `n_chroma_changed` | int | Tiles where ΔC² > 64 vs background model mean |
+| `ratio` | float | dark_tiles / 300 |
+| `burst_n_changed` | int | Tiles where \|Y_cur − Y_prev\| > 12 DN |
+| `burst_n_dark` | int | Tiles darkened by > 12 DN vs prev frame |
+| `burst_n_chroma` | int | Tiles where ΔU² + ΔV² > 64 vs prev frame |
+| `burst_gm_diff` | float | \|current global_mean − previous global_mean\| |
 | `fresh_flash` | bool | Present only on first cycle after reflash |
 | `fw_build` | string | `__DATE__ __TIME__` build stamp (on fresh_flash only) |
-| `burst_trigger` | string | Burst filter decision label |
-| `tile_means` | uint8[] | 300-element tile mean array |
+| `trigger` | string | `"Boot"` (legacy field; filtered from display) |
 
 ---
 
 ## 7. NVS Usage
 
+### Cloud-check model (`"cc"` namespace)
+
+Per photo-bucket keys use suffix `_n` (NORMAL), `_b` (BRIGHT), `_l` (LOWLIGHT):
+
+| Key pattern | Type | Purpose |
+|-------------|------|---------|
+| `cc_my_n/b/l` | float32 blob (300×4 B) | Y background model mean per photo-bucket |
+| `cc_mu_n/b/l` | float32 blob | U background model mean per photo-bucket |
+| `cc_mv_n/b/l` | float32 blob | V background model mean per photo-bucket |
+| `cc_vy_n/b/l` | float32 blob | Y variance per photo-bucket |
+| `cc_vu_n/b/l` | float32 blob | U variance per photo-bucket |
+| `cc_vv_n/b/l` | float32 blob | V variance per photo-bucket |
+| `cc_s_n/b/l` | uint32 | frames_seen counter per photo-bucket |
+| `cc_p` | uint8 blob (300 B) | Previous frame Y tile means (burst filter) |
+| `cc_pu` | uint8 blob (300 B) | Previous frame U tile means |
+| `cc_pv` | uint8 blob (300 B) | Previous frame V tile means |
+| `cc_pgm` | uint8 | Previous frame global mean Y (burst filter) |
+
+Legacy keys `cc_m0..3`, `cc_v0..3`, `cc_s0..3`, `cc_p` (old 1-channel model) are erased on first flash after the Phase 3 firmware upgrade.
+
+### Other namespaces
+
 | Namespace | Key | Type | Purpose |
 |-----------|-----|------|---------|
-| `"cc"` | `cc_p` | uint8 blob | Cloud-check tile means (background model) |
-| `"cc"` | `cc_pgm` | uint8 | Previous global mean (burst filter) |
-| `"cc"` | `frames_seen` | uint32 | Warmup counter |
-| `"bw_wifi"` | `bssid` | 6-byte blob | Cached AP BSSID (cleared on miss) |
+| `"bw_wifi"` | `bssid` | 6-byte blob | Cached AP BSSID (cleared on connect miss) |
 | `"bw_wifi"` | `channel` | uint8 | Cached AP channel (0 = scan) |
 | `"bw_meta"` | `fw_hash` | uint32 | FNV-1a of build string; change triggers model reset |
 | `"bw_meta"` | `rtc_sync` | uint32 | UTC epoch of last NTP sync |
