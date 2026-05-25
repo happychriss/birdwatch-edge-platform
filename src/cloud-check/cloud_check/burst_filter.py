@@ -97,14 +97,21 @@ class BurstConfig:
                                              # In training data, all bird/pillow frames at gm>130
                                              # have n_dark = 0 (no sunny-bird data yet).
                                              # Set to 35 to leave safe headroom above nd=0.
+    chroma_delta_threshold_sq: int = 64     # tile counts as chroma-changed when
+                                             # ΔU² + ΔV² > this threshold.  64 = 8 DN linear distance.
+                                             # Squared form mirrors the on-device integer math
+                                             # (no sqrt). DUPLICATE requires zero chroma-changed
+                                             # tiles AND zero luma-changed tiles to suppress.
 
 
 @dataclass
 class BurstResult:
     label: str          # "suppress" | "process"
     trigger: str        # FIRST | ISOLATED | FAST_SHIFT | BRIGHTNESS_SHIFT | DUPLICATE | BRIGHT_STABLE | DIFFUSE | SAFE
-    n_changed: int      # tiles with |diff| > tile_diff_threshold (absolute)
-    n_dark: int         # tiles that got DARKER by > dark_diff_threshold
+    n_changed: int      # tiles with |Y diff| > tile_diff_threshold (absolute)
+    n_dark: int         # tiles that got DARKER on Y by > dark_diff_threshold
+    n_chroma_changed: int   # tiles where ΔU² + ΔV² > chroma_delta_threshold_sq (0 if chroma absent)
+    chroma_delta_max: float # max ΔU² + ΔV² across all tiles (0 if chroma absent) — diagnostic
     blob_max: int       # largest connected dark-diff region (diagnostic)
     compactness: float  # blob_max / n_dark  (diagnostic; 0..1)
     gm_diff: float      # |global_mean - prev_global_mean|
@@ -119,14 +126,22 @@ def burst_classify(
     prev_global_mean: float | None,
     dt_seconds: float,
     cfg: BurstConfig | None = None,
+    tile_mean_u: np.ndarray | None = None,
+    tile_mean_v: np.ndarray | None = None,
+    prev_tile_mean_u: np.ndarray | None = None,
+    prev_tile_mean_v: np.ndarray | None = None,
 ) -> BurstResult:
     """Classify a single frame given the previous frame's tile means.
 
-    tile_mean       : (grid_h, grid_w) float32 — current frame
-    global_mean     : frame-wide mean of tile_mean
-    prev_tile_mean  : same shape, previous captured frame; None if unavailable
-    prev_global_mean: scalar; None if unavailable
-    dt_seconds      : seconds since previous capture; float('inf') if unavailable
+    tile_mean         : (grid_h, grid_w) float32 — current frame Y means
+    global_mean       : frame-wide mean of tile_mean
+    prev_tile_mean    : same shape, previous captured frame; None if unavailable
+    prev_global_mean  : scalar; None if unavailable
+    dt_seconds        : seconds since previous capture; float('inf') if unavailable
+    tile_mean_u/v     : optional per-tile U/V means (BT.601, 0..255). When both present along
+                        with their prev_* counterparts, the DUPLICATE rule extends to require
+                        zero chroma-changed tiles in addition to zero luma-changed tiles.
+                        When absent the behaviour matches the previous luma-only filter.
     """
     cfg = cfg or BurstConfig()
 
@@ -134,7 +149,8 @@ def burst_classify(
     if prev_tile_mean is None or prev_global_mean is None or dt_seconds == float('inf'):
         return BurstResult(
             label="process", trigger="FIRST",
-            n_changed=0, n_dark=0, blob_max=0, compactness=0.0,
+            n_changed=0, n_dark=0, n_chroma_changed=0, chroma_delta_max=0.0,
+            blob_max=0, compactness=0.0,
             gm_diff=0.0, dt_seconds=float('inf'),
             reason="no previous frame",
         )
@@ -145,7 +161,8 @@ def burst_classify(
     if dt_seconds > cfg.burst_window_seconds:
         return BurstResult(
             label="process", trigger="ISOLATED",
-            n_changed=0, n_dark=0, blob_max=0, compactness=0.0,
+            n_changed=0, n_dark=0, n_chroma_changed=0, chroma_delta_max=0.0,
+            blob_max=0, compactness=0.0,
             gm_diff=gm_diff, dt_seconds=dt_seconds,
             reason=f"dt={dt_seconds:.0f}s > burst_window={cfg.burst_window_seconds:.0f}s",
         )
@@ -155,7 +172,8 @@ def burst_classify(
         if dt_seconds < cfg.fast_shift_max_dt and global_mean >= cfg.fast_shift_min_gm:
             return BurstResult(
                 label="suppress", trigger="FAST_SHIFT",
-                n_changed=0, n_dark=0, blob_max=0, compactness=0.0,
+                n_changed=0, n_dark=0, n_chroma_changed=0, chroma_delta_max=0.0,
+                blob_max=0, compactness=0.0,
                 gm_diff=gm_diff, dt_seconds=dt_seconds,
                 reason=(f"gm_diff={gm_diff:.1f} > {cfg.brightness_sim_threshold:.1f} "
                         f"and dt={dt_seconds:.0f}s < {cfg.fast_shift_max_dt:.0f}s "
@@ -164,22 +182,45 @@ def burst_classify(
             )
         return BurstResult(
             label="process", trigger="BRIGHTNESS_SHIFT",
-            n_changed=0, n_dark=0, blob_max=0, compactness=0.0,
+            n_changed=0, n_dark=0, n_chroma_changed=0, chroma_delta_max=0.0,
+            blob_max=0, compactness=0.0,
             gm_diff=gm_diff, dt_seconds=dt_seconds,
             reason=f"gm_diff={gm_diff:.1f} > threshold={cfg.brightness_sim_threshold:.1f}",
         )
 
-    # ── Absolute diff for DUPLICATE check ────────────────────────────────────
+    # ── Absolute Y diff and chroma diff for DUPLICATE check ─────────────────
     abs_diff = np.abs(tile_mean.astype(np.float32) - prev_tile_mean.astype(np.float32))
     n_changed = int((abs_diff > cfg.tile_diff_threshold).sum())
 
+    # Per-tile squared chroma distance vs previous frame. Computed only when both
+    # current and previous chroma planes are available; legacy frames keep
+    # n_chroma_changed=0 so the DUPLICATE rule degenerates cleanly to luma-only.
+    chroma_available = (
+        tile_mean_u is not None and tile_mean_v is not None
+        and prev_tile_mean_u is not None and prev_tile_mean_v is not None
+    )
+    if chroma_available:
+        du = tile_mean_u.astype(np.float32) - prev_tile_mean_u.astype(np.float32)
+        dv = tile_mean_v.astype(np.float32) - prev_tile_mean_v.astype(np.float32)
+        chroma_sq = du * du + dv * dv
+        n_chroma_changed = int((chroma_sq > cfg.chroma_delta_threshold_sq).sum())
+        chroma_delta_max = float(chroma_sq.max())
+    else:
+        n_chroma_changed = 0
+        chroma_delta_max = 0.0
+
     # ── Stage 3: DUPLICATE ──────────────────────────────────────────────────
-    if n_changed <= cfg.duplicate_max_tiles:
+    # Both luma AND chroma must show zero change to suppress.  This is the
+    # specific fix for the 517/518 pigeon case: same Y everywhere, but
+    # n_chroma_changed >= 1 keeps the frame from being treated as a duplicate.
+    if n_changed <= cfg.duplicate_max_tiles and n_chroma_changed == 0:
         return BurstResult(
             label="suppress", trigger="DUPLICATE",
-            n_changed=n_changed, n_dark=0, blob_max=0, compactness=0.0,
+            n_changed=n_changed, n_dark=0,
+            n_chroma_changed=n_chroma_changed, chroma_delta_max=chroma_delta_max,
+            blob_max=0, compactness=0.0,
             gm_diff=gm_diff, dt_seconds=dt_seconds,
-            reason=f"n_changed={n_changed} ≤ {cfg.duplicate_max_tiles} (pixel-identical burst)",
+            reason=f"n_changed={n_changed} ≤ {cfg.duplicate_max_tiles} and n_chroma_changed=0 (pixel-identical burst)",
         )
 
     # ── Dark-only diff ────────────────────────────────────────────────────────
@@ -210,7 +251,9 @@ def burst_classify(
             and n_dark < cfg.bright_stable_max_dark):
         return BurstResult(
             label="suppress", trigger="BRIGHT_STABLE",
-            n_changed=n_changed, n_dark=n_dark, blob_max=blob_max, compactness=compactness,
+            n_changed=n_changed, n_dark=n_dark,
+            n_chroma_changed=n_chroma_changed, chroma_delta_max=chroma_delta_max,
+            blob_max=blob_max, compactness=compactness,
             gm_diff=gm_diff, dt_seconds=dt_seconds,
             reason=(f"gm={global_mean:.1f} > {cfg.bright_stable_min_gm:.0f} "
                     f"and n_dark={n_dark} < {cfg.bright_stable_max_dark} — bright scene, no dark object"),
@@ -220,7 +263,9 @@ def burst_classify(
     if n_dark >= cfg.diffuse_min_dark_tiles:
         return BurstResult(
             label="suppress", trigger="DIFFUSE",
-            n_changed=n_changed, n_dark=n_dark, blob_max=blob_max, compactness=compactness,
+            n_changed=n_changed, n_dark=n_dark,
+            n_chroma_changed=n_chroma_changed, chroma_delta_max=chroma_delta_max,
+            blob_max=blob_max, compactness=compactness,
             gm_diff=gm_diff, dt_seconds=dt_seconds,
             reason=(f"n_dark={n_dark} ≥ {cfg.diffuse_min_dark_tiles} "
                     f"(blob_max={blob_max}) → global cloud shadow, not a bird"),
@@ -232,7 +277,9 @@ def burst_classify(
     # Safety bias: upload.
     return BurstResult(
         label="process", trigger="SAFE",
-        n_changed=n_changed, n_dark=n_dark, blob_max=blob_max, compactness=compactness,
+        n_changed=n_changed, n_dark=n_dark,
+        n_chroma_changed=n_chroma_changed, chroma_delta_max=chroma_delta_max,
+        blob_max=blob_max, compactness=compactness,
         gm_diff=gm_diff, dt_seconds=dt_seconds,
         reason=f"n_dark={n_dark} < {cfg.diffuse_min_dark_tiles} — safety bias (upload)",
     )

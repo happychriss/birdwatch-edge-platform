@@ -1,24 +1,31 @@
 """Online-style evaluation: feed frames in chronological order, update the
-background model only on accepted-as-cloud frames, score each prediction
-against the ground truth.
+background model only on RTC-tagged frames, score each prediction against
+ground truth.
 
-This mirrors how the firmware will operate over time, so the reported numbers
-include the cold-start period (early frames lean toward 'process' on purpose).
+This mirrors the firmware rule exactly: PIR frames are pure evidence and never
+fold back into the model; only RTC reference frames refresh the per-cell EMA.
+The reported numbers therefore include the cold-start period (early frames
+lean toward 'process' on purpose).
+
+Offline corpora carry no real `source` field — the sweep tooling synthesizes
+an RTC schedule by setting `sample.source = 'rtc'` on a chronological subset
+(e.g. 1-in-4). For DB-driven runs `Sample.source` is filled from
+`meta['source']` so the simulation matches production exactly.
 """
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
 import numpy as np
 
-from .background import BackgroundModel
+from .background import BackgroundModel, photo_bucket_idx
 from .classifier import ClassifierResult, classify
 from .config import Config
 from .dataset import Sample
-from .features import extract_tile_features, load_gray_vga
+from .features import extract_tile_features_yuv, load_yuv_vga
 
 
 @dataclass
@@ -33,49 +40,65 @@ def run_stream(
     cfg: Config | None = None,
     update_only_on_cloud_prediction: bool = True,
 ) -> list[StreamResult]:
-    """Process samples in iteration order. Always sort by timestamp upstream
-    if you want a chronological run."""
+    """Process samples in iteration order. Sort upstream by timestamp for a
+    chronological run.
+
+    Model update policy (mirrors the on-device rule):
+      • PIR frames never update the model — pure evidence.
+      • RTC frames update the model when prediction warrants it
+        (warmup, QUIET, SCENE_DRIFT, NIGHT).
+      • If `update_only_on_cloud_prediction` is False, the policy becomes
+        "update only on ground-truth cloud frames" — kept for oracle replays
+        in the validator.
+    """
 
     cfg = cfg or Config()
     model = BackgroundModel(cfg)
     out: list[StreamResult] = []
-    prev_tile_mean: dict[int, np.ndarray] = {}  # bucket_idx → last tile_mean for that bucket
+    # prev tile means per (photo_bucket, scene_bucket) cell, in Y/U/V triples
+    prev_state: dict[tuple[int, int], tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
 
     for s in samples:
-        frame = load_gray_vga(s.path)
-        feats = extract_tile_features(frame)
-        bucket = model.bucket_for(feats["mean"])
-        prev = prev_tile_mean.get(bucket)
+        y, u, v = load_yuv_vga(s.path)
+        feats = extract_tile_features_yuv(y, u, v)
+        gm = feats["global_mean"]
+        pb_name = model.photo_bucket_for(gm)
+        pb = photo_bucket_idx(pb_name)
+        sb = model.scene_bucket_for(pb, feats["mean_y"])
+        prev = prev_state.get((pb, sb))
+        prev_y = prev[0] if prev is not None else None
 
-        # Snapshot the warmup state BEFORE we observe this frame — we want
-        # the predicate to reflect the model that was used for prediction.
-        was_warmup = model.warmup_remaining(bucket) > 0
-        # Count every observation toward the bucket's warmup, even before we
-        # have a verdict — otherwise low-traffic buckets stay in warmup forever.
-        model.observe(bucket)
-        pred = classify(feats["mean"], s.hour_bucket, model, cfg, prev_tile_mean=prev)
+        # Observe before classifying so warmup counter reflects the model
+        # that was used for prediction (matches on-device behaviour).
+        was_warmup = model.warmup_remaining(pb, sb) > 0
+        model.observe(pb, sb)
 
-        # Background update policy:
-        # - oracle mode: update from ground-truth cloud frames only.
-        # - online mode:
-        #     warmup: fold every frame in (bootstrap).
-        #     cloud prediction: fold in (it looks like background).
-        #     SCENE_DRIFT: dark tiles already in prev frame → stale model → update.
-        #     NIGHT: upload unconditionally but still fold in so the model tracks
-        #       the dark-scene baseline (matches C).
+        pred = classify(
+            feats["mean_y"], model, cfg,
+            prev_tile_mean=prev_y,
+            tile_mean_u=feats["mean_u"],
+            tile_mean_v=feats["mean_v"],
+        )
+
+        # Update policy:
+        #  • update_only_on_cloud_prediction=True  → mirror on-device
+        #  • update_only_on_cloud_prediction=False → oracle (label==clouds)
         if update_only_on_cloud_prediction:
-            if was_warmup or pred.label == "clouds" or pred.trigger in (
-                "SCENE_DRIFT", "NIGHT"
+            # RTC-only gate: PIR frames never update. RTC frames update when
+            # prediction agrees the scene is empty / drifting / dark.
+            if s.source == "rtc" and (
+                was_warmup
+                or pred.label == "clouds"
+                or pred.trigger in ("SCENE_DRIFT", "NIGHT")
             ):
-                model.update(bucket, feats["mean"])
-            if pred.trigger == "SCENE_DRIFT":
-                model.reset_warmup(bucket)
+                model.update(pb, sb, feats["mean_y"], feats["mean_u"], feats["mean_v"])
+            if pred.trigger == "SCENE_DRIFT" and s.source == "rtc":
+                model.reset_warmup(pb, sb)
         else:
             if s.label == "clouds":
-                model.update(bucket, feats["mean"])
+                model.update(pb, sb, feats["mean_y"], feats["mean_u"], feats["mean_v"])
 
-        prev_tile_mean[bucket] = feats["mean"]  # always record last frame per bucket
-
+        prev_state[(pb, sb)] = (feats["mean_y"], feats["mean_u"], feats["mean_v"])
         out.append(StreamResult(sample=s, pred=pred, correct=(pred.label == s.label)))
 
     return out
@@ -105,23 +128,30 @@ def write_csv(results: list[StreamResult], path: Path) -> None:
     with path.open("w", newline="") as f:
         w = csv.writer(f)
         w.writerow([
-            "filename", "domain", "hour", "label", "pred", "trigger",
+            "filename", "domain", "source", "label", "pred", "trigger",
+            "photo_bucket", "scene_bucket",
             "blob_max", "anomaly_ratio", "compactness", "warmup",
-            "new_dark_tiles", "temporal_available", "reason", "correct",
+            "new_dark_tiles", "dark_tiles", "n_chroma_changed", "chroma_delta_max",
+            "temporal_available", "reason", "correct",
         ])
         for r in results:
             w.writerow([
                 r.sample.path.name,
                 r.sample.domain,
-                r.sample.hour_bucket,
+                r.sample.source,
                 r.sample.label,
                 r.pred.label,
                 r.pred.trigger,
+                r.pred.photo_bucket,
+                r.pred.scene_bucket,
                 r.pred.blob_max_size,
                 f"{r.pred.anomaly_ratio:.3f}",
                 f"{r.pred.compactness:.3f}",
                 int(r.pred.warmup),
                 r.pred.new_dark_tiles,
+                r.pred.dark_tiles,
+                r.pred.n_chroma_changed,
+                f"{r.pred.chroma_delta_max:.2f}",
                 int(r.pred.temporal_available),
                 r.pred.reason,
                 int(r.correct),

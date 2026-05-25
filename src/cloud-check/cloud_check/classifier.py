@@ -1,62 +1,72 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 from scipy.ndimage import label as cc_label
 
-from .background import BackgroundModel
+from .background import BackgroundModel, photo_bucket_idx
 from .config import Config
 
 
 @dataclass
 class ClassifierResult:
     label: str                    # "clouds" or "process"
-    trigger: str                  # rule: WARMUP | DARK_OBJ | QUIET | SCENE_DRIFT | AMBIGUOUS
+    trigger: str                  # WARMUP | DARK_OBJ | QUIET | SCENE_DRIFT | AMBIGUOUS | NIGHT
     anomaly_mask: np.ndarray      # (GRID_H, GRID_W) bool — tiles with z > threshold AND darker than model
     blob_max_size: int            # largest connected anomalous region (z-mask)
     dark_blob_max: int            # largest connected blob on absolute-delta dark mask
     anomaly_ratio: float          # dark-only anomaly ratio (tiles darker than model / total)
     compactness: float            # blob_max / total_anomalies (0..1, 1 = single solid blob)
     reason: str                   # human-readable explanation
-    warmup: bool                  # bucket is still in warmup
+    warmup: bool                  # cell is still in warmup
     new_dark_tiles: int           # tiles newly dark vs previous frame (dark_tiles if no prev)
     temporal_available: bool      # whether prev_tile_mean was provided
     dark_tiles: int = 0           # tiles ≥ dark_object_min_delta darker than model (no z-gate)
-    scene_bucket: int = 0         # which lighting-scenario bucket was selected
+    photo_bucket: str = "NORMAL"  # outer bucket name (NORMAL | BRIGHT | LOWLIGHT)
+    scene_bucket: int = 0         # inner bucket index (0..K_scene-1; today always 0)
+    n_chroma_changed: int = 0     # tiles where chroma differs from model beyond gate (0 if no chroma)
+    chroma_delta_max: float = 0.0 # max ΔU²+ΔV² across all tiles (0 if no chroma) — diagnostic
 
 
 def classify(
     tile_mean: np.ndarray,
-    hour: int,                    # kept for backward-compat; ignored (bucket from tile_mean)
     model: BackgroundModel,
     cfg: Config | None = None,
     prev_tile_mean: np.ndarray | None = None,
+    tile_mean_u: np.ndarray | None = None,
+    tile_mean_v: np.ndarray | None = None,
 ) -> ClassifierResult:
-    """Decision rule biased toward 'process' (upload-anyway).
+    """Bias-toward-"process" classifier for the background-model pipeline.
 
-    Sending one extra photo is cheap; missing a bird/person is the failure
-    we minimise. The only path that returns 'clouds' (and thus suppresses upload)
-    is QUIET: the scene is almost identical to the bucket model. Everything
-    else — DARK_OBJ, SCENE_DRIFT, WARMUP, AMBIGUOUS — uploads.
+    Bucket selection: photo-bucket from global Y mean (NORMAL/BRIGHT/LOWLIGHT),
+    scene-bucket nearest-centroid within that photo-bucket (always 0 today at K_scene=1).
+    Stages in order of priority:
+        NIGHT       — frame too dark for reliable anomaly detection → process
+        WARMUP      — bucket cell still bootstrapping → process
+        DARK_OBJ    — compact dark-on-Y tile (or dark + chroma-different) appeared → process
+        SCENE_DRIFT — many persistently-dark tiles but no new ones → process + re-calibrate
+        QUIET       — scene matches model → suppress as clouds
+        AMBIGUOUS   — default → process (safety bias)
 
-    Bucket selection: nearest-centroid on tile_mean (lighting-scenario buckets),
-    not time-of-day. This keeps per-bucket variance low and makes DARK_OBJ
-    sensitive enough to catch small birds without a z-gate.
-
-    Change from prior version: dark_tiles and new_dark_tiles are computed from
-    the absolute Δm threshold ONLY — the z-gate is removed. This catches birds
-    that are 35-90 DN darker than the model but below z=3. The QUIET ratio
-    mask retains the z-gate so that ambient illumination shifts don't suppress.
+    Chroma (U, V) integration: when provided, DARK_OBJ counts a tile as
+    object-like if either the Y delta is large OR the chroma delta vs model is
+    large. The QUIET ratio remains Y-only (ambient illumination shifts must not
+    prevent suppression).
     """
 
     cfg = cfg or model.cfg
 
-    # Scene-lighting bucket from nearest centroid on tile_mean vector.
-    b = model.bucket_for(tile_mean)
+    # Photo-bucket from global Y mean. Scene-bucket inside that photo-bucket
+    # (K_scene=1 today → always 0).
+    global_mean = int(tile_mean.mean())   # truncate, matches ESP integer division
+    pb_name = model.photo_bucket_for(global_mean)
+    pb = photo_bucket_idx(pb_name)
+    sb = model.scene_bucket_for(pb, tile_mean)
 
-    # Stage 0 — NIGHT: frame too dark for reliable anomaly detection → upload.
-    global_mean = int(tile_mean.mean())  # truncate, matches ESP integer division
+    chroma_available = (tile_mean_u is not None and tile_mean_v is not None)
+
+    # Stage 0 — NIGHT
     if cfg.night_brightness_threshold > 0 and global_mean < cfg.night_brightness_threshold:
         return ClassifierResult(
             label="process",
@@ -67,30 +77,50 @@ def classify(
             anomaly_ratio=0.0,
             compactness=0.0,
             reason=f"scene too dark (global_mean={global_mean} < {cfg.night_brightness_threshold})",
-            warmup=model.warmup_remaining(b) > 0,
+            warmup=model.warmup_remaining(pb, sb) > 0,
             new_dark_tiles=0,
             temporal_available=prev_tile_mean is not None,
             dark_tiles=0,
-            scene_bucket=b,
+            photo_bucket=pb_name,
+            scene_bucket=sb,
+            n_chroma_changed=0,
+            chroma_delta_max=0.0,
         )
 
-    z = model.z_scores(b, tile_mean)
-    bucket_mean = model.mean[b]
+    z = model.z_scores_y(pb, sb, tile_mean)
+    bucket_mean = model.mean_y[pb, sb]
 
-    # anomaly_mask: tiles with z > threshold AND darker than model.
-    # Bright deviations (sky brightening, cloud moving off sun) are intentionally
-    # excluded — they should not prevent QUIET from suppressing.
+    # Dark-only z-anomalous mask (used for QUIET ratio). Bright deviations
+    # (sky brightening, cloud moving off sun) are excluded so they do not
+    # prevent QUIET suppression.
     z_mask = z > cfg.tile_z_threshold
     dark_mask = tile_mean < bucket_mean
-    mask = z_mask & dark_mask          # dark-only z-anomalous tiles (QUIET ratio)
+    mask = z_mask & dark_mask
     total_anom = int(mask.sum())
     ratio = float(mask.mean())
 
     delta = tile_mean - bucket_mean
-    # No z-gate on dark_tiles — just absolute delta. Catches birds at 35-90 DN
-    # that fall below z=3 even with tighter scene buckets (std≈28 DN).
+    # No z-gate on dark_tiles — just absolute delta vs model.
     dark_delta_mask = delta < -cfg.dark_object_min_delta
     dark_tiles = int(dark_delta_mask.sum())
+
+    # Chroma-gate mask: ΔU² + ΔV² > chroma_dark_obj_gate_sq. Used to admit
+    # tiles into DARK_OBJ even when Y delta is below dark_object_min_delta,
+    # *provided* the tile is darker than the model on Y (so a brightening
+    # tile that just happens to shift in chroma cannot trigger DARK_OBJ).
+    if chroma_available:
+        chroma_sq = model.chroma_delta_sq(pb, sb, tile_mean_u, tile_mean_v)
+        chroma_gate_mask = (chroma_sq > cfg.chroma_dark_obj_gate_sq) & dark_mask
+        n_chroma_changed = int((chroma_sq > cfg.chroma_dark_obj_gate_sq).sum())
+        chroma_delta_max = float(chroma_sq.max())
+        # Final dark-tile mask combines absolute-Y-delta OR chroma-gate (both gated on dark_mask).
+        dark_tile_mask = dark_delta_mask | chroma_gate_mask
+        dark_tiles = int(dark_tile_mask.sum())
+    else:
+        chroma_sq = None
+        n_chroma_changed = 0
+        chroma_delta_max = 0.0
+        dark_tile_mask = dark_delta_mask
 
     if prev_tile_mean is not None:
         temporal_delta = tile_mean - prev_tile_mean
@@ -109,23 +139,19 @@ def classify(
         blob_max = int(sizes.max())
 
     # Blob on absolute-delta dark mask — distinguishes compact bird from diffuse shadow.
-    # A whole-scene darkening creates a blob spanning >40% of the frame; a bird is smaller.
     if dark_tiles > 0:
-        dark_labelled, _ = cc_label(dark_delta_mask)
+        dark_labelled, _ = cc_label(dark_tile_mask)
         dark_sizes = np.bincount(dark_labelled.ravel())
         dark_sizes[0] = 0
         dark_blob_max = int(dark_sizes.max())
     else:
         dark_blob_max = 0
-    dark_blob_fraction = dark_blob_max / tile_mean.size
-
     compactness = blob_max / total_anom if total_anom > 0 else 0.0
-    warmup = model.warmup_remaining(b) > 0
+    warmup = model.warmup_remaining(pb, sb) > 0
 
     dark_obj_condition = (
         dark_tiles >= cfg.dark_object_min_tiles
         and (not temporal_available or new_dark_tiles >= cfg.dark_object_min_tiles)
-        and dark_blob_fraction <= cfg.dark_obj_max_blob_fraction
     )
     stale_condition = (
         dark_tiles >= cfg.scene_drift_min_tiles
@@ -136,12 +162,13 @@ def classify(
     if warmup:
         trigger = "WARMUP"
         decision = "process"
-        reason = f"bucket warmup ({model.warmup_remaining(b)} more obs needed) → lean upload"
+        reason = f"cell warmup ({model.warmup_remaining(pb, sb)} more obs needed) → lean upload"
     elif dark_obj_condition:
         trigger = "DARK_OBJ"
         decision = "process"
         reason = (f"dark object cue (dark_tiles={dark_tiles}, new_dark={new_dark_tiles}, "
-                  f"blob={blob_max}, dark_ratio={ratio:.2f}, bucket={b})")
+                  f"blob={blob_max}, dark_ratio={ratio:.2f}, "
+                  f"chroma_changed={n_chroma_changed}, photo_bucket={pb_name})")
     elif stale_condition:
         # Check stale BEFORE quiet: high dark_tiles with no new change means the model
         # hasn't caught up with a gradual scene shift — upload and re-calibrate.
@@ -152,12 +179,13 @@ def classify(
     elif ratio <= cfg.quiet_anomaly_ratio:
         trigger = "QUIET"
         decision = "clouds"
-        reason = f"scene matches model (dark_ratio={ratio:.3f} ≤ {cfg.quiet_anomaly_ratio}, bucket={b})"
+        reason = (f"scene matches model (dark_ratio={ratio:.3f} ≤ {cfg.quiet_anomaly_ratio}, "
+                  f"photo_bucket={pb_name})")
     else:
         trigger = "AMBIGUOUS"
         decision = "process"
         reason = (f"ambiguous → upload (blob={blob_max} dark_ratio={ratio:.2f} "
-                  f"compactness={compactness:.2f}, bucket={b})")
+                  f"compactness={compactness:.2f}, photo_bucket={pb_name})")
 
     return ClassifierResult(
         label=decision,
@@ -172,5 +200,8 @@ def classify(
         new_dark_tiles=new_dark_tiles,
         temporal_available=temporal_available,
         dark_tiles=dark_tiles,
-        scene_bucket=b,
+        photo_bucket=pb_name,
+        scene_bucket=sb,
+        n_chroma_changed=n_chroma_changed,
+        chroma_delta_max=chroma_delta_max,
     )

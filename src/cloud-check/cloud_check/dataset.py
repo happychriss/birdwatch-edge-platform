@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
@@ -12,9 +12,11 @@ SYNTH_ROOT = Path(__file__).resolve().parents[1] / "synth-data"
 # "clouds" = empty scene under some lighting (the false-positive class to suppress).
 # "process" = anything-new in the frame (bird, person, simulated object).
 FOLDERS = {
-    "real-data/clouds":               ("clouds",  "real-2026"),
-    "real-data/process-birds-pillow": ("process", "real-2026"),
-    "real-data/process-people":       ("process", "real-2026"),
+    "ignore-sun_shining":     ("clouds",  "real-2026"),
+    "process-birds-pillow":   ("process", "real-2026"),
+    "process-people":         ("process", "real-2026"),
+    "process-real-birds":     ("process", "real-2026"),
+    "process-dark":           ("process", "real-2026"),
 }
 
 SYNTH_FOLDERS = {
@@ -36,30 +38,25 @@ _FILENAME_LABEL_PREFIX = {
 _TIMESTAMP_RE = re.compile(r"(20\d{6})_(\d{6})")
 
 
-@dataclass(frozen=True)
+@dataclass
 class Sample:
+    """A labelled training frame.
+
+    `source` mirrors the ESP wakeup-source telemetry. Offline corpora have no
+    real source attribute — sweep tools can synthesize an RTC schedule by
+    setting `sample.source = 'rtc'` on the desired subset (the model only
+    updates on rtc frames, matching the on-device gate).
+    """
     path: Path
-    label: str           # "clouds" or "process"
-    domain: str          # "real-2026" or "aux-2025"
+    label: str                   # "clouds" or "process"
+    domain: str                  # "real-2026" or "synth"
     taken_at: datetime | None
+    source: str = "pir"          # "rtc" (reference, updates the model) or "pir" (evidence only)
 
     @property
     def hour_bucket(self) -> int:
-        """Raw hour-of-day (0..23). Use Config-aware bucket via time_bucket()."""
+        """Raw hour-of-day (0..23). Kept for legacy analysis scripts."""
         return self.taken_at.hour if self.taken_at else 12
-
-
-def time_bucket(hour: int, num_buckets: int, day_start: int, day_end: int) -> int:
-    """Map an hour-of-day to a coarse day-period bucket in [0, num_buckets).
-
-    Anything outside the [day_start, day_end) window collapses into bucket 0
-    (treated as 'pre-dawn / post-dusk' — we expect almost no triggers there).
-    """
-    if hour < day_start or hour >= day_end:
-        return 0
-    span = max(day_end - day_start, 1)
-    idx = (hour - day_start) * num_buckets // span
-    return max(0, min(num_buckets - 1, idx))
 
 
 def _parse_timestamp(name: str) -> datetime | None:
