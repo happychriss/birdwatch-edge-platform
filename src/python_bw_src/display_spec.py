@@ -69,15 +69,6 @@ DISPLAY_SPEC: dict = {
         "format": "{:.2f} V",
         "warn_below": 3.6,   # adds red tint when value < threshold
     },
-    "photo_mode": {
-        "type": "badge",
-        "colors": {
-            "BRIGHT":   ("#fff3cd", "#856404"),
-            "NORMAL":   ("#d5f5e3", "#1e8449"),
-            "LOWLIGHT": ("#fdebd0", "#d35400"),
-        },
-        "fallback": ("#eee", "#778"),
-    },
     "photo_bucket": {
         "type": "badge",
         "colors": {
@@ -98,22 +89,6 @@ DISPLAY_SPEC: dict = {
     "trigger": {
         "type": "hide_values",
         "hide_values": ["Boot", "PIR", "Timer", "Camera Start", "Camera Stop"],
-    },
-    "scene_bucket": {
-        "type": "badge",
-        "colors": {
-            "0": ("#d2e4f7", "#1a5276"),   # dim
-            "1": ("#d5eafd", "#154577"),   # mid-light
-            "2": ("#fde8d0", "#7d3c00"),   # mid-bright
-            "3": ("#fef9cc", "#7d6200"),   # bright/sun
-        },
-        "label_map": {
-            "0": "Bucket 0 · dim",
-            "1": "Bucket 1 · mid",
-            "2": "Bucket 2 · bright",
-            "3": "Bucket 3 · sun",
-        },
-        "fallback": ("#eee", "#778"),
     },
     # Numeric intermediates — shown as plain numbers, no badge.
     "global_mean":       {"type": "numeric"},
@@ -170,8 +145,8 @@ DISPLAY_SPEC: dict = {
 
 # Key display order for the card info panel (unlisted keys are appended after).
 DISPLAY_ORDER = [
-    "result", "stage", "burst_trigger", "source", "photo_bucket", "photo_mode", "fresh_flash", "simulated",
+    "result", "stage", "burst_trigger", "source", "photo_bucket", "fresh_flash", "simulated",
     "battery", "trigger",
-    "scene_bucket", "global_mean", "ratio", "dark_tiles", "new_dark_tiles", "dark_blob_max",
+    "global_mean", "ratio", "dark_tiles", "new_dark_tiles", "dark_blob_max",
     "n_chroma_changed", "burst_n_changed", "burst_n_dark", "burst_n_chroma",
 ]

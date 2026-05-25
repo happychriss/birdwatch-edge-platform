@@ -269,7 +269,6 @@ static void run_pipeline(const uint8_t *tile_y, const uint8_t *tile_u, const uin
     // Emit raw features
     bw_tele_i("global_mean",   (long)global_mean);
     bw_tele_s("photo_bucket",  out->photo_bucket);
-    bw_tele_i("scene_bucket",  0);   // K_scene=1: always 0; kept for server back-compat
     bw_tele_arr_u8("tile_means",   tile_y, CC_NUM_TILES);
     if (tile_u) bw_tele_arr_u8("tile_means_u", tile_u, CC_NUM_TILES);
     if (tile_v) bw_tele_arr_u8("tile_means_v", tile_v, CC_NUM_TILES);
