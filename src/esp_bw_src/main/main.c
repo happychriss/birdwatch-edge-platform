@@ -354,17 +354,11 @@ static void run_normal_cycle(void)
     ESP_LOGI(TAG, "cloud-check: bucket=%s gm=%u → %s (%s)",
              cc.photo_bucket, cc.global_mean, cc.label, cc.stage);
 
-    // ── Phase 5: Suppress clouds — discard JPEG, skip upload ─────────────────
-    if (strcmp(cc.label, "clouds") == 0) {
-        bw_cam_capture_return(fb);
-        bw_cam_deinit();
-        bw_blink(BW_BLINK_CAM_OK);
-        ESP_LOGI(TAG, "suppressed as clouds → no upload");
-        bw_adc_deinit();
-        return;
-    }
-
-    // ── Phase 6: Copy JPEG to PSRAM, stop camera ──────────────────────────────
+    // ── Phase 5: Copy JPEG to PSRAM, stop camera ──────────────────────────────
+    // All frames are uploaded regardless of cloud-check result so that the
+    // server's Python backfill can replay the background model in exact
+    // chronological order.  The result/stage fields in the telemetry metadata
+    // let the server display and filter frames as needed.
     size_t   img_len = fb->len;
     uint8_t *img     = heap_caps_malloc(img_len, MALLOC_CAP_SPIRAM);
     if (!img) {
