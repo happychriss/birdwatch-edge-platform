@@ -116,7 +116,7 @@ bw_mode_t bw_http_upload_image(const char    *meta_json,
 
     // Two multipart parts: meta (JSON string) + image (JPEG binary).
     // Adding or removing telemetry keys never changes this builder.
-    char head[8192];
+    static char head[8192];  // static: keeps this off the task stack (called from one task only)
     int  hl = snprintf(head, sizeof(head),
         "--%s\r\nContent-Disposition: form-data; name=\"meta\"\r\n\r\n%s\r\n"
         "--%s\r\nContent-Disposition: form-data; name=\"image\"; filename=\"image.jpg\"\r\n"
