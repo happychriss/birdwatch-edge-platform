@@ -281,18 +281,7 @@ static void run_pipeline(const uint8_t *tile_y, const uint8_t *tile_u, const uin
             snap[i] = (fv < 0.0f) ? 0u : (fv > 255.0f) ? 255u : (uint8_t)fv;
         }
         bw_tele_arr_u8("model_tile_means", snap, CC_NUM_TILES);
-
-        for (int i = 0; i < CC_NUM_TILES; i++) {
-            float fv = s_mean_u[pb][i] + 0.5f;
-            snap[i] = (fv < 0.0f) ? 0u : (fv > 255.0f) ? 255u : (uint8_t)fv;
-        }
-        bw_tele_arr_u8("model_tile_means_u", snap, CC_NUM_TILES);
-
-        for (int i = 0; i < CC_NUM_TILES; i++) {
-            float fv = s_mean_v[pb][i] + 0.5f;
-            snap[i] = (fv < 0.0f) ? 0u : (fv > 255.0f) ? 255u : (uint8_t)fv;
-        }
-        bw_tele_arr_u8("model_tile_means_v", snap, CC_NUM_TILES);
+        // model_tile_means_u/v are not used for server rendering; omit to keep meta compact.
     }
 
     // ── Burst pre-filter ──────────────────────────────────────────────────────
