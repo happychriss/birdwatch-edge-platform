@@ -196,34 +196,42 @@ static time_t rtc_compute_next(i2c_dev_t *rtc)
     int doy        = gm.tm_yday + 1;
     int next_utc_m = gm.tm_hour * 60 + gm.tm_min;
 
+    int sunrise_m = solar_utc_minutes(doy, false);
+    if (sunrise_m < 0) sunrise_m = 0;
+
     int sunset_m  = solar_utc_minutes(doy, true);
     if (sunset_m > 24*60)  sunset_m  = 24*60;
 
-    // Evening capture window: [sunset, sunset + BW_EVENING_WIN_POST_MIN) UTC
+    // Active window: [sunrise, sunset + BW_EVENING_WIN_POST_MIN) UTC
     int win_end_m = sunset_m + BW_EVENING_WIN_POST_MIN;
 
-    bool in_window = (next_utc_m >= sunset_m && next_utc_m < win_end_m);
+    bool in_active = (next_utc_m >= sunrise_m && next_utc_m < win_end_m);
 
-    if (in_window) {
-        ESP_LOGI(TAG, "alarm: EVENING — %02d:%02d–%02d:%02d UTC, cycle=%d min",
-                 sunset_m/60, sunset_m%60, win_end_m/60, win_end_m%60, cycle_min);
+    if (in_active) {
+        if (next_utc_m >= sunset_m) {
+            ESP_LOGI(TAG, "alarm: EVENING — %02d:%02d–%02d:%02d UTC, cycle=%d min",
+                     sunset_m/60, sunset_m%60, win_end_m/60, win_end_m%60, cycle_min);
+        } else {
+            ESP_LOGI(TAG, "alarm: DAYTIME — %02d:%02d–%02d:%02d UTC, cycle=%d min",
+                     sunrise_m/60, sunrise_m%60, sunset_m/60, sunset_m%60, cycle_min);
+        }
     } else {
         time_t day_start = (next_utc / 86400) * 86400;
         if (next_utc_m >= win_end_m) {
-            // After tonight's evening window → defer to tomorrow's sunrise
+            // After tonight's active window → defer to tomorrow's sunrise
             day_start += 86400;
             gmtime_r(&day_start, &gm);
             doy = gm.tm_yday + 1;
-            int sunrise_m = solar_utc_minutes(doy, false);
+            sunrise_m = solar_utc_minutes(doy, false);
             if (sunrise_m < 0) sunrise_m = 0;
             next_utc = day_start + (time_t)sunrise_m * 60;
             ESP_LOGI(TAG, "alarm: night → sunrise %02d:%02d UTC (doy %d)",
                      sunrise_m/60, sunrise_m%60, doy);
         } else {
-            // Daytime (before today's sunset) → defer to tonight's evening window
-            next_utc = day_start + (time_t)sunset_m * 60;
-            ESP_LOGI(TAG, "alarm: daytime → evening window at %02d:%02d UTC (doy %d)",
-                     sunset_m/60, sunset_m%60, doy);
+            // Before today's sunrise → defer to today's sunrise
+            next_utc = day_start + (time_t)sunrise_m * 60;
+            ESP_LOGI(TAG, "alarm: dark → sunrise at %02d:%02d UTC (doy %d)",
+                     sunrise_m/60, sunrise_m%60, doy);
         }
     }
 
