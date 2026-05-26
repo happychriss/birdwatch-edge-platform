@@ -329,14 +329,18 @@ const GLOBAL_MEAN_ESP      = {{ _esp.get('global_mean', 128) | tojson }};
 // Active SIM/ESP mode — read from global preference stored in localStorage
 let _activeMode = localStorage.getItem('bw_sim_mode') || 'sim';
 
+// Tiles visibility — global preference across all frames (defaults to true)
+// UI starts with tiles off; this will be applied during init if true
+let tilesOn = false;
+const _savedTilesVisible = localStorage.getItem('bw_tiles_visible');
+const _preferTilesOn = (_savedTilesVisible === null) || (_savedTilesVisible === 'true');
+
 // 20×15 = 300 tiles (current firmware), 16×12 = 192 (legacy)
 const _refTiles = TILE_MEANS || TILE_MEANS_ESP;
 const TILE_COLS = (_refTiles && _refTiles.length === 192) ? 16 : 20;
 const TILE_ROWS = (_refTiles && _refTiles.length === 192) ? 12 : 15;
 const DARK_DELTA_MODEL = 20;   // matches CC_DARK_DELTA_MODEL in firmware and config.py
 const DARK_DELTA_PREV  = 20;   // matches CC_DARK_DELTA_PREV
-
-let tilesOn = false;
 
 function _getActiveTileData() {
   const useSim = (_activeMode !== 'esp') || !TILE_MEANS_ESP;
@@ -424,6 +428,7 @@ function drawTiles() {
 
 function toggleTiles() {
   tilesOn = !tilesOn;
+  localStorage.setItem('bw_tiles_visible', tilesOn ? 'true' : 'false');
   const canvas = document.getElementById('tile-canvas');
   const btn    = document.getElementById('btn-tiles');
   const legend = document.getElementById('tile-legend');
@@ -444,8 +449,8 @@ window.addEventListener('resize', function() { if (tilesOn) drawTiles(); });
 // Initialize view from global preference before tiles are drawn
 if (_activeMode !== 'sim') setView(_activeMode);
 
-// Tiles on by default — wait for image to be loaded so offsetWidth/Height are valid
-if (_refTiles) {
+// Initialize tiles visibility from global preference — wait for image to load so offsetWidth/Height are valid
+if (_refTiles && _preferTilesOn) {
   const _img = document.getElementById('frame-img');
   if (_img) {
     if (_img.complete && _img.naturalWidth) { toggleTiles(); }
