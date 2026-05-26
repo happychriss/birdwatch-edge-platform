@@ -228,11 +228,10 @@ if (hourly.length) {
             maxRotation: 0,
             callback: function(val) {
               const d = new Date(val);
-              // Show date (dd.mm) only at midnight (00:00)
-              if (d.getHours() === 0)
-                return String(d.getDate()).padStart(2,'0') + '.' + String(d.getMonth()+1).padStart(2,'0');
-              // Show only hours for 03, 06, 09, 12, 15, 18, 21
-              return String(d.getHours()).padStart(2,'0');
+              const dateStr = String(d.getDate()).padStart(2,'0') + '.' + String(d.getMonth()+1).padStart(2,'0');
+              const hourStr = String(d.getHours()).padStart(2,'0');
+              // Show date on every tick along with hour
+              return dateStr + ' ' + hourStr;
             }
           },
           grid: { color: '#f0f4f8' }
