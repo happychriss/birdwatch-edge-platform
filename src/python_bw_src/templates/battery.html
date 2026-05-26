@@ -226,12 +226,13 @@ if (hourly.length) {
           ticks: {
             font: { size: 11 },
             maxRotation: 0,
+            color: '#8a9bb0',
             callback: function(val) {
               const d = new Date(val);
               const dateStr = String(d.getDate()).padStart(2,'0') + '.' + String(d.getMonth()+1).padStart(2,'0');
               const hourStr = String(d.getHours()).padStart(2,'0');
-              // Show date on every tick along with hour
-              return dateStr + ' ' + hourStr;
+              // Hour on first line, date on second line — gives visual separation
+              return [hourStr, dateStr];
             }
           },
           grid: { color: '#f0f4f8' }
