@@ -202,8 +202,8 @@ static time_t rtc_compute_next(i2c_dev_t *rtc)
     int sunset_m  = solar_utc_minutes(doy, true);
     if (sunset_m > 24*60)  sunset_m  = 24*60;
 
-    // Active window: [sunrise, sunset + BW_EVENING_WIN_POST_MIN) UTC
-    int win_end_m = sunset_m + BW_EVENING_WIN_POST_MIN;
+    // Active window: [sunrise, sunset + BW_BIRD_ACTIVE_WINDOW_POST_MIN) UTC
+    int win_end_m = sunset_m + BW_BIRD_ACTIVE_WINDOW_POST_MIN;
 
     bool in_active = (next_utc_m >= sunrise_m && next_utc_m < win_end_m);
 

@@ -91,18 +91,17 @@
 // the fallback.
 #define BW_ALARM_CYCLE_MIN_DEFAULT   15
 
-// ─── Evening capture window ─────────────────────────────────────────────────
-// RTC wakeups are restricted to a window starting at sunset and extending
-// BW_EVENING_WIN_POST_MIN minutes after sunset (UTC).  Outside this window the
-// next alarm is deferred to the following sunset.
+// ─── Bird-active capture window ─────────────────────────────────────────────
+// RTC wakeups active from sunrise through sunset + BW_BIRD_ACTIVE_WINDOW_POST_MIN.
+// The post-sunset extension captures dusk bird-feeder activity under twilight.
+// Outside [sunrise, sunset+POST_MIN) the alarm defers to the next sunrise.
 //
-// This aligns the background model with the actual lighting conditions when the
-// camera is most active (dusk bird-feeder activity).  Approximate local times:
+// Approximate local times for the post-sunset extension:
 //   Jan 16:40–17:10   Feb 17:20–18:00   Mar 18:10–19:50 (DST +1 h jump)
 //   Apr 20:10–20:50   May 20:50–21:35   Jun 21:35–21:50
 //   Jul 21:45–21:20   Aug 21:10–20:20   Sep 20:15–19:10
 //   Oct 19:00–17:10 (DST −1 h jump)     Nov 16:50–16:30   Dec 16:25–16:35
-#define BW_EVENING_WIN_POST_MIN      30   // minutes after sunset
+#define BW_BIRD_ACTIVE_WINDOW_POST_MIN      30   // minutes after sunset
 
 // ─── Post-cycle cooldown (light sleep before power release / reboot) ────────
 // Halts CPU so residual switching noise does not extend the PIR pulse.
