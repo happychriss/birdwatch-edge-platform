@@ -71,7 +71,7 @@
 
 <!-- ── Chart ─────────────────────────────────────────────────────────── -->
 <div class="card">
-  <div class="card-title">Hourly battery voltage &amp; photo activity</div>
+  <div class="card-title">3-hourly battery voltage &amp; photo activity</div>
 
   <div class="legend-row">
     <div class="legend-item">
@@ -87,10 +87,10 @@
       <div class="legend-dot" style="background:#ccc; border: 1px solid #aaa;"></div> estimated (no reading)
     </div>
     <div class="legend-item">
-      <div style="width:12px;height:12px;background:rgba(41,128,185,0.45);border-radius:2px;"></div> clouds/hr
+      <div style="width:12px;height:12px;background:rgba(41,128,185,0.45);border-radius:2px;"></div> clouds/3h
     </div>
     <div class="legend-item">
-      <div style="width:12px;height:12px;background:rgba(39,174,96,0.45);border-radius:2px;"></div> process/hr
+      <div style="width:12px;height:12px;background:rgba(39,174,96,0.45);border-radius:2px;"></div> process/3h
     </div>
   </div>
 
@@ -219,7 +219,7 @@ if (hourly.length) {
           min: xMin,
           time: {
             unit: 'hour',
-            stepSize: 6,
+            stepSize: 3,
             tooltipFormat: 'dd.MM.yy HH:mm',
             displayFormats: { hour: 'HH' },
           },
@@ -228,8 +228,10 @@ if (hourly.length) {
             maxRotation: 0,
             callback: function(val) {
               const d = new Date(val);
+              // Show date (dd.mm) only at midnight (00:00)
               if (d.getHours() === 0)
                 return String(d.getDate()).padStart(2,'0') + '.' + String(d.getMonth()+1).padStart(2,'0');
+              // Show only hours for 03, 06, 09, 12, 15, 18, 21
               return String(d.getHours()).padStart(2,'0');
             }
           },
@@ -250,7 +252,7 @@ if (hourly.length) {
           stacked: true,
           ticks: { font: { size: 11 }, stepSize: 1, precision: 0 },
           grid: { drawOnChartArea: false },
-          title: { display: true, text: 'Photos/hr', font: { size: 11 }, color: '#8a9bb0' }
+          title: { display: true, text: 'Photos/3h', font: { size: 11 }, color: '#8a9bb0' }
         }
       },
       plugins: {

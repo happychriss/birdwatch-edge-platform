@@ -453,42 +453,51 @@ def battery():
                   .order_by(BwPhoto.date.asc())
                   .all())
 
-    volt_by_hour = defaultdict(list)
+    # Group by 3-hour windows: 00:00, 03:00, 06:00, 09:00, etc.
+    volt_by_3h = defaultdict(list)
     for r in volt_rows:
         if r.date:
-            volt_by_hour[r.date.replace(minute=0, second=0, microsecond=0)].append(float(r.voltage))
+            # Round down to nearest 3-hour boundary
+            h3 = (r.date.hour // 3) * 3
+            bucket_time = r.date.replace(hour=h3, minute=0, second=0, microsecond=0)
+            volt_by_3h[bucket_time].append(float(r.voltage))
 
-    cloud_by_hour   = defaultdict(int)
-    process_by_hour = defaultdict(int)
+    cloud_by_3h   = defaultdict(int)
+    process_by_3h = defaultdict(int)
     for r in photo_rows:
         if r.date:
-            hk = r.date.replace(minute=0, second=0, microsecond=0)
+            h3 = (r.date.hour // 3) * 3
+            bucket_time = r.date.replace(hour=h3, minute=0, second=0, microsecond=0)
             if r.cc_label == 'clouds':
-                cloud_by_hour[hk] += 1
+                cloud_by_3h[bucket_time] += 1
             else:
-                process_by_hour[hk] += 1
+                process_by_3h[bucket_time] += 1
 
     hourly = []
-    if volt_by_hour:
-        start_h = min(volt_by_hour.keys())
-        end_h   = datetime.now().replace(minute=0, second=0, microsecond=0)
+    if volt_by_3h:
+        start_3h = min(volt_by_3h.keys())
+        end_3h   = datetime.now().replace(minute=0, second=0, microsecond=0)
+        # Round end to nearest 3-hour boundary
+        h3 = (end_3h.hour // 3) * 3
+        end_3h = end_3h.replace(hour=h3)
+
         last_v  = None
-        cur = start_h
-        while cur <= end_h:
-            if cur in volt_by_hour:
-                v = round(sum(volt_by_hour[cur]) / len(volt_by_hour[cur]), 3)
+        cur = start_3h
+        while cur <= end_3h:
+            if cur in volt_by_3h:
+                v = round(sum(volt_by_3h[cur]) / len(volt_by_3h[cur]), 3)
                 last_v = v
                 est = False
             elif last_v is not None:
                 v = last_v
                 est = True
             else:
-                cur += timedelta(hours=1)
+                cur += timedelta(hours=3)
                 continue
             hourly.append({'t': cur.strftime('%Y-%m-%dT%H:%M:%S'), 'v': v, 'est': est,
-                           'nc': cloud_by_hour.get(cur, 0),
-                           'np': process_by_hour.get(cur, 0)})
-            cur += timedelta(hours=1)
+                           'nc': cloud_by_3h.get(cur, 0),
+                           'np': process_by_3h.get(cur, 0)})
+            cur += timedelta(hours=3)
 
     daily = defaultdict(list)
     for r in volt_rows:
