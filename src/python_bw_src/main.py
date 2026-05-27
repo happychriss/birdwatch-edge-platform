@@ -863,10 +863,9 @@ def frame_detail():
     prev_entry = prev_q.order_by(BwFrame.id.desc()).first()
     next_entry = next_q.order_by(BwFrame.id.asc()).first()
 
-    # Filter suffix to append to prev/next nav URLs
-    filter_qs = ''
-    if src_param != 'pir,rtc' or lbl_param != 'bird,ignore,special,cloud,none':
-        filter_qs = f'&src={src_param}&lbl={lbl_param}'
+    # Filter suffix appended to prev/next nav URLs — always included so
+    # state is self-contained in the URL and survives copy-paste/refresh.
+    filter_qs = f'&src={src_param}&lbl={lbl_param}'
 
     time_diff = None
     if prev_entry and entry.captured_at and prev_entry.captured_at:

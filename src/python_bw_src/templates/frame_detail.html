@@ -181,7 +181,7 @@
 
 <!-- ── Header ── -->
 <header>
-  <a class="back-btn" href="/">&#8592; Back</a>
+  <a class="back-btn" id="back-btn" href="/">&#8592; Back</a>
   <span class="header-title">Frame Detail</span>
   <span class="header-id">id&nbsp;{{ entry.id }}</span>
 </header>
@@ -565,6 +565,17 @@ function setView(mode) {
   if (tilesOn) drawTiles();
 }
 
+// ── Gallery return URL ───────────────────────────────────────────────────────
+// Prefer the exact URL saved when the user clicked into this frame from the
+// gallery (includes page number + active filters).  Fall back to a URL built
+// from the filter params the server passed us (handles direct / bookmarked links).
+const _galleryFallback = '/?src={{ src_param }}&lbl={{ lbl_param }}';
+const _galleryReturn   = sessionStorage.getItem('bw_gallery_return') || _galleryFallback;
+(function() {
+  const btn = document.getElementById('back-btn');
+  if (btn) btn.href = _galleryReturn;
+})();
+
 // ── Keyboard ──────────────────────────────────────────────────────────────────
 const _nextUrl = {% if next_id %}'/frame_detail?id={{ next_id }}{{ filter_qs }}'{% else %}null{% endif %};
 const _prevUrl = {% if prev_id %}'/frame_detail?id={{ prev_id }}{{ filter_qs }}'{% else %}null{% endif %};
@@ -577,7 +588,7 @@ document.addEventListener('keydown', function(e) {
 
   if (e.key === 'ArrowLeft'  && _prevUrl) { location.href = _prevUrl; return; }
   if (e.key === 'ArrowRight' && _nextUrl) { location.href = _nextUrl; return; }
-  if (e.key === 'Escape') { location.href = '/'; return; }
+  if (e.key === 'Escape') { location.href = _galleryReturn; return; }
   if (e.key === 't' || e.key === 'T') { if (_refTiles) toggleTiles(); return; }
 
   if (e.key === ' ') {

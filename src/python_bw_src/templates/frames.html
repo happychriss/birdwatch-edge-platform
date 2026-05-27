@@ -484,6 +484,13 @@ function pollBackfill() {
   });
 }
 
+// Save exact gallery URL (page + filters) so frame_detail Back button can return here
+document.querySelectorAll('.card a[href*="frame_detail"]').forEach(function(a) {
+  a.addEventListener('click', function() {
+    sessionStorage.setItem('bw_gallery_return', location.href);
+  });
+});
+
 let refreshSecs = 300;
 const countdownEl = document.getElementById('countdown');
 const ticker = setInterval(function() {
