@@ -126,16 +126,19 @@ def classify(
         trigger = "WARMUP"
         decision = "process"
         reason = f"cell warmup ({model.warmup_remaining(pb, sb)} more obs needed) → lean upload"
-    elif ratio <= cfg.quiet_anomaly_ratio:
-        trigger = "QUIET"
-        decision = "clouds"
-        reason = (f"scene matches model (dark_ratio={ratio:.3f} ≤ {cfg.quiet_anomaly_ratio}, "
-                  f"photo_bucket={pb_name})")
     elif dark_blob_condition:
+        # DARK_BLOB before QUIET: a compact bird-sized cluster must be uploaded even
+        # on an otherwise calm background (ratio can be near zero when a bird lands
+        # on a well-matched scene — QUIET would wrongly suppress it).
         trigger = "DARK_BLOB"
         decision = "process"
         reason = (f"compact dark blob (dark_tiles={dark_tiles}, blob_max={dark_blob_max}, "
                   f"chroma_changed={n_chroma_changed}, dark_ratio={ratio:.2f}, "
+                  f"photo_bucket={pb_name})")
+    elif ratio <= cfg.quiet_anomaly_ratio:
+        trigger = "QUIET"
+        decision = "clouds"
+        reason = (f"scene matches model (dark_ratio={ratio:.3f} ≤ {cfg.quiet_anomaly_ratio}, "
                   f"photo_bucket={pb_name})")
     else:
         trigger = "AMBIGUOUS"
