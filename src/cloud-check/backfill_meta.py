@@ -10,7 +10,8 @@ For every bw_frames row that has a JPG file, this script:
      as model_tile_means (drives the Δm tile overlay in the detail view).
   4. Overwrites: tile_means, tile_means_u, tile_means_v, model_tile_means,
      model_tile_means_u, model_tile_means_v, result, stage, global_mean,
-     ratio, dark_anomalous, dark_tiles, new_dark_tiles, photo_bucket,
+     ratio, dark_anomalous, dark_tiles, dark_blob_max, tile_delta_luma,
+     tile_delta_chroma, tile_color_mask, photo_bucket,
      burst_trigger, burst_label, burst_gm_diff, burst_n_changed, burst_n_dark,
      burst_n_chroma.
      Marks every reprocessed row with simulated=True.
@@ -55,10 +56,8 @@ from cloud_check.background import BackgroundModel, photo_bucket_idx
 from cloud_check.classifier import classify
 from cloud_check.config import Config
 from cloud_check.features import load_yuv_vga, extract_tile_features_yuv
+from cloud_check.pipeline import BURST_SUPPRESS_STAGES
 from db import BwFrame, Session
-
-# Burst stages that suppress without running the background model.
-_BURST_SUPPRESS_STAGES = frozenset({'DUPLICATE', 'BRIGHT_STABLE'})
 
 _jpg_raw = os.getenv('JPG_FOLDER_PATH', '/tmp')
 JPG_FOLDER = (_server_dir / _jpg_raw).resolve() if not Path(_jpg_raw).is_absolute() else Path(_jpg_raw)
@@ -68,7 +67,8 @@ _OVERWRITE_KEYS = (
     'tile_means', 'tile_means_u', 'tile_means_v',
     'model_tile_means', 'model_tile_means_u', 'model_tile_means_v',
     'result', 'stage', 'global_mean',
-    'ratio', 'dark_anomalous', 'dark_tiles', 'new_dark_tiles', 'dark_blob_max',
+    'ratio', 'dark_anomalous', 'dark_tiles', 'dark_blob_max',
+    'tile_delta_luma', 'tile_delta_chroma', 'tile_color_mask',
     'photo_bucket', 'warmup', 'prev_valid', 'simulated',
     'burst_trigger', 'burst_label', 'burst_gm_diff',
     'burst_n_changed', 'burst_n_dark', 'burst_n_chroma',
@@ -129,7 +129,8 @@ def run_backfill(dry_run: bool = False) -> None:
         bg_model.seed_from_corpus(pb_idx, 0, seed_y)
         print(f"  Seeded {pb_name} model from {len(arrs)} frames (tile mean={seed_y.mean():.1f})", flush=True)
 
-    # Per-cell (photo_bucket × scene_bucket) previous tile means for temporal check
+    # Per-cell (photo_bucket × scene_bucket) previous tile means — used to track
+    # which cells received at least one real frame (for prev_valid flag).
     prev_tile_mean_by_cell: dict[tuple[int, int], tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
 
     # Burst filter prev state (all frames, not just RTC)
@@ -222,7 +223,6 @@ def run_backfill(dry_run: bool = False) -> None:
         pb = photo_bucket_idx(pb_name)
         sb = bg_model.scene_bucket_for(pb, tile_mean_y)
         prev_cell = prev_tile_mean_by_cell.get((pb, sb))
-        bg_prev_y = prev_cell[0] if prev_cell is not None else None
         was_warmup = bg_model.warmup_remaining(pb, sb) > 0
         bg_model.observe(pb, sb)
 
@@ -233,14 +233,19 @@ def run_backfill(dry_run: bool = False) -> None:
 
         bg_pred = None
         burst_suppresses = (burst.label == 'suppress'
-                            and burst.trigger in _BURST_SUPPRESS_STAGES)
+                            and burst.trigger in BURST_SUPPRESS_STAGES)
         if burst_suppresses:
             result = 'clouds'
             stage = burst.trigger
+        elif burst.skip_bg_model:
+            # NIGHT: upload unconditionally, update model if RTC, skip classifier.
+            result = 'process'
+            stage = burst.trigger
+            if meta.get('source') == 'rtc':
+                bg_model.update(pb, sb, tile_mean_y, tile_mean_u, tile_mean_v)
         else:
             bg_pred = classify(
                 tile_mean_y, bg_model, cc_cfg,
-                prev_tile_mean=bg_prev_y,
                 tile_mean_u=tile_mean_u,
                 tile_mean_v=tile_mean_v,
             )
@@ -248,14 +253,8 @@ def run_backfill(dry_run: bool = False) -> None:
             stage = bg_pred.trigger
 
             # Mirror firmware update policy: only RTC frames update the model.
-            if meta.get('source') == 'rtc' and (
-                was_warmup
-                or bg_pred.label == 'clouds'
-                or bg_pred.trigger in ('SCENE_DRIFT', 'NIGHT')
-            ):
+            if meta.get('source') == 'rtc' and (was_warmup or bg_pred.label == 'clouds'):
                 bg_model.update(pb, sb, tile_mean_y, tile_mean_u, tile_mean_v)
-            if bg_pred.trigger == 'SCENE_DRIFT' and meta.get('source') == 'rtc':
-                bg_model.reset_warmup(pb, sb)
 
             prev_tile_mean_by_cell[(pb, sb)] = (tile_mean_y, tile_mean_u, tile_mean_v)
 
@@ -299,15 +298,21 @@ def run_backfill(dry_run: bool = False) -> None:
 
         if bg_pred is not None:
             new_fields['ratio']           = round(float(bg_pred.anomaly_ratio), 3)
-            new_fields['new_dark_tiles']  = int(bg_pred.new_dark_tiles)
             new_fields['dark_anomalous']  = int(bg_pred.anomaly_mask.sum())
             new_fields['dark_tiles']      = int(bg_pred.dark_tiles)
             new_fields['dark_blob_max']   = int(bg_pred.dark_blob_max)
             new_fields['scene_bucket']    = int(bg_pred.scene_bucket)
             new_fields['n_chroma_changed'] = int(bg_pred.n_chroma_changed)
+            # Tile overlay arrays: Δluma, Δchroma, and colour mask (0=none, 1=blue/dark_model, 2=red/dark_blob)
+            new_fields['tile_delta_luma'] = bg_pred.tile_delta_luma.flatten().round().astype(int).tolist()
+            if bg_pred.tile_delta_chroma is not None:
+                new_fields['tile_delta_chroma'] = bg_pred.tile_delta_chroma.flatten().round(1).tolist()
+            color = np.zeros(bg_pred.dark_tile_mask.shape, dtype=np.int8)
+            color[bg_pred.dark_tile_mask] = 1
+            color[bg_pred.dark_blob_mask] = 2
+            new_fields['tile_color_mask'] = color.flatten().tolist()
         else:
             new_fields['ratio']          = 0.0
-            new_fields['new_dark_tiles'] = 0
             new_fields['dark_anomalous'] = 0
             new_fields['dark_tiles']     = 0
             new_fields['dark_blob_max']  = 0

@@ -153,7 +153,7 @@ class BackgroundModel:
         return max(0, need - updated)
 
     def reset_warmup(self, pb_idx: int, sb_idx: int) -> None:
-        """Force the cell back into warmup — used after SCENE_DRIFT."""
+        """Force the cell back into warmup."""
         self.bucket_seen[pb_idx, sb_idx] = 0
         self.count[pb_idx, sb_idx] = 0  # warmup_remaining uses count, so reset it
 

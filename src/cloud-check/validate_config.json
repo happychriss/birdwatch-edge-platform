@@ -23,8 +23,7 @@
     "quiet_anomaly_ratio": 0.25,
     "dark_object_min_delta": 20.0,
     "dark_object_min_tiles": 1,
-    "temporal_dark_delta": 20.0,
-    "scene_drift_min_tiles": 4,
+    "dark_blob_max_size": 5,
     "night_brightness_threshold": 70.0,
     "chroma_dark_obj_gate_sq": 64
   },

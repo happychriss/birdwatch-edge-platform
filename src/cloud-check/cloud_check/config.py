@@ -33,8 +33,7 @@ class Config:
     quiet_anomaly_ratio: float = 0.25     # ≤ this fraction of dark-anomalous tiles → suppress
     dark_object_min_delta: float = 20.0   # tile darker than bucket mean by this much → object-like
     dark_object_min_tiles: int = 1
-    temporal_dark_delta: float = 20.0     # tile darker than PREVIOUS frame by this much
-    scene_drift_min_tiles: int = 4
+    dark_blob_max_size: int = 5           # largest qualifying dark blob (≤ this → DARK_BLOB → process)
 
     # ── Chroma gates ────────────────────────────────────────────────────────────
     # ΔC² = ΔU² + ΔV² (squared form avoids sqrt and matches the ESP integer math).
@@ -56,6 +55,3 @@ class Config:
     grid_w: int = 20
     grid_h: int = 15
 
-    # ── Night gate ──────────────────────────────────────────────────────────────
-    # When the frame is too dark for reliable anomaly detection, upload unconditionally.
-    night_brightness_threshold: float = 70.0

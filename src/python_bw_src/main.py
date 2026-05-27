@@ -63,9 +63,10 @@ except Exception as _import_exc:
 
 
 def _should_update(meta: dict) -> bool:
-    """Mirror firmware update policy: only RTC frames that warrant it update the model."""
+    """Mirror new update policy: RTC frames update on warmup or when result is clouds."""
     return (meta.get('source') == 'rtc'
-            and meta.get('stage') in ('WARMUP', 'QUIET', 'SCENE_DRIFT', 'NIGHT'))
+            and (meta.get('stage') in ('WARMUP', 'NIGHT')  # NIGHT: historical-data compat
+                 or meta.get('result') == 'clouds'))
 
 
 def _warm_live_model():
@@ -129,8 +130,6 @@ def _warm_live_model():
                 _live_model.observe(pb, sb)
                 if _should_update(meta):
                     _live_model.update(pb, sb, arr_y, arr_u, arr_v)
-                if meta.get('stage') == 'SCENE_DRIFT' and meta.get('source') == 'rtc':
-                    _live_model.reset_warmup(pb, sb)
 
             # Track burst state for all frames
             loc_burst_y  = arr_y
@@ -602,7 +601,6 @@ def process_frame_upload():
                         pb = _pb_idx(pb_name)
                         sb = _live_model.scene_bucket_for(pb, arr_y)
                         prev_cell = _prev_tile_by_cell.get((pb, sb))
-                        bg_prev_y = prev_cell[0] if prev_cell is not None else None
                         was_warmup = _live_model.warmup_remaining(pb, sb) > 0
                         _live_model.observe(pb, sb)
 
@@ -611,30 +609,30 @@ def process_frame_upload():
                         snap_u = _live_model.mean_u[pb, sb].flatten().round().astype(int).tolist()
                         snap_v = _live_model.mean_v[pb, sb].flatten().round().astype(int).tolist()
 
+                        source = meta.get('source')
                         burst_suppresses = (burst.label == 'suppress'
                                             and burst.trigger in _BURST_SUPPRESS_STAGES)
                         if burst_suppresses:
                             srv_result = 'clouds'
                             srv_stage  = burst.trigger
                             bg_pred    = None
+                        elif burst.skip_bg_model:
+                            # NIGHT: upload unconditionally, update model if RTC, skip bg model.
+                            srv_result = 'process'
+                            srv_stage  = burst.trigger
+                            bg_pred    = None
+                            if source == 'rtc':
+                                _live_model.update(pb, sb, arr_y, arr_u, arr_v)
                         else:
                             bg_pred = _classify(
                                 arr_y, _live_model, _bg_cfg,
-                                prev_tile_mean=bg_prev_y,
                                 tile_mean_u=arr_u, tile_mean_v=arr_v,
                             )
                             srv_result = bg_pred.label
                             srv_stage  = bg_pred.trigger
 
-                            source = meta.get('source')
-                            if source == 'rtc' and (
-                                was_warmup
-                                or bg_pred.label == 'clouds'
-                                or bg_pred.trigger in ('SCENE_DRIFT', 'NIGHT')
-                            ):
+                            if source == 'rtc' and (was_warmup or bg_pred.label == 'clouds'):
                                 _live_model.update(pb, sb, arr_y, arr_u, arr_v)
-                            if bg_pred.trigger == 'SCENE_DRIFT' and source == 'rtc':
-                                _live_model.reset_warmup(pb, sb)
                             _prev_tile_by_cell[(pb, sb)] = (arr_y, arr_u, arr_v)
 
                         # Advance burst state for next frame
@@ -669,18 +667,24 @@ def process_frame_upload():
                     if arr_v is not None:
                         new_fields['tile_means_v'] = arr_v.flatten().round().astype(int).tolist()
                     if bg_pred is not None:
+                        color = _np.zeros(bg_pred.dark_tile_mask.shape, dtype=_np.int8)
+                        color[bg_pred.dark_tile_mask] = 1
+                        color[bg_pred.dark_blob_mask] = 2
                         new_fields.update({
-                            'ratio':           round(float(bg_pred.anomaly_ratio), 3),
-                            'new_dark_tiles':  int(bg_pred.new_dark_tiles),
-                            'dark_anomalous':  int(bg_pred.anomaly_mask.sum()),
-                            'dark_tiles':      int(bg_pred.dark_tiles),
-                            'dark_blob_max':   int(bg_pred.dark_blob_max),
-                            'scene_bucket':    int(bg_pred.scene_bucket),
+                            'ratio':            round(float(bg_pred.anomaly_ratio), 3),
+                            'dark_anomalous':   int(bg_pred.anomaly_mask.sum()),
+                            'dark_tiles':       int(bg_pred.dark_tiles),
+                            'dark_blob_max':    int(bg_pred.dark_blob_max),
+                            'scene_bucket':     int(bg_pred.scene_bucket),
                             'n_chroma_changed': int(bg_pred.n_chroma_changed),
+                            'tile_delta_luma':  bg_pred.tile_delta_luma.flatten().round().astype(int).tolist(),
+                            'tile_color_mask':  color.flatten().tolist(),
                         })
+                        if bg_pred.tile_delta_chroma is not None:
+                            new_fields['tile_delta_chroma'] = bg_pred.tile_delta_chroma.flatten().round(1).tolist()
                     else:
                         new_fields.update({
-                            'ratio': 0.0, 'new_dark_tiles': 0,
+                            'ratio': 0.0,
                             'dark_anomalous': 0, 'dark_tiles': 0, 'dark_blob_max': 0,
                         })
 

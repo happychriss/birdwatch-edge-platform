@@ -27,6 +27,12 @@ from .config import Config
 from .dataset import Sample
 from .features import extract_tile_features_yuv, load_yuv_vga
 
+# Burst stages that suppress without running the background model.
+# FAST_SHIFT and ISOLATED require dt_seconds which the ESP cannot compute before
+# WiFi/SNTP sync — treated as BRIGHTNESS_SHIFT (process) in the validator.
+# NIGHT is handled via BurstResult.skip_bg_model (process + skip bg model).
+BURST_SUPPRESS_STAGES: frozenset[str] = frozenset({'DUPLICATE', 'BRIGHT_STABLE'})
+
 
 @dataclass
 class StreamResult:
@@ -45,8 +51,8 @@ def run_stream(
 
     Model update policy (mirrors the on-device rule):
       • PIR frames never update the model — pure evidence.
-      • RTC frames update the model when prediction warrants it
-        (warmup, QUIET, SCENE_DRIFT, NIGHT).
+      • RTC frames update the model on warmup or QUIET prediction.
+        NIGHT is handled by the burst pre-filter before this function is called.
       • If `update_only_on_cloud_prediction` is False, the policy becomes
         "update only on ground-truth cloud frames" — kept for oracle replays
         in the validator.
@@ -55,8 +61,6 @@ def run_stream(
     cfg = cfg or Config()
     model = BackgroundModel(cfg)
     out: list[StreamResult] = []
-    # prev tile means per (photo_bucket, scene_bucket) cell, in Y/U/V triples
-    prev_state: dict[tuple[int, int], tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
 
     for s in samples:
         y, u, v = load_yuv_vga(s.path)
@@ -65,8 +69,6 @@ def run_stream(
         pb_name = model.photo_bucket_for(gm)
         pb = photo_bucket_idx(pb_name)
         sb = model.scene_bucket_for(pb, feats["mean_y"])
-        prev = prev_state.get((pb, sb))
-        prev_y = prev[0] if prev is not None else None
 
         # Observe before classifying so warmup counter reflects the model
         # that was used for prediction (matches on-device behaviour).
@@ -75,30 +77,18 @@ def run_stream(
 
         pred = classify(
             feats["mean_y"], model, cfg,
-            prev_tile_mean=prev_y,
             tile_mean_u=feats["mean_u"],
             tile_mean_v=feats["mean_v"],
         )
 
-        # Update policy:
-        #  • update_only_on_cloud_prediction=True  → mirror on-device
-        #  • update_only_on_cloud_prediction=False → oracle (label==clouds)
+        # Update policy: RTC-only gate, PIR frames never update.
         if update_only_on_cloud_prediction:
-            # RTC-only gate: PIR frames never update. RTC frames update when
-            # prediction agrees the scene is empty / drifting / dark.
-            if s.source == "rtc" and (
-                was_warmup
-                or pred.label == "clouds"
-                or pred.trigger in ("SCENE_DRIFT", "NIGHT")
-            ):
+            if s.source == "rtc" and (was_warmup or pred.label == "clouds"):
                 model.update(pb, sb, feats["mean_y"], feats["mean_u"], feats["mean_v"])
-            if pred.trigger == "SCENE_DRIFT" and s.source == "rtc":
-                model.reset_warmup(pb, sb)
         else:
             if s.label == "clouds":
                 model.update(pb, sb, feats["mean_y"], feats["mean_u"], feats["mean_v"])
 
-        prev_state[(pb, sb)] = (feats["mean_y"], feats["mean_u"], feats["mean_v"])
         out.append(StreamResult(sample=s, pred=pred, correct=(pred.label == s.label)))
 
     return out
@@ -130,9 +120,9 @@ def write_csv(results: list[StreamResult], path: Path) -> None:
         w.writerow([
             "filename", "domain", "source", "label", "pred", "trigger",
             "photo_bucket", "scene_bucket",
-            "blob_max", "anomaly_ratio", "compactness", "warmup",
-            "new_dark_tiles", "dark_tiles", "n_chroma_changed", "chroma_delta_max",
-            "temporal_available", "reason", "correct",
+            "blob_max", "dark_blob_max", "anomaly_ratio", "compactness", "warmup",
+            "dark_tiles", "n_chroma_changed", "chroma_delta_max",
+            "reason", "correct",
         ])
         for r in results:
             w.writerow([
@@ -145,14 +135,13 @@ def write_csv(results: list[StreamResult], path: Path) -> None:
                 r.pred.photo_bucket,
                 r.pred.scene_bucket,
                 r.pred.blob_max_size,
+                r.pred.dark_blob_max,
                 f"{r.pred.anomaly_ratio:.3f}",
                 f"{r.pred.compactness:.3f}",
                 int(r.pred.warmup),
-                r.pred.new_dark_tiles,
                 r.pred.dark_tiles,
                 r.pred.n_chroma_changed,
                 f"{r.pred.chroma_delta_max:.2f}",
-                int(r.pred.temporal_available),
                 r.pred.reason,
                 int(r.correct),
             ])

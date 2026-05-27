@@ -102,12 +102,13 @@ class BurstConfig:
                                              # Squared form mirrors the on-device integer math
                                              # (no sqrt). DUPLICATE requires zero chroma-changed
                                              # tiles AND zero luma-changed tiles to suppress.
+    night_brightness_threshold: float = 70.0  # gm < this → NIGHT → process, skip bg model
 
 
 @dataclass
 class BurstResult:
     label: str          # "suppress" | "process"
-    trigger: str        # FIRST | ISOLATED | FAST_SHIFT | BRIGHTNESS_SHIFT | DUPLICATE | BRIGHT_STABLE | DIFFUSE | SAFE
+    trigger: str        # FIRST | ISOLATED | FAST_SHIFT | BRIGHTNESS_SHIFT | DUPLICATE | BRIGHT_STABLE | NIGHT | DIFFUSE | SAFE
     n_changed: int      # tiles with |Y diff| > tile_diff_threshold (absolute)
     n_dark: int         # tiles that got DARKER on Y by > dark_diff_threshold
     n_chroma_changed: int   # tiles where ΔU² + ΔV² > chroma_delta_threshold_sq (0 if chroma absent)
@@ -117,6 +118,7 @@ class BurstResult:
     gm_diff: float      # |global_mean - prev_global_mean|
     dt_seconds: float   # time since previous frame (inf if no prev)
     reason: str
+    skip_bg_model: bool = False  # True when bg model must not run (NIGHT)
 
 
 def burst_classify(
@@ -259,7 +261,21 @@ def burst_classify(
                     f"and n_dark={n_dark} < {cfg.bright_stable_max_dark} — bright scene, no dark object"),
         )
 
-    # ── Stage 5: DIFFUSE ────────────────────────────────────────────────────
+    # ── Stage 5: NIGHT ─────────────────────────────────────────────────────
+    # Raw sensor property — no model needed.  Placed before DIFFUSE so a dark
+    # scene transitioning to darkness (n_dark high) uploads rather than suppresses.
+    if cfg.night_brightness_threshold > 0 and global_mean < cfg.night_brightness_threshold:
+        return BurstResult(
+            label="process", trigger="NIGHT",
+            n_changed=n_changed, n_dark=n_dark,
+            n_chroma_changed=n_chroma_changed, chroma_delta_max=chroma_delta_max,
+            blob_max=blob_max, compactness=compactness,
+            gm_diff=gm_diff, dt_seconds=dt_seconds,
+            reason=f"scene too dark (gm={global_mean:.1f} < {cfg.night_brightness_threshold:.0f}) — upload, skip bg model",
+            skip_bg_model=True,
+        )
+
+    # ── Stage 6: DIFFUSE ────────────────────────────────────────────────────
     if n_dark >= cfg.diffuse_min_dark_tiles:
         return BurstResult(
             label="suppress", trigger="DIFFUSE",

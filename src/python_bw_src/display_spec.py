@@ -34,15 +34,17 @@ DISPLAY_SPEC: dict = {
     "stage": {
         "type": "stage_badge",
         "palette": {
-            # Background-model stages
-            "NIGHT":          "#1a1a2e",
+            # Background-model stages (Layer-2)
             "WARMUP":         "#9b59b6",
-            "DARK_OBJ":       "#2ecc71",
+            "DARK_BLOB":      "#2ecc71",
             "QUIET":          "#3498db",
-            "SCENE_DRIFT":    "#e67e22",
             "AMBIGUOUS":      "#f39c12",
             "CAM_ERR":        "#c0392b",
-            # Burst-filter stages
+            # Legacy stages (historical data only)
+            "NIGHT":          "#1a1a2e",
+            "DARK_OBJ":       "#27ae60",
+            "SCENE_DRIFT":    "#e67e22",
+            # Burst-filter stages (Layer-1)
             "FIRST":          "#7f8c8d",
             "ISOLATED":       "#95a5a6",
             "BRIGHTNESS_SHIFT": "#1abc9c",
@@ -53,7 +55,7 @@ DISPLAY_SPEC: dict = {
             "SAFE":           "#27ae60",
         },
         "fallback": "#aab",
-        "desc": "Pipeline stage: DARK_OBJ=dark blob, QUIET=scene calm, WARMUP=model warming up, DUPLICATE=identical re-fire, BRIGHTNESS_SHIFT=whole-scene shift, DIFFUSE=cloud shadow",
+        "desc": "Pipeline stage: DARK_BLOB=compact bird-sized dark cluster, QUIET=scene calm, WARMUP=model warming up, DUPLICATE=identical re-fire, BRIGHTNESS_SHIFT=whole-scene shift, DIFFUSE=cloud shadow",
     },
     "burst_trigger": {
         "type": "stage_badge",
@@ -64,11 +66,12 @@ DISPLAY_SPEC: dict = {
             "FAST_SHIFT":     "#e74c3c",
             "DUPLICATE":      "#4a4a4a",
             "BRIGHT_STABLE":  "#2471a3",
+            "NIGHT":          "#1a1a2e",
             "DIFFUSE":        "#154360",
             "SAFE":           "#27ae60",
         },
         "fallback": "#aab",
-        "desc": "Burst pre-filter result comparing Y tile means to the previous captured frame",
+        "desc": "Burst pre-filter (Layer-1) result comparing frame to previous. NIGHT fires here — raw sensor property, no model needed.",
     },
     "source": {
         "type": "badge",
@@ -106,15 +109,11 @@ DISPLAY_SPEC: dict = {
     },
     "dark_tiles": {
         "type": "numeric",
-        "desc": "Tiles with z-score > 3 AND ≥ 35 DN below model AND chroma shift. ≥ 1 required alongside new_dark_tiles to trigger DARK_OBJ.",
-    },
-    "new_dark_tiles": {
-        "type": "numeric",
-        "desc": "Tiles with z-score > 3 AND ≥ 20 DN below the *previous* frame. Must be ≥ 1 together with dark_tiles for DARK_OBJ — confirms the object is newly appeared.",
+        "desc": "Tiles ≥ 20 DN darker than model mean (Y drop) OR chroma-shifted vs model. ≥ 1 required for DARK_BLOB. Shown in blue in tile overlay.",
     },
     "dark_blob_max": {
         "type": "numeric",
-        "desc": "Size of the largest spatially-connected cluster of dark tiles. Compact blobs (birds) score higher than diffuse cloud shadows.",
+        "desc": "Largest 8-connected cluster of dark_tiles. 1–5 → DARK_BLOB (bird-sized). > 5 → AMBIGUOUS (too large to be a bird). Shown in red in tile overlay.",
     },
     "n_chroma_changed": {
         "type": "numeric",
@@ -156,6 +155,11 @@ DISPLAY_SPEC: dict = {
     "model_tile_means":     {"type": "detail_only", "desc": "Background model Y means snapshot before this frame's update. Used for Δm in the tile overlay."},
     "model_tile_means_u":   {"type": "detail_only"},
     "model_tile_means_v":   {"type": "detail_only"},
+    # Tile overlay — debug arrays for blob visualisation.
+    # tile_color_mask: 0=none, 1=blue (dark_model tile), 2=red (qualifying dark blob tile).
+    "tile_color_mask":      {"type": "detail_only", "desc": "300 tile classification values: 0=background, 1=dark_model tile (blue, Δluma ≥ 20 or chroma-shifted), 2=dark_blob tile (red, in compact 1–5 tile cluster)."},
+    "tile_delta_luma":      {"type": "detail_only", "desc": "300 per-tile Δluma = model_y − tile_y (positive = tile darker than model). Threshold for blue: ≥ 20 DN."},
+    "tile_delta_chroma":    {"type": "detail_only", "desc": "300 per-tile Δchroma = √(ΔU² + ΔV²) vs background model mean. Threshold for chroma contribution: √64 ≈ 8 DN."},
     # Backfill-computed fields — suppress from card badge row; visible in detail table.
     "downloaded_at": {"type": "plain"},
     "burst_label":   {"type": "plain", "desc": "Burst filter decision label (mirrors burst_trigger stage name)."},
@@ -196,6 +200,6 @@ DISPLAY_SPEC: dict = {
 DISPLAY_ORDER = [
     "result", "stage", "burst_trigger", "source", "photo_bucket", "fresh_flash", "simulated",
     "battery", "trigger",
-    "global_mean", "ratio", "dark_tiles", "new_dark_tiles", "dark_blob_max",
+    "global_mean", "ratio", "dark_tiles", "dark_blob_max",
     "n_chroma_changed", "burst_n_changed", "burst_n_dark", "burst_n_chroma",
 ]
