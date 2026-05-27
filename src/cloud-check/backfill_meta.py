@@ -114,11 +114,20 @@ def run_backfill(dry_run: bool = False) -> None:
     # Fix: compute the per-tile mean of all available frames per photo-bucket and
     # use that as the initial seed.  count is NOT incremented — the cell stays in
     # WARMUP, so the EMA still refines it from actual RTC frames.
+    # LOWLIGHT spans gm=[0,79].  Frames with gm<60 are nighttime/near-dark and
+    # pull per-tile means far below the dusk scene we actually want to model.
+    # Use gm>=60 only for the LOWLIGHT seed so bright-spot tiles aren't
+    # underestimated (which would make a bird landing there appear BRIGHTER than
+    # the model and miss DARK_BLOB detection).
+    _LOWLIGHT_SEED_MIN_GM = 60
     _corpus_y: dict[str, list[np.ndarray]] = {}
     for f in frames:
         m = f.meta or {}
         pb = m.get('photo_bucket') or _photo_bucket(m.get('global_mean', 128))
         tm = m.get('tile_means')
+        gm_val = m.get('global_mean', 128)
+        if pb == 'LOWLIGHT' and gm_val < _LOWLIGHT_SEED_MIN_GM:
+            continue
         if pb and tm and len(tm) == cc_cfg.grid_h * cc_cfg.grid_w:
             _corpus_y.setdefault(pb, []).append(
                 np.array(tm, dtype=np.float32).reshape(cc_cfg.grid_h, cc_cfg.grid_w)

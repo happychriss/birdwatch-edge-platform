@@ -90,11 +90,15 @@ def _warm_live_model():
         # Without this the model starts at 128 (flat grey) and needs many RTC
         # frames to converge — LOWLIGHT in particular has very few qualifying
         # frames and ends up stuck far above the real scene mean.
+        _LOWLIGHT_SEED_MIN_GM = 60
         _corpus_y: dict[str, list] = {}
         for _f in frames:
             _m = _f.meta or {}
             _pb = _m.get('photo_bucket')
             _tm = _m.get('tile_means')
+            _gm_val = _m.get('global_mean', 128)
+            if _pb == 'LOWLIGHT' and _gm_val < _LOWLIGHT_SEED_MIN_GM:
+                continue
             if _pb and _tm and len(_tm) == grid_size:
                 _corpus_y.setdefault(_pb, []).append(
                     _np.array(_tm, dtype=_np.float32).reshape(_bg_cfg.grid_h, _bg_cfg.grid_w)
