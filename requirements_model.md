@@ -133,14 +133,16 @@ Runs after the burst filter passes. Per-tile EMA background model with z-score a
 
 | Stage | Condition | Decision |
 |-------|-----------|----------|
-| NIGHT | global_mean < 70 DN | process |
-| WARMUP | frames_seen < 4 | process |
-| DARK_OBJ | dark_tiles ≥ 1 AND new_dark_tiles ≥ 1 AND chroma_ok | process |
+| WARMUP | model count < 4 real updates | process |
+| DARK_BLOB | dark_tiles ≥ 1 AND dark_blob_max ≥ 1 AND dark_blob_max ≤ 5 | process |
 | QUIET | ratio ≤ 0.25 | suppress |
-| SCENE_DRIFT | dark_tiles ≥ 4 AND new_dark_tiles == 0 | process + re-calibrate |
 | AMBIGUOUS | default | process |
 
-`chroma_ok` per tile: ΔC² = ΔU² + ΔV² > 64 vs model mean, OR Y drop > 2× DARK_OBJ model delta (70 DN). This gate prevents pure-luma cloud shadows from accumulating dark_tiles when chroma is stable.
+**DARK_BLOB** replaces the old DARK_OBJ. A tile qualifies as "dark" if Y ≥ 20 DN below the model mean, OR chroma shift ΔC² > 64 vs model. Connected components of dark tiles are computed 8-connected on the 20×15 grid. A blob of 1–5 tiles is bird-sized; blobs larger than 5 are cloud shadows or scene drift and fall through to AMBIGUOUS.
+
+**NIGHT** (gm < 70) was moved to Layer-1 (burst filter) as a raw sensor property — no model math needed. It sets `skip_bg_model=True` so the background model never runs.
+
+**SCENE_DRIFT** removed. Diffuse model drift produces large blobs (> 5 tiles) which never qualify as DARK_BLOB and reach AMBIGUOUS naturally. The model side-effect (force update + warmup reset) was a workaround for the old `new_dark_tiles` condition and is no longer needed.
 
 ### 2.2 Key Parameters
 
@@ -149,15 +151,15 @@ Runs after the burst filter passes. Per-tile EMA background model with z-score a
 | Grid size | 20×15 (300 tiles, 8×8 px each) | `CC_TILES_X/Y` in `cloud_check.c`; `GRID_W/H` in `features.py` |
 | Z-score threshold | 3.0 | `cloud_check.c`; `config.py` |
 | Quiet ratio threshold | 0.25 | `cloud_check.c`; `config.py` |
-| DARK_OBJ model delta | ≥ 35 DN below model mean | `CC_DARK_DELTA_MODEL` in `cloud_check.c` |
-| DARK_OBJ prev delta | ≥ 20 DN below previous frame | `CC_DARK_DELTA_PREV` in `cloud_check.c` |
+| Dark tile model delta | ≥ 20 DN below model mean | `dark_object_min_delta` in `config.py` |
+| Dark blob max size | ≤ 5 tiles (8-connected) | `dark_blob_max_size` in `config.py` |
+| Dark blob min tiles | ≥ 1 | `dark_object_min_tiles` in `config.py` |
 | Chroma DUPLICATE gate | ΔC² > 64 (ΔC > 8 linear) | `BW_CC_CHROMA_DELTA_THR_SQ` in `config.h` |
-| Chroma DARK_OBJ gate | ΔC² > 64 vs model mean | `BW_CC_CHROMA_DOBJ_GATE_SQ` in `config.h` |
+| Chroma DARK_BLOB gate | ΔC² > 64 vs model mean | `chroma_dark_obj_gate_sq` in `config.py` |
 | Photo-bucket BRIGHT threshold | gm ≥ 160 DN | `BW_BRIGHT_PHOTO_THRESHOLD` in `config.h` |
 | Photo-bucket LOWLIGHT threshold | gm < 80 DN | `BW_LOWLIGHT_PHOTO_THRESHOLD` in `config.h` |
-| SCENE_DRIFT dark_tiles min | 4 | `cloud_check.c` |
-| Warmup frames | 4 | `cloud_check.c` |
-| Night threshold | 70 DN | `cloud_check.c` |
+| NIGHT threshold (Layer-1) | gm < 70 DN | `night_brightness_threshold` in `BurstConfig` |
+| Warmup frames | 4 | `warmup_frames_per_bucket` in `config.py` |
 
 ### 2.3 Telemetry Fields
 
@@ -167,17 +169,19 @@ Runs after the burst filter passes. Per-tile EMA background model with z-score a
 | `photo_bucket` | `photo_bucket` | `photo_bucket` | Exposure regime: `"NORMAL"`, `"BRIGHT"`, `"LOWLIGHT"` |
 | `scene_bucket` | `scene_bucket` | `scene_bucket` | Shadow-pattern cluster index (always `0`, K=1) |
 | `global_mean` | `gm` | `global_mean` | Mean Y over all 300 tile means |
-| `frames_seen` | `frames_seen` | `frames_seen` | Non-NIGHT RTC frames processed since last reset |
-| `dark_tiles` | `dark_t` | `dark_tiles` | Tiles with z > 3.0 AND ≥ 35 DN below model AND chroma_ok |
-| `new_dark_tiles` | `new_dark_t` | `new_dark_tiles` | Tiles with z > 3.0 AND ≥ 20 DN below prev frame |
+| `dark_tiles` | `dark_t` | `dark_tiles` | Tiles ≥ 20 DN below model mean OR chroma-shifted (ΔC² > 64). Shown blue in overlay. |
+| `dark_blob_max` | `dark_blob_max` | `dark_blob_max` | Largest 8-connected cluster of dark_tiles. 1–5 → DARK_BLOB. Shown red in overlay. |
 | `n_chroma_changed` | `n_chroma_changed` | `n_chroma_changed` | Tiles where ΔC² > 64 vs model mean |
-| `ratio` | `ratio` | `ratio` | dark_tiles / 300 |
+| `ratio` | `ratio` | `ratio` | z-anomalous dark tile fraction (used for QUIET gate) |
 | `stage` | `stage` | `stage` | Stage name that fired |
 | `result` | `result` | `result` | `"process"` or `"clouds"` |
-| `tile_means` | `tile_means` | `tile_means` | 300-element uint8 array of Y tile means |
-| `tile_means_u` | `tile_means_u` | `tile_means_u` | 300-element uint8 array of U tile means (BT.601, centred at 128) |
-| `tile_means_v` | `tile_means_v` | `tile_means_v` | 300-element uint8 array of V tile means |
+| `tile_means` | `tile_means` | `tile_means` | 300-element Y tile means (from JPG decode in backfill) |
+| `tile_means_u` | `tile_means_u` | `tile_means_u` | 300-element U tile means (BT.601, centred at 128) |
+| `tile_means_v` | `tile_means_v` | `tile_means_v` | 300-element V tile means |
 | `model_tile_means` | `model_tile_means` | `model_tile_means` | 300-element Y background model snapshot (pre-update) |
+| `tile_color_mask` | — | `tile_color_mask` | 300-element overlay: 0=none, 1=blue (dark_tile), 2=red (dark_blob) |
+| `tile_delta_luma` | — | `tile_delta_luma` | 300-element Δluma = model_y − tile_y (positive = darker than model) |
+| `tile_delta_chroma` | — | `tile_delta_chroma` | 300-element Δchroma = √(ΔU²+ΔV²) vs model |
 
 ### 2.4 Validation Results (147 labelled frames, online self-calibrating)
 
@@ -190,34 +194,58 @@ Runs after the burst filter passes. Per-tile EMA background model with z-score a
 
 ## 3. Full Pipeline Reference Table
 
-Complete decision pipeline in execution order. Steps 1–6 are the burst pre-filter (compares to previous frame); steps 7–12 are the background-model pipeline, only reached when step 6 passes.
+Complete decision pipeline in execution order. Layer-1 (burst pre-filter, steps 1–7) compares to previous frame. Layer-2 (background model, steps 8–11) only runs when Layer-1 passes without suppression and `skip_bg_model` is false.
 
-| # | Stage | Condition | Values / thresholds | Variable definitions | `result` | `stage` |
-|---|---|---|---|---|---|---|
-| 1 | **FIRST** | no previous frame in NVS | — | — | process | FIRST |
-| 2 | **BRIGHTNESS_SHIFT** | `\|gm_diff\|` > 12 DN | 0–12 → continue; **> 12 → fires** | `gm_diff`: \|current frame mean − previous frame mean\| | process | BRIGHTNESS_SHIFT |
-| 3 | **DUPLICATE** | `n_changed` == 0 **AND** `n_chroma` == 0 | both must be zero | `n_changed`: tiles where \|Y_cur − Y_prev\| > 12 DN; `n_chroma`: tiles where ΔU²+ΔV² > 64 vs prev | clouds | DUPLICATE |
-| 4 | **BRIGHT_STABLE** | `gm` > 160 **and** `n_dark` < 35 | gm > 160 DN; n_dark 0–34 | `gm`: mean Y of current frame; `n_dark`: tiles darker by > 12 DN vs prev | clouds | BRIGHT_STABLE |
-| 5 | **DIFFUSE** | `n_dark` ≥ 60 | ≥ 60/300 tiles | `n_dark`: same as above | clouds | DIFFUSE |
-| 6 | **SAFE** | default burst pass | n_dark 1–59, or gm ≤ 160 | — | → bg model | SAFE |
-| 7 | **NIGHT** | `global_mean` < 70 | 0–69 DN | `global_mean`: mean Y of all 300 tiles | process | NIGHT |
-| 8 | **WARMUP** | `frames_seen` < 4 | 0–3 | `frames_seen`: non-NIGHT **RTC** frames processed since last flash/reset | process | WARMUP |
-| 9 | **DARK_OBJ** | `dark_tiles` ≥ 1 **and** `new_dark_tiles` ≥ 1 | both ≥ 1 | `dark_tiles`: tiles with z > 3.0 AND ≥ 35 DN below model AND chroma_ok (ΔC²>64 OR Y-drop>70 DN); `new_dark_tiles`: tiles with z > 3.0 AND ≥ 20 DN below prev frame | process | DARK_OBJ |
-| 10 | **QUIET** | `ratio` ≤ 0.25 | ≤ 75/300 tiles | `ratio`: dark_tiles / 300 | clouds | QUIET |
-| 11 | **SCENE_DRIFT** | `dark_tiles` ≥ 4 **and** `new_dark_tiles` == 0 | dark_tiles 4–300; new_dark = 0 | same definitions as row 9 | process | SCENE_DRIFT |
-| 12 | **AMBIGUOUS** | default | — | — | process | AMBIGUOUS |
+| # | Stage | Layer | Condition | Values / thresholds | Variable definitions | `result` | `stage` |
+|---|---|---|---|---|---|---|---|
+| 1 | **FIRST** | L1 | no previous frame in NVS | — | — | process | FIRST |
+| 2 | **BRIGHTNESS_SHIFT** | L1 | `\|gm_diff\|` > 12 DN | > 12 → fires | `gm_diff`: \|current gm − previous gm\| | process | BRIGHTNESS_SHIFT |
+| 3 | **DUPLICATE** | L1 | `n_changed` == 0 **AND** `n_chroma` == 0 | both zero | `n_changed`: tiles \|Y_cur−Y_prev\| > 12 DN; `n_chroma`: ΔU²+ΔV² > 64 vs prev | clouds | DUPLICATE |
+| 4 | **BRIGHT_STABLE** | L1 | `gm` > 160 **and** `n_dark` < 35 | gm > 160; n_dark 0–34 | `n_dark`: tiles darker > 12 DN vs prev | clouds | BRIGHT_STABLE |
+| 5 | **NIGHT** | L1 | `gm` < 70 | 0–69 DN | raw sensor property; sets `skip_bg_model=True` | process | NIGHT |
+| 6 | **DIFFUSE** | L1 | `n_dark` ≥ 60 | ≥ 60/300 tiles | `n_dark`: same as above | clouds | DIFFUSE |
+| 7 | **SAFE** | L1 | default | — | — | → L2 | SAFE |
+| 8 | **WARMUP** | L2 | model `count` < 4 real updates | 0–3 updates | `count`: actual EMA update count per bucket cell | process | WARMUP |
+| 9 | **DARK_BLOB** | L2 | `dark_tiles` ≥ 1 **and** `dark_blob_max` ≤ 5 | blob 1–5 tiles | `dark_tiles`: tiles ≥ 20 DN below model OR ΔC²>64 vs model; `dark_blob_max`: largest 8-connected cluster | process | DARK_BLOB |
+| 10 | **QUIET** | L2 | `ratio` ≤ 0.25 | ≤ 75/300 tiles | `ratio`: z-anomalous dark tile fraction | clouds | QUIET |
+| 11 | **AMBIGUOUS** | L2 | default | — | — | process | AMBIGUOUS |
 
 ---
 
-## 4. Calibration & Validator Notes
+## 4. Backfill & Calibration
 
-- **Validator:** `src/cloud-check/validate.py` — replays stored telemetry against the Python model; uses `validate_config.json` for threshold config and `display_spec.py` for field display names.
-- **Burst validator:** `src/cloud-check/validate_burst.py` — replays burst filter offline including FAST_SHIFT and ISOLATED stages (not available on-device).
-- **dt-based stages:** FAST_SHIFT and ISOLATED (in `burst_filter.py`) are skipped in the firmware validator — they fall through to the background model.
-- **Photo-bucket:** `global_mean` from the LIGHTCHECK metering shot determines the capture exposure profile — `BRIGHT` (≥ 160 DN), `NORMAL` (80–159 DN), `LOWLIGHT` (< 80 DN). Transmitted as `photo_bucket` field and displayed in server gallery. The legacy `photo_mode` field is equivalent and kept for backward compatibility.
-- **RTC-gated model updates:** only frames with `source == "rtc"` update the background model. The `frames_seen` counter increments only on RTC frames. PIR frames run the full decision pipeline but never mutate model state.
-- **Two metadata sources:** (1) ESP firmware emits telemetry via `bw_tele_*()` on upload → stored in `bw_frames.meta`; (2) `backfill_meta.py` re-derives the same fields from stored JPEGs and overwrites with `simulated=True`. `validate.py` checks parity between them.
-- **Tile threshold for display:** 20 DN (used in frame detail view for highlighting changed tiles).
+### 4.1 Backfill pipeline (`backfill_meta.py`)
+
+**JPG is the single source of truth.** Backfill always decodes tile features from the raw JPEG — it never uses `tile_means`/`tile_means_u` stored in DB meta. This guarantees reproducibility: running backfill twice on the same dataset produces identical results.
+
+JPG source priority: local folder (`JPG_FOLDER_PATH` in `.env`) → HTTP fetch from photo server.
+
+**Two-pass seed workflow** (run from dev container, not production):
+
+```bash
+cd src/cloud-check
+source /workspace/src/python_bw_src/.venv/bin/activate
+
+# Pass 1 — frames 604+ → let EMA converge → save model snapshot
+python backfill_meta.py --from-frame 604 --save-seed model_seed.json \
+  --photo-server http://192.168.1.110:8000
+
+# Pass 2 — all frames with pre-trained seed → gallery updated
+python backfill_meta.py --load-seed model_seed.json \
+  --photo-server http://192.168.1.110:8000
+```
+
+`model_seed.json` format: plain JSON with per-photo-bucket per-tile float arrays (mean_y/u/v). Lives in `src/cloud-check/`, gitignored. Future use: seed the ESP32 NVS model via WiFi.
+
+**Why two passes?** Starting from flat 128 (or a rough corpus average) the EMA takes many RTC frames to converge. Pass 1 processes frames 604+ where the model has enough data to be well-trained, then snapshots the converged state. Pass 2 replays all frames from the beginning using that state — so even early frames are classified against a realistic model.
+
+### 4.2 Validator (`validate.py`)
+
+Replays stored ESP telemetry against the Python model and checks parity. Driven by `validate_config.json`. `display_spec.py` controls field rendering in the gallery.
+
+- **dt-based stages** (FAST_SHIFT, ISOLATED): skipped in validator — unavailable on-device before WiFi sync.
+- **RTC-gated updates:** only `source == "rtc"` frames update the background model. PIR frames run the decision pipeline but never mutate model state.
+- **Two metadata sources:** (1) ESP firmware emits telemetry on upload → stored in `meta`; (2) `backfill_meta.py` recomputes from JPEGs → `simulated=True`. `validate.py` checks parity.
 
 ---
 
