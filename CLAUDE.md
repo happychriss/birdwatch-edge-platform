@@ -99,6 +99,41 @@ Claude Code runs on the host machine (`donald`, user `development`). The host ha
 
 Always build inside the container shell (where `~/esp-idf/` is v6).
 
+## Backfill Workflow
+
+`backfill_meta.py` (in `src/cloud-check/`) is the canonical way to recompute all pipeline
+meta from JPGs. JPGs live on the **photo server** (`http://192.168.1.110:8000/static/<filename>`),
+not in the local dev container — the script fetches them via HTTP when not present locally.
+
+### Standard production run (after algorithm changes)
+
+```bash
+cd src/cloud-check && source .venv/bin/activate
+
+# 1. Regenerate seed with fast burn-in (alpha=0.40 = matches experiment convergence speed)
+python backfill_meta.py --save-seed model_seed.json --update-always --ema-alpha 0.40 \
+  --photo-server http://192.168.1.110:8000
+
+# 2. Run full production backfill from that seed (alpha=0.15, always-update)
+python backfill_meta.py --load-seed model_seed.json --update-always \
+  --photo-server http://192.168.1.110:8000
+```
+
+**Why two passes:**
+- Pass 1 (burn-in, alpha=0.40): builds a well-calibrated per-tile background model by
+  replaying the full history with fast EMA. A high alpha ensures the model tracks rapid
+  scene changes (sunset shadow patterns, sky transitions) rather than drifting on stale values.
+  Saved as `model_seed.json`.
+- Pass 2 (production replay, alpha=0.15): loads the converged seed and replays the full
+  history with the slower production alpha. This is what the gallery sees.
+
+**`--update-always`:** always update the background model on RTC frames regardless of
+classification result. Prevents update starvation when dark structural elements (tree edges,
+shadow patterns) cause persistent DARK_BLOB detections that would otherwise block EMA updates.
+
+**`--ema-alpha`:** overrides the default alpha (0.15) for this run. Only used in the
+burn-in pass; the production pass should use the default.
+
 ## Database Schema Rule
 
 **Never propose adding columns to `bw_frames`.** The `meta` JSONB column stores all per-frame data — new fields go into `meta` as keys, no `ALTER TABLE` needed. The only promoted columns are `id`, `captured_at`, `result`, `filename`, `meta`. The `bw_photos` table (legacy) may still receive column migrations, but `bw_frames` must not.

@@ -107,6 +107,7 @@ def run_backfill(
     load_seed: str | None = None,
     photo_server: str | None = None,
     update_always: bool = False,
+    ema_alpha: float | None = None,
 ) -> None:
     session = Session()
 
@@ -119,11 +120,10 @@ def run_backfill(
     print(f"JPG folder: {JPG_FOLDER}", flush=True)
 
     # Single global model: affine normalization handles illumination continuously.
-    cc_cfg = Config(
-        num_photo_buckets=1,
-        num_scene_buckets=1,
-        warmup_frames_per_bucket=4,
-    )
+    cfg_kwargs: dict = dict(num_photo_buckets=1, num_scene_buckets=1, warmup_frames_per_bucket=4)
+    if ema_alpha is not None:
+        cfg_kwargs['ema_alpha'] = ema_alpha
+    cc_cfg = Config(**cfg_kwargs)
     burst_cfg = BurstConfig()
     bg_model = BackgroundModel(cc_cfg)
 
@@ -412,6 +412,8 @@ def main() -> None:
                     help='Override photo server URL for JPG fetch (default: PHOTO_SERVER env or http://192.168.1.110:8000)')
     ap.add_argument('--update-always', action='store_true',
                     help='Update model on every RTC frame regardless of result (default: only on warmup or quiet)')
+    ap.add_argument('--ema-alpha', type=float, metavar='A', default=None,
+                    help='Override EMA alpha for this run (e.g. 0.40 for fast burn-in seed generation)')
     ap.add_argument('--force', action='store_true', help=argparse.SUPPRESS)
     args = ap.parse_args()
     run_backfill(
@@ -421,6 +423,7 @@ def main() -> None:
         load_seed=args.load_seed,
         photo_server=args.photo_server,
         update_always=args.update_always,
+        ema_alpha=args.ema_alpha,
     )
 
 
