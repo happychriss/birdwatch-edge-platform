@@ -106,6 +106,7 @@ def run_backfill(
     save_seed: str | None = None,
     load_seed: str | None = None,
     photo_server: str | None = None,
+    update_always: bool = False,
 ) -> None:
     session = Session()
 
@@ -117,12 +118,10 @@ def run_backfill(
     print(f"Found {len(all_frames)} frames with filenames", flush=True)
     print(f"JPG folder: {JPG_FOLDER}", flush=True)
 
-    # Match firmware: 3 photo-buckets × 1 scene-bucket, warmup=4.
+    # Single global model: affine normalization handles illumination continuously.
     cc_cfg = Config(
-        num_photo_buckets=3,
+        num_photo_buckets=1,
         num_scene_buckets=1,
-        bright_photo_threshold=160,
-        lowlight_photo_threshold=80,
         warmup_frames_per_bucket=4,
     )
     burst_cfg = BurstConfig()
@@ -141,6 +140,8 @@ def run_backfill(
               f"source_frame_from={seed_data.get('source_frame_from', '?')})", flush=True)
         for pb_name, cell in seed_data['cells'].items():
             pb_idx = photo_bucket_idx(pb_name)
+            if pb_idx >= cc_cfg.num_photo_buckets:
+                continue  # seed has more buckets than model — skip
             mean_y = np.array(cell['mean_y'], dtype=np.float32).reshape(cc_cfg.grid_h, cc_cfg.grid_w)
             mean_u = np.array(cell.get('mean_u', [128] * cc_cfg.grid_h * cc_cfg.grid_w),
                               dtype=np.float32).reshape(cc_cfg.grid_h, cc_cfg.grid_w)
@@ -156,17 +157,19 @@ def run_backfill(
         _corpus_y: dict[str, list[np.ndarray]] = {}
         for f in all_frames:
             m = f.meta or {}
-            pb = m.get('photo_bucket') or _photo_bucket(m.get('global_mean', 128))
-            tm = m.get('tile_means')
             gm_val = m.get('global_mean', 128)
-            if pb == 'LOWLIGHT' and gm_val < _LOWLIGHT_SEED_MIN_GM:
-                continue
-            if pb and tm and len(tm) == cc_cfg.grid_h * cc_cfg.grid_w:
+            if gm_val < _LOWLIGHT_SEED_MIN_GM:
+                continue  # exclude nighttime frames from seed regardless of bucket count
+            pb = bg_model.photo_bucket_for(gm_val)
+            tm = m.get('tile_means')
+            if tm and len(tm) == cc_cfg.grid_h * cc_cfg.grid_w:
                 _corpus_y.setdefault(pb, []).append(
                     np.array(tm, dtype=np.float32).reshape(cc_cfg.grid_h, cc_cfg.grid_w)
                 )
         for pb_name, arrs in _corpus_y.items():
             pb_idx = photo_bucket_idx(pb_name)
+            if pb_idx >= cc_cfg.num_photo_buckets:
+                continue
             seed_y = np.stack(arrs).mean(axis=0)
             bg_model.seed_from_corpus(pb_idx, 0, seed_y)
             print(f"  Seeded {pb_name} from corpus ({len(arrs)} frames, tile mean={seed_y.mean():.1f})", flush=True)
@@ -227,6 +230,7 @@ def run_backfill(
         tile_mean_y = feats['mean_y']
         tile_mean_u = feats['mean_u']
         tile_mean_v = feats['mean_v']
+        tile_std_y  = feats['std_y']
         gm = feats['global_mean']
 
         # ── dt since previous frame ───────────────────────────────────────────
@@ -276,12 +280,14 @@ def run_backfill(
                 tile_mean_y, bg_model, cc_cfg,
                 tile_mean_u=tile_mean_u,
                 tile_mean_v=tile_mean_v,
+                tile_std_y=tile_std_y,
             )
             result = bg_pred.label
             stage = bg_pred.trigger
 
             # Mirror firmware update policy: only RTC frames update the model.
-            if meta.get('source') == 'rtc' and (was_warmup or bg_pred.label == 'clouds'):
+            _should_update = (was_warmup or bg_pred.label == 'clouds') if not update_always else True
+            if meta.get('source') == 'rtc' and _should_update:
                 bg_model.update(pb, sb, tile_mean_y, tile_mean_u, tile_mean_v)
 
             prev_tile_mean_by_cell[(pb, sb)] = (tile_mean_y, tile_mean_u, tile_mean_v)
@@ -325,11 +331,12 @@ def run_backfill(
             new_fields['tile_means_v'] = tile_means_v_flat
 
         if bg_pred is not None:
-            new_fields['ratio']           = round(float(bg_pred.anomaly_ratio), 3)
-            new_fields['dark_anomalous']  = int(bg_pred.anomaly_mask.sum())
-            new_fields['dark_tiles']      = int(bg_pred.dark_tiles)
-            new_fields['dark_blob_max']   = int(bg_pred.dark_blob_max)
-            new_fields['scene_bucket']    = int(bg_pred.scene_bucket)
+            new_fields['ratio']            = round(float(bg_pred.anomaly_ratio), 3)
+            new_fields['dark_anomalous']   = int(bg_pred.anomaly_mask.sum())
+            new_fields['dark_tiles']       = int(bg_pred.dark_tiles)
+            new_fields['dark_blob_max']    = int(bg_pred.dark_blob_max)
+            new_fields['texture_blob_max'] = int(bg_pred.texture_blob_max)
+            new_fields['scene_bucket']     = int(bg_pred.scene_bucket)
             new_fields['n_chroma_changed'] = int(bg_pred.n_chroma_changed)
             # Tile overlay arrays: Δluma, Δchroma, and colour mask (0=none, 1=blue/dark_model, 2=red/dark_blob)
             new_fields['tile_delta_luma'] = bg_pred.tile_delta_luma.flatten().round().astype(int).tolist()
@@ -375,8 +382,8 @@ def run_backfill(
             'cells': {},
         }
         from cloud_check.background import PHOTO_BUCKETS
-        for pb_name in PHOTO_BUCKETS:
-            pb_idx = photo_bucket_idx(pb_name)
+        for pb_idx in range(cc_cfg.num_photo_buckets):
+            pb_name = PHOTO_BUCKETS[pb_idx]
             seed_out['cells'][pb_name] = {
                 'mean_y': bg_model.mean_y[pb_idx, 0].flatten().round(2).tolist(),
                 'mean_u': bg_model.mean_u[pb_idx, 0].flatten().round(2).tolist(),
@@ -403,6 +410,8 @@ def main() -> None:
                     help='Load model seed from FILE instead of computing corpus averages')
     ap.add_argument('--photo-server', metavar='URL',
                     help='Override photo server URL for JPG fetch (default: PHOTO_SERVER env or http://192.168.1.110:8000)')
+    ap.add_argument('--update-always', action='store_true',
+                    help='Update model on every RTC frame regardless of result (default: only on warmup or quiet)')
     ap.add_argument('--force', action='store_true', help=argparse.SUPPRESS)
     args = ap.parse_args()
     run_backfill(
@@ -411,6 +420,7 @@ def main() -> None:
         save_seed=args.save_seed,
         load_seed=args.load_seed,
         photo_server=args.photo_server,
+        update_always=args.update_always,
     )
 
 

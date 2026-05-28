@@ -65,6 +65,8 @@ class BackgroundModel:
     # ── Bucket selection ──────────────────────────────────────────────────────
 
     def photo_bucket_for(self, global_mean: float) -> str:
+        if self.cfg.num_photo_buckets == 1:
+            return PHOTO_BUCKETS[0]
         return photo_bucket_for(global_mean, self.cfg)
 
     def scene_bucket_for(self, photo_bucket_idx_: int, tile_mean_y: np.ndarray) -> int:

@@ -4,54 +4,60 @@ from dataclasses import dataclass
 @dataclass(frozen=True)
 class Config:
     # ── Bucket layout ────────────────────────────────────────────────────────────
-    # Two-level nested model. Outer = photo-bucket (sensor exposure regime, fixed
-    # by global_mean thresholds — mirrors the ESP photo modes). Inner = scene-bucket
-    # (shadow-pattern cluster within an exposure regime, learned by k-means once
-    # enough data exists per photo-bucket). Today K_scene=1: one cell per photo-bucket,
-    # populated directly from RTC reference frames.
-    num_photo_buckets: int = 3        # NORMAL, BRIGHT, LOWLIGHT — keyed by global_mean
-    num_scene_buckets: int = 1        # K_scene per photo-bucket (1 = no clustering yet)
+    # Two-level nested model. num_photo_buckets=1 (single global model) is the
+    # default: affine illumination normalization handles continuous brightness
+    # variation per-frame, making fixed exposure buckets redundant (1-bucket
+    # affine floor 9.65 < 6-bucket absolute 13.96 in experiments).
+    num_photo_buckets: int = 1         # 1 = single global model
+    num_scene_buckets: int = 1         # K_scene per photo-bucket (1 = no clustering yet)
 
-    # photo-bucket boundaries (mirror BW_BRIGHT_PHOTO_THRESHOLD / BW_LOWLIGHT_PHOTO_THRESHOLD in C).
-    # global_mean >= bright_photo_threshold → BRIGHT
-    # global_mean <  lowlight_photo_threshold → LOWLIGHT
-    # otherwise → NORMAL
+    # photo-bucket boundaries — only used when num_photo_buckets > 1.
     bright_photo_threshold: int = 160
     lowlight_photo_threshold: int = 80
 
-    # ── Background model ────────────────────────────────────────────────────────
-    # Slower α gives a more stable model so a single object frame can't poison it.
-    # The RTC-only update gate (PIR frames never update the model) is the primary
-    # safeguard; α controls how fast genuine background drift is tracked.
+    # ── Background model ─────────────────────────────────────────────────────────
     ema_alpha: float = 0.15
-    var_floor: float = 36.0           # minimum per-tile variance (std=6 on 0-255 scale)
-    init_var: float = 256.0           # initial per-tile variance (std=16)
+    var_floor: float = 36.0            # minimum per-tile variance (std=6 on 0-255 scale)
+    init_var: float = 256.0            # initial per-tile variance (std=16)
 
-    # ── Decision rule ───────────────────────────────────────────────────────────
-    # Bias toward "process" — missing a bird is much worse than uploading a cloud frame.
+    # ── Affine illumination normalization ────────────────────────────────────────
+    # Per frame, fit T[i] ≈ a·M[i] + b (trimmed least-squares over background tiles).
+    # (a,b) is the continuous illumination state; residual delta = (a·M+b) − T is
+    # illumination-invariant. Absorbs both multiplicative (sun/cloud scaling) and
+    # additive (haze/dusk glow) components. A local object (bird) cannot be explained
+    # by a single global affine and survives in the residual. Validated vs gain-only:
+    # affine bird margin [22.2, 19.6] DN; gain-only crushes to [14.1, 11.1] DN.
+    use_affine_normalization: bool = True
+    affine_model_floor: float = 20.0    # ignore near-black model tiles in the fit
+    affine_trim_fraction: float = 0.10  # drop worst this fraction before refitting
+    affine_min_valid_tiles: int = 10    # need at least this many above-floor tiles
+
+    # Chroma shifts globally too (warm at sunset). Subtract the median ΔU/ΔV across
+    # the frame before the chroma gate so a uniform colour shift is absorbed.
+    use_chroma_normalization: bool = True
+
+    # ── Decision rule ────────────────────────────────────────────────────────────
     tile_z_threshold: float = 3.0
-    quiet_anomaly_ratio: float = 0.25     # ≤ this fraction of dark-anomalous tiles → suppress
-    dark_object_min_delta: float = 20.0   # tile darker than bucket mean by this much → object-like
+    quiet_anomaly_ratio: float = 0.25
+    dark_object_min_delta: float = 20.0
     dark_object_min_tiles: int = 1
-    dark_blob_max_size: int = 5           # largest qualifying dark blob (≤ this → DARK_BLOB → process)
+    dark_blob_max_size: int = 5
 
-    # ── Chroma gates ────────────────────────────────────────────────────────────
-    # ΔC² = ΔU² + ΔV² (squared form avoids sqrt and matches the ESP integer math).
-    # chroma_delta_threshold_sq = 8² = 64 is the burst-filter chroma-changed threshold.
-    # chroma_dark_obj_gate_sq is the looser gate the background-model DARK_OBJ stage
-    # uses: a tile counts as a dark object if (Y is much darker than model) OR
-    # (chroma differs from model by more than the gate). Same value as a safe starting
-    # point — sweep before locking the production value.
+    # ── Texture signal ───────────────────────────────────────────────────────────
+    # Per-tile Y stddev (decoded from JPG). Bird plumage → high std_y. Smooth
+    # sky/cloud dimming → low std_y. Second signal independent of illumination.
+    # Only active when tile_std_y is passed into classify().
+    texture_min_std_y: float = 12.0    # tile Y stddev above this → texturally interesting
+    texture_dark_delta: float = 10.0   # looser dark threshold for texture+dark compound
+
+    # ── Chroma gates ─────────────────────────────────────────────────────────────
     chroma_delta_threshold: float = 8.0
     chroma_delta_threshold_sq: int = 64
     chroma_dark_obj_gate_sq: int = 64
 
-    # ── Warmup ──────────────────────────────────────────────────────────────────
-    warmup_frames_per_bucket: int = 0  # Python simulation: steady-state (model calibrated).
-                                       # C firmware uses CC_WARMUP_FRAMES=4 for first-boot NVS bootstrap.
+    # ── Warmup ───────────────────────────────────────────────────────────────────
+    warmup_frames_per_bucket: int = 0
 
-    # ── Tile grid ───────────────────────────────────────────────────────────────
-    # 20×15 at VGA. Changing these requires matching firmware constants.
+    # ── Tile grid ────────────────────────────────────────────────────────────────
     grid_w: int = 20
     grid_h: int = 15
-
