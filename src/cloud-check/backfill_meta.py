@@ -26,11 +26,19 @@ skip is gone.  When new firmware uploads land via /frame, the server keeps
 the ESP-provided values; only this script overwrites them.
 
 Usage:
+    # Can be run from the dev container — shares the DB with production and
+    # fetches JPGs from the photo server when not cached locally.
+    # Frames that already have tile_means_u in meta (all current frames) need
+    # no JPG fetch at all and run entirely from DB data.
+
     # Seed generation run (frames 604+, save converged model):
     python backfill_meta.py --from-frame 604 --save-seed model_seed.json
 
     # Production run (all frames, start from converged seed):
     python backfill_meta.py --load-seed model_seed.json
+
+    # Explicit photo server (overrides PHOTO_SERVER env / default):
+    python backfill_meta.py --photo-server http://192.168.1.110:8000 --load-seed model_seed.json
 
     # Dry-run preview:
     python backfill_meta.py --dry-run [--from-frame N] [--load-seed FILE]
@@ -97,6 +105,7 @@ def run_backfill(
     from_frame: int | None = None,
     save_seed: str | None = None,
     load_seed: str | None = None,
+    photo_server: str | None = None,
 ) -> None:
     session = Session()
 
@@ -185,61 +194,40 @@ def run_backfill(
     for frame in frames:
         meta = dict(frame.meta or {})
 
-        # ── Feature extraction ────────────────────────────────────────────────
-        # Use stored tile_means_y/u/v from DB only when they come from the new
-        # SXGA firmware (presence of tile_means_u confirms new firmware — old
-        # firmware emitted only Y from a QQVGA lightcheck that was often
-        # overexposed at noon, making its values unreliable for model analysis).
-        # If only Y is present (old firmware), fall through to JPEG decode so
-        # the backfill always works in the correct SXGA pixel space.
-        esp_tm_y = meta.get('tile_means')
-        esp_tm_u = meta.get('tile_means_u')
-        esp_tm_v = meta.get('tile_means_v')
-        expected_tiles = cc_cfg.grid_h * cc_cfg.grid_w
-        has_yuv = (esp_tm_y and isinstance(esp_tm_y, list) and len(esp_tm_y) == expected_tiles
-                   and esp_tm_u and isinstance(esp_tm_u, list) and len(esp_tm_u) == expected_tiles)
-
-        if has_yuv:
-            tile_mean_y = np.array(esp_tm_y, dtype=np.float32).reshape(cc_cfg.grid_h, cc_cfg.grid_w)
-            tile_mean_u = np.array(esp_tm_u, dtype=np.float32).reshape(cc_cfg.grid_h, cc_cfg.grid_w)
-            tile_mean_v = (
-                np.array(esp_tm_v, dtype=np.float32).reshape(cc_cfg.grid_h, cc_cfg.grid_w)
-                if esp_tm_v and len(esp_tm_v) == expected_tiles else None
-            )
-            gm = int(float(tile_mean_y.mean()))
+        # ── Feature extraction — always decode from JPG ───────────────────────
+        # Canonical recompute: never trust stored tile_means from DB meta.
+        # Priority: local file → HTTP fetch from photo server.
+        jpg_path = JPG_FOLDER / frame.filename
+        if jpg_path.exists():
+            try:
+                y_arr, u_arr, v_arr = load_yuv_vga(jpg_path)
+                feats = extract_tile_features_yuv(y_arr, u_arr, v_arr)
+            except Exception as exc:
+                print(f"  ERR   {frame.filename}: {exc}", flush=True)
+                errors += 1
+                continue
         else:
-            jpg_path = JPG_FOLDER / frame.filename
-            if jpg_path.exists():
-                try:
-                    y_arr, u_arr, v_arr = load_yuv_vga(jpg_path)
-                    feats = extract_tile_features_yuv(y_arr, u_arr, v_arr)
-                    tile_mean_y = feats['mean_y']
-                    tile_mean_u = feats['mean_u']
-                    tile_mean_v = feats['mean_v']
-                    gm = feats['global_mean']
-                except Exception as exc:
-                    print(f"  ERR   {frame.filename}: {exc}", flush=True)
-                    errors += 1
-                    continue
-            else:
-                server_base = os.getenv('PHOTO_SERVER', 'http://192.168.1.110:8000').rstrip('/')
-                url = f"{server_base}/static/{frame.filename}"
-                try:
-                    import io, requests
-                    from PIL import Image as PILImage
-                    resp = requests.get(url, timeout=15)
-                    resp.raise_for_status()
-                    ycbcr = PILImage.open(io.BytesIO(resp.content)).convert('YCbCr').resize((640, 480))
-                    arr = np.asarray(ycbcr, dtype=np.uint8)
-                    feats = extract_tile_features_yuv(arr[:, :, 0], arr[:, :, 1], arr[:, :, 2])
-                    tile_mean_y = feats['mean_y']
-                    tile_mean_u = feats['mean_u']
-                    tile_mean_v = feats['mean_v']
-                    gm = feats['global_mean']
-                except Exception as exc:
-                    print(f"  MISS  {frame.filename}: {exc}", flush=True)
-                    errors += 1
-                    continue
+            _server = (photo_server
+                       or os.getenv('PHOTO_SERVER', 'http://192.168.1.110:8000')).rstrip('/')
+            url = f"{_server}/static/{frame.filename}"
+            try:
+                import io
+                import requests
+                from PIL import Image as PILImage
+                resp = requests.get(url, timeout=15)
+                resp.raise_for_status()
+                ycbcr = PILImage.open(io.BytesIO(resp.content)).convert('YCbCr').resize((640, 480))
+                arr = np.asarray(ycbcr, dtype=np.uint8)
+                feats = extract_tile_features_yuv(arr[:, :, 0], arr[:, :, 1], arr[:, :, 2])
+            except Exception as exc:
+                print(f"  MISS  {frame.filename}: {exc}", flush=True)
+                errors += 1
+                continue
+
+        tile_mean_y = feats['mean_y']
+        tile_mean_u = feats['mean_u']
+        tile_mean_v = feats['mean_v']
+        gm = feats['global_mean']
 
         # ── dt since previous frame ───────────────────────────────────────────
         if prev_burst_ts is not None and frame.captured_at is not None:
@@ -413,6 +401,8 @@ def main() -> None:
                     help='Write converged model state to FILE after processing (JSON)')
     ap.add_argument('--load-seed', metavar='FILE',
                     help='Load model seed from FILE instead of computing corpus averages')
+    ap.add_argument('--photo-server', metavar='URL',
+                    help='Override photo server URL for JPG fetch (default: PHOTO_SERVER env or http://192.168.1.110:8000)')
     ap.add_argument('--force', action='store_true', help=argparse.SUPPRESS)
     args = ap.parse_args()
     run_backfill(
@@ -420,6 +410,7 @@ def main() -> None:
         from_frame=args.from_frame,
         save_seed=args.save_seed,
         load_seed=args.load_seed,
+        photo_server=args.photo_server,
     )
 
 
