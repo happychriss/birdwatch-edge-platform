@@ -26,15 +26,23 @@ skip is gone.  When new firmware uploads land via /frame, the server keeps
 the ESP-provided values; only this script overwrites them.
 
 Usage:
-    python backfill_meta.py [--dry-run]
+    # Seed generation run (frames 604+, save converged model):
+    python backfill_meta.py --from-frame 604 --save-seed model_seed.json
+
+    # Production run (all frames, start from converged seed):
+    python backfill_meta.py --load-seed model_seed.json
+
+    # Dry-run preview:
+    python backfill_meta.py --dry-run [--from-frame N] [--load-seed FILE]
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 # cloud_check lives in the same directory
@@ -84,15 +92,20 @@ def _photo_bucket(gm: int) -> str:
     return 'NORMAL'
 
 
-def run_backfill(dry_run: bool = False) -> None:
+def run_backfill(
+    dry_run: bool = False,
+    from_frame: int | None = None,
+    save_seed: str | None = None,
+    load_seed: str | None = None,
+) -> None:
     session = Session()
 
-    frames = (session.query(BwFrame)
-              .filter(BwFrame.filename.isnot(None))
-              .order_by(BwFrame.captured_at.asc())
-              .all())
+    all_frames = (session.query(BwFrame)
+                  .filter(BwFrame.filename.isnot(None))
+                  .order_by(BwFrame.captured_at.asc())
+                  .all())
 
-    print(f"Found {len(frames)} frames with filenames", flush=True)
+    print(f"Found {len(all_frames)} frames with filenames", flush=True)
     print(f"JPG folder: {JPG_FOLDER}", flush=True)
 
     # Match firmware: 3 photo-buckets × 1 scene-bucket, warmup=4.
@@ -106,37 +119,55 @@ def run_backfill(dry_run: bool = False) -> None:
     burst_cfg = BurstConfig()
     bg_model = BackgroundModel(cc_cfg)
 
-    # ── Pre-seed model from corpus averages ───────────────────────────────────
-    # Starting the EMA at 128 (flat grey) means the model takes many RTC frames
-    # to converge toward the actual scene.  For buckets with few qualifying frames
-    # (especially LOWLIGHT at dusk), this leaves the model far above the real
-    # scene mean, causing hundreds of false "dark" tiles.
-    # Fix: compute the per-tile mean of all available frames per photo-bucket and
-    # use that as the initial seed.  count is NOT incremented — the cell stays in
-    # WARMUP, so the EMA still refines it from actual RTC frames.
-    # LOWLIGHT spans gm=[0,79].  Frames with gm<60 are nighttime/near-dark and
-    # pull per-tile means far below the dusk scene we actually want to model.
-    # Use gm>=60 only for the LOWLIGHT seed so bright-spot tiles aren't
-    # underestimated (which would make a bird landing there appear BRIGHTER than
-    # the model and miss DARK_BLOB detection).
-    _LOWLIGHT_SEED_MIN_GM = 60
-    _corpus_y: dict[str, list[np.ndarray]] = {}
-    for f in frames:
-        m = f.meta or {}
-        pb = m.get('photo_bucket') or _photo_bucket(m.get('global_mean', 128))
-        tm = m.get('tile_means')
-        gm_val = m.get('global_mean', 128)
-        if pb == 'LOWLIGHT' and gm_val < _LOWLIGHT_SEED_MIN_GM:
-            continue
-        if pb and tm and len(tm) == cc_cfg.grid_h * cc_cfg.grid_w:
-            _corpus_y.setdefault(pb, []).append(
-                np.array(tm, dtype=np.float32).reshape(cc_cfg.grid_h, cc_cfg.grid_w)
-            )
-    for pb_name, arrs in _corpus_y.items():
-        pb_idx = photo_bucket_idx(pb_name)
-        seed_y = np.stack(arrs).mean(axis=0)
-        bg_model.seed_from_corpus(pb_idx, 0, seed_y)
-        print(f"  Seeded {pb_name} model from {len(arrs)} frames (tile mean={seed_y.mean():.1f})", flush=True)
+    # ── Seed the background model ─────────────────────────────────────────────
+    if load_seed:
+        # Load a pre-converged model snapshot produced by a previous --save-seed run.
+        # This gives a much better starting point than the corpus average, especially
+        # for LOWLIGHT where very few RTC frames exist.
+        seed_path = Path(load_seed)
+        with seed_path.open() as f:
+            seed_data = json.load(f)
+        print(f"Loading seed from {seed_path} "
+              f"(generated {seed_data.get('generated_at', '?')}, "
+              f"source_frame_from={seed_data.get('source_frame_from', '?')})", flush=True)
+        for pb_name, cell in seed_data['cells'].items():
+            pb_idx = photo_bucket_idx(pb_name)
+            mean_y = np.array(cell['mean_y'], dtype=np.float32).reshape(cc_cfg.grid_h, cc_cfg.grid_w)
+            mean_u = np.array(cell.get('mean_u', [128] * cc_cfg.grid_h * cc_cfg.grid_w),
+                              dtype=np.float32).reshape(cc_cfg.grid_h, cc_cfg.grid_w)
+            mean_v = np.array(cell.get('mean_v', [128] * cc_cfg.grid_h * cc_cfg.grid_w),
+                              dtype=np.float32).reshape(cc_cfg.grid_h, cc_cfg.grid_w)
+            bg_model.seed_from_corpus(pb_idx, 0, mean_y, mean_u, mean_v)
+            print(f"  Loaded {pb_name}: mean_y={mean_y.mean():.1f}", flush=True)
+    else:
+        # Corpus-average fallback: compute per-bucket per-tile mean from all DB
+        # frames that have tile_means stored.  LOWLIGHT uses gm>=60 only to avoid
+        # nighttime frames (gm<60) pulling the dusk model too dark.
+        _LOWLIGHT_SEED_MIN_GM = 60
+        _corpus_y: dict[str, list[np.ndarray]] = {}
+        for f in all_frames:
+            m = f.meta or {}
+            pb = m.get('photo_bucket') or _photo_bucket(m.get('global_mean', 128))
+            tm = m.get('tile_means')
+            gm_val = m.get('global_mean', 128)
+            if pb == 'LOWLIGHT' and gm_val < _LOWLIGHT_SEED_MIN_GM:
+                continue
+            if pb and tm and len(tm) == cc_cfg.grid_h * cc_cfg.grid_w:
+                _corpus_y.setdefault(pb, []).append(
+                    np.array(tm, dtype=np.float32).reshape(cc_cfg.grid_h, cc_cfg.grid_w)
+                )
+        for pb_name, arrs in _corpus_y.items():
+            pb_idx = photo_bucket_idx(pb_name)
+            seed_y = np.stack(arrs).mean(axis=0)
+            bg_model.seed_from_corpus(pb_idx, 0, seed_y)
+            print(f"  Seeded {pb_name} from corpus ({len(arrs)} frames, tile mean={seed_y.mean():.1f})", flush=True)
+
+    # ── Apply from-frame filter ───────────────────────────────────────────────
+    if from_frame is not None:
+        frames = [f for f in all_frames if f.id >= from_frame]
+        print(f"Processing frames with id >= {from_frame}: {len(frames)} of {len(all_frames)}", flush=True)
+    else:
+        frames = all_frames
 
     # Per-cell (photo_bucket × scene_bucket) previous tile means — used to track
     # which cells received at least one real frame (for prev_valid flag).
@@ -345,6 +376,30 @@ def run_backfill(dry_run: bool = False) -> None:
         session.commit()
         print('\nCommitted.', flush=True)
 
+    # ── Save model seed ───────────────────────────────────────────────────────
+    if save_seed and not dry_run:
+        seed_path = Path(save_seed)
+        seed_out: dict = {
+            'generated_at': datetime.now(timezone.utc).isoformat(),
+            'source_frame_from': from_frame,
+            'grid_h': cc_cfg.grid_h,
+            'grid_w': cc_cfg.grid_w,
+            'cells': {},
+        }
+        from cloud_check.background import PHOTO_BUCKETS
+        for pb_name in PHOTO_BUCKETS:
+            pb_idx = photo_bucket_idx(pb_name)
+            seed_out['cells'][pb_name] = {
+                'mean_y': bg_model.mean_y[pb_idx, 0].flatten().round(2).tolist(),
+                'mean_u': bg_model.mean_u[pb_idx, 0].flatten().round(2).tolist(),
+                'mean_v': bg_model.mean_v[pb_idx, 0].flatten().round(2).tolist(),
+            }
+            my = bg_model.mean_y[pb_idx, 0].mean()
+            print(f"  Seed {pb_name}: mean_y={my:.1f}", flush=True)
+        with seed_path.open('w') as f:
+            json.dump(seed_out, f, indent=2)
+        print(f"Seed saved → {seed_path}", flush=True)
+
     print(f'\nDone: {updated} updated, {errors} errors (missing JPG / decode fail)',
           flush=True)
 
@@ -352,9 +407,20 @@ def run_backfill(dry_run: bool = False) -> None:
 def main() -> None:
     ap = argparse.ArgumentParser(description='Clean canonical recompute of pipeline meta from JPGs')
     ap.add_argument('--dry-run', action='store_true', help='Print changes without writing to DB')
+    ap.add_argument('--from-frame', type=int, metavar='ID',
+                    help='Process only frames with id >= ID (seed generation run)')
+    ap.add_argument('--save-seed', metavar='FILE',
+                    help='Write converged model state to FILE after processing (JSON)')
+    ap.add_argument('--load-seed', metavar='FILE',
+                    help='Load model seed from FILE instead of computing corpus averages')
     ap.add_argument('--force', action='store_true', help=argparse.SUPPRESS)
     args = ap.parse_args()
-    run_backfill(dry_run=args.dry_run)
+    run_backfill(
+        dry_run=args.dry_run,
+        from_frame=args.from_frame,
+        save_seed=args.save_seed,
+        load_seed=args.load_seed,
+    )
 
 
 if __name__ == '__main__':
