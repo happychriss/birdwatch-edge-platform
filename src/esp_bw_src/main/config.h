@@ -115,6 +115,16 @@
 //   LOWLIGHT  global_mean < BW_LOWLIGHT_THRESHOLD : dusk / dawn / dim interior
 #define BW_BRIGHT_PHOTO_THRESHOLD    160
 #define BW_LOWLIGHT_PHOTO_THRESHOLD   80
+// Hysteresis deadband around each threshold.  A state only changes when gm
+// crosses the threshold by at least this margin, so a single noisy frame
+// cannot flip the profile.  Effective edges:
+//   NORMAL → LOWLIGHT : gm <  LO - H  (< 65)
+//   LOWLIGHT → NORMAL : gm >= LO + H  (>= 95)
+//   NORMAL → BRIGHT   : gm >= HI + H  (>= 175)
+//   BRIGHT → NORMAL   : gm <= HI - H  (<= 145)
+#define BW_PHOTO_BUCKET_HYSTERESIS    15
+// If the stored bucket is older than this, ignore it (stale overnight / first boot).
+#define BW_PHOTO_BUCKET_MAX_AGE_S   1800
 
 // ─── Cloud-check chroma thresholds ─────────────────────────────────────────
 // Squared chroma distance (ΔU² + ΔV²) thresholds — avoids sqrt in inner loops.

@@ -148,8 +148,11 @@ static int solar_utc_minutes(int doy, bool is_sunset)
 }
 
 // Formatted RTC and next-wakeup times for telemetry (populated by rtc_compute_next()).
-static char s_rtc_now_str[32]    = "?";
-static char s_next_wakeup_str[32] = "?";
+static char   s_rtc_now_str[32]    = "?";
+static char   s_next_wakeup_str[32] = "?";
+// Current-cycle UTC epoch — set by rtc_compute_next(), used by the exposure
+// bucket hysteresis staleness guard in run_normal_cycle().
+static time_t s_cycle_utc = 0;
 
 // Reads DS3231, computes next wakeup UTC clamped to daylight, logs the
 // daytime/night decision, populates s_next_wakeup_str.  Returns UTC epoch
@@ -166,6 +169,7 @@ static time_t rtc_compute_next(i2c_dev_t *rtc)
     tzset();
     now_local.tm_isdst = -1;   // DS3231 has no DST state; let mktime determine from date
     time_t now_utc = mktime(&now_local);
+    s_cycle_utc = now_utc;   // expose to run_normal_cycle() for bucket hysteresis
     if (now_utc <= 0) {
         ESP_LOGE(TAG, "DS3231 time not set");
         return 0;
@@ -304,9 +308,17 @@ static void run_normal_cycle(void)
     if (bw_cam_init(BW_CAM_MODE_LIGHTCHECK) == ESP_OK) {
         camera_fb_t *lc = bw_cam_capture();
         if (lc && lc->len > 0) {
-            uint32_t sum = 0;
-            for (size_t i = 0; i < lc->len; i++) sum += lc->buf[i];
-            gm_lightcheck = (uint8_t)(sum / lc->len);
+            // Median luma: build a 256-bin histogram, walk to the 50th-percentile
+            // value.  The median ignores bright-sky highlight pixels (which can
+            // dominate the mean in this backlit balcony scene) and is therefore
+            // a better proxy for the foreground/subject brightness.
+            uint32_t hist[256] = {0};
+            for (size_t i = 0; i < lc->len; i++) hist[lc->buf[i]]++;
+            size_t half = lc->len / 2, cum = 0;
+            for (int b = 0; b < 256; b++) {
+                cum += hist[b];
+                if (cum >= half) { gm_lightcheck = (uint8_t)b; break; }
+            }
         }
         if (lc) bw_cam_capture_return(lc);
         bw_cam_deinit();
@@ -314,12 +326,71 @@ static void run_normal_cycle(void)
         ESP_LOGW(TAG, "LIGHTCHECK init failed — default NORMAL exposure");
     }
 
-    if      (gm_lightcheck >= BW_BRIGHT_PHOTO_THRESHOLD)   photo_mode = BW_CAM_MODE_PHOTO_BRIGHT;
-    else if (gm_lightcheck >= BW_LOWLIGHT_PHOTO_THRESHOLD) photo_mode = BW_CAM_MODE_PHOTO;
-    else                                                    photo_mode = BW_CAM_MODE_PHOTO_LOWLIGHT;
+    // ── Exposure bucket selection with hysteresis ─────────────────────────────
+    // Load the bucket chosen on the previous cycle plus its timestamp.
+    // If the stored state is recent (< BW_PHOTO_BUCKET_MAX_AGE_S), apply
+    // a deadband: the bucket only changes when gm clearly crosses the
+    // threshold, preventing frame-to-frame flicker near the boundary.
+    uint8_t prev_bucket_byte = 1;   // 0=LOWLIGHT, 1=NORMAL, 2=BRIGHT; default NORMAL
+    uint32_t prev_bkt_ts     = 0;
+    {
+        nvs_handle_t h;
+        if (nvs_open("bw_meta", NVS_READONLY, &h) == ESP_OK) {
+            nvs_get_u8(h,  "cam_bucket", &prev_bucket_byte);
+            nvs_get_u32(h, "cam_bkt_ts", &prev_bkt_ts);
+            nvs_close(h);
+        }
+    }
+    bool prev_bkt_valid = (s_cycle_utc > 0 && prev_bkt_ts > 0 &&
+                           (uint32_t)s_cycle_utc >= prev_bkt_ts &&
+                           (uint32_t)s_cycle_utc - prev_bkt_ts < BW_PHOTO_BUCKET_MAX_AGE_S);
+
+    if (prev_bkt_valid) {
+        switch (prev_bucket_byte) {
+            case 0:  // was LOWLIGHT: stay until gm is clearly above the boundary
+                photo_mode = (gm_lightcheck >= BW_LOWLIGHT_PHOTO_THRESHOLD + BW_PHOTO_BUCKET_HYSTERESIS)
+                             ? BW_CAM_MODE_PHOTO : BW_CAM_MODE_PHOTO_LOWLIGHT;
+                break;
+            case 2:  // was BRIGHT: stay until gm is clearly below the boundary
+                photo_mode = (gm_lightcheck <= BW_BRIGHT_PHOTO_THRESHOLD - BW_PHOTO_BUCKET_HYSTERESIS)
+                             ? BW_CAM_MODE_PHOTO : BW_CAM_MODE_PHOTO_BRIGHT;
+                break;
+            default: // was NORMAL: only leave on a clear crossing
+                if      (gm_lightcheck >= BW_BRIGHT_PHOTO_THRESHOLD   + BW_PHOTO_BUCKET_HYSTERESIS)
+                    photo_mode = BW_CAM_MODE_PHOTO_BRIGHT;
+                else if (gm_lightcheck <  BW_LOWLIGHT_PHOTO_THRESHOLD - BW_PHOTO_BUCKET_HYSTERESIS)
+                    photo_mode = BW_CAM_MODE_PHOTO_LOWLIGHT;
+                else
+                    photo_mode = BW_CAM_MODE_PHOTO;
+                break;
+        }
+    } else {
+        // No valid prior (first boot, fresh flash, or state too old): plain thresholds.
+        if      (gm_lightcheck >= BW_BRIGHT_PHOTO_THRESHOLD)   photo_mode = BW_CAM_MODE_PHOTO_BRIGHT;
+        else if (gm_lightcheck >= BW_LOWLIGHT_PHOTO_THRESHOLD) photo_mode = BW_CAM_MODE_PHOTO;
+        else                                                    photo_mode = BW_CAM_MODE_PHOTO_LOWLIGHT;
+    }
+
+    // Persist the chosen bucket so the next cycle can apply hysteresis.
+    {
+        uint8_t new_byte = (photo_mode == BW_CAM_MODE_PHOTO_BRIGHT)   ? 2 :
+                           (photo_mode == BW_CAM_MODE_PHOTO_LOWLIGHT) ? 0 : 1;
+        nvs_handle_t h;
+        if (nvs_open("bw_meta", NVS_READWRITE, &h) == ESP_OK) {
+            nvs_set_u8(h,  "cam_bucket", new_byte);
+            nvs_set_u32(h, "cam_bkt_ts", (uint32_t)s_cycle_utc);
+            nvs_commit(h);
+            nvs_close(h);
+        }
+    }
+
     const char *photo_mode_str = (photo_mode == BW_CAM_MODE_PHOTO_BRIGHT)   ? "BRIGHT"   :
                                  (photo_mode == BW_CAM_MODE_PHOTO_LOWLIGHT) ? "LOWLIGHT" : "NORMAL";
-    ESP_LOGI(TAG, "metering: gm=%u → photo_mode=%s", gm_lightcheck, photo_mode_str);
+    ESP_LOGI(TAG, "metering: median=%u prev=%s(%s) → photo_mode=%s",
+             gm_lightcheck,
+             prev_bkt_valid ? (prev_bucket_byte==0?"LOWLIGHT":prev_bucket_byte==2?"BRIGHT":"NORMAL") : "none",
+             prev_bkt_valid ? "valid" : "stale",
+             photo_mode_str);
 
     // ── Phase 2: JPEG capture at the selected exposure profile ────────────────
     if (bw_cam_init(photo_mode) != ESP_OK) {
