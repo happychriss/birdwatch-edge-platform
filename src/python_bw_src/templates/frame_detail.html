@@ -154,6 +154,25 @@
   .no-photo { color: #8a9bb0; font-size: 14px; padding: 60px;
               background: #fff; border-radius: 6px; text-align: center; }
 
+  /* ── Filter bar (shared with gallery) ── */
+  .filter-bar {
+    background: #f7fbff; border-bottom: 1px solid #dce8f0;
+    padding: 7px 18px; display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+    font-size: 12px; color: #556;
+  }
+  .filter-group { display: flex; align-items: center; gap: 8px; }
+  .filter-label { font-weight: 700; color: #8a9bb0; text-transform: uppercase;
+                  font-size: 10px; letter-spacing: 0.5px; white-space: nowrap; }
+  .filter-cb { display: flex; align-items: center; gap: 3px; cursor: pointer; white-space: nowrap; }
+  .filter-cb input[type=checkbox] { width: 14px; height: 14px; cursor: pointer; accent-color: #1a6fa8; }
+  .filter-cb.cb-pir    input { accent-color: #c0392b; }
+  .filter-cb.cb-rtc    input { accent-color: #1a7d5c; }
+  .filter-cb.cb-bird   input { accent-color: #27ae60; }
+  .filter-cb.cb-ignore input { accent-color: #7f8c8d; }
+  .filter-cb.cb-special input { accent-color: #f39c12; }
+  .filter-cb.cb-cloud  input { accent-color: #2980b9; }
+  .filter-sep { width: 1px; height: 22px; background: #dce8f0; }
+
   /* ── Label bar ── */
   .label-bar {
     background: #f8fbff; border-bottom: 1px solid #dce8f0;
@@ -185,6 +204,38 @@
   <span class="header-title">Frame Detail</span>
   <span class="header-id">id&nbsp;{{ entry.id }}</span>
 </header>
+
+<!-- ── Filter bar (global setting — same as gallery) ── -->
+<div class="filter-bar">
+  <span class="filter-label">Source</span>
+  <div class="filter-group">
+    <label class="filter-cb cb-pir">
+      <input type="checkbox" id="fd-src-pir" onchange="fdFilterChange()">PIR
+    </label>
+    <label class="filter-cb cb-rtc">
+      <input type="checkbox" id="fd-src-rtc" onchange="fdFilterChange()">Reference&nbsp;(RTC)
+    </label>
+  </div>
+  <div class="filter-sep"></div>
+  <span class="filter-label">Training</span>
+  <div class="filter-group">
+    <label class="filter-cb cb-bird">
+      <input type="checkbox" id="fd-lbl-bird" onchange="fdFilterChange()">Bird
+    </label>
+    <label class="filter-cb cb-ignore">
+      <input type="checkbox" id="fd-lbl-ignore" onchange="fdFilterChange()">Deleted
+    </label>
+    <label class="filter-cb cb-special">
+      <input type="checkbox" id="fd-lbl-special" onchange="fdFilterChange()">Special
+    </label>
+    <label class="filter-cb cb-cloud">
+      <input type="checkbox" id="fd-lbl-cloud" onchange="fdFilterChange()">Cloud
+    </label>
+    <label class="filter-cb">
+      <input type="checkbox" id="fd-lbl-none" onchange="fdFilterChange()">Unlabeled
+    </label>
+  </div>
+</div>
 
 <div class="main-content">
 
@@ -310,6 +361,20 @@
 <div id="tile-tooltip"></div>
 
 <script>
+// ── Sync filter state: if URL lacks params, apply localStorage before rendering ──
+(function() {
+  const params = new URLSearchParams(location.search);
+  if (!params.has('src') && !params.has('lbl')) {
+    const savedSrc = localStorage.getItem('bw_src_filter');
+    const savedLbl = localStorage.getItem('bw_lbl_filter');
+    if (savedSrc || savedLbl) {
+      const src = savedSrc || 'pir,rtc';
+      const lbl = savedLbl || 'bird,ignore,special,cloud,none';
+      location.replace('/frame_detail?id={{ entry.id }}&src=' + encodeURIComponent(src) + '&lbl=' + encodeURIComponent(lbl));
+    }
+  }
+})();
+
 // ── Tile overlay ─────────────────────────────────────────────────────────────
 const TILE_MEANS       = {{ (entry.meta.get('tile_means') if entry.meta else None) | tojson }};
 const TILE_MEANS_U     = {{ (entry.meta.get('tile_means_u') if entry.meta else None) | tojson }};
@@ -591,10 +656,9 @@ function setView(mode) {
 }
 
 // ── Gallery return URL ───────────────────────────────────────────────────────
-// Prefer the exact URL saved when the user clicked into this frame from the
-// gallery (includes page number + active filters).  Fall back to a URL built
-// from the filter params the server passed us (handles direct / bookmarked links).
-const _galleryFallback = '/?src={{ src_param }}&lbl={{ lbl_param }}';
+const _activeSrc = localStorage.getItem('bw_src_filter') || '{{ src_param }}';
+const _activeLbl = localStorage.getItem('bw_lbl_filter') || '{{ lbl_param }}';
+const _galleryFallback = '/?src=' + encodeURIComponent(_activeSrc) + '&lbl=' + encodeURIComponent(_activeLbl);
 const _galleryReturn   = sessionStorage.getItem('bw_gallery_return') || _galleryFallback;
 (function() {
   const btn = document.getElementById('back-btn');
@@ -629,6 +693,37 @@ document.addEventListener('keydown', function(e) {
     setLabel(null);
   }
 });
+
+// ── Filter bar (global — read from localStorage, write on change) ─────────────
+(function() {
+  const src = localStorage.getItem('bw_src_filter') || '{{ src_param }}';
+  const lbl = localStorage.getItem('bw_lbl_filter') || '{{ lbl_param }}';
+  const srcSet = new Set(src.split(','));
+  const lblSet = new Set(lbl.split(','));
+  document.getElementById('fd-src-pir').checked     = srcSet.has('pir');
+  document.getElementById('fd-src-rtc').checked     = srcSet.has('rtc');
+  document.getElementById('fd-lbl-bird').checked    = lblSet.has('bird');
+  document.getElementById('fd-lbl-ignore').checked  = lblSet.has('ignore');
+  document.getElementById('fd-lbl-special').checked = lblSet.has('special');
+  document.getElementById('fd-lbl-cloud').checked   = lblSet.has('cloud');
+  document.getElementById('fd-lbl-none').checked    = lblSet.has('none');
+})();
+
+function fdFilterChange() {
+  const srcParts = [], lblParts = [];
+  if (document.getElementById('fd-src-pir').checked)     srcParts.push('pir');
+  if (document.getElementById('fd-src-rtc').checked)     srcParts.push('rtc');
+  if (document.getElementById('fd-lbl-bird').checked)    lblParts.push('bird');
+  if (document.getElementById('fd-lbl-ignore').checked)  lblParts.push('ignore');
+  if (document.getElementById('fd-lbl-special').checked) lblParts.push('special');
+  if (document.getElementById('fd-lbl-cloud').checked)   lblParts.push('cloud');
+  if (document.getElementById('fd-lbl-none').checked)    lblParts.push('none');
+  const src = srcParts.join(',') || 'pir';
+  const lbl = lblParts.join(',') || 'none';
+  localStorage.setItem('bw_src_filter', src);
+  localStorage.setItem('bw_lbl_filter', lbl);
+  location.href = '/frame_detail?id={{ entry.id }}&src=' + encodeURIComponent(src) + '&lbl=' + encodeURIComponent(lbl);
+}
 </script>
 
 </body>

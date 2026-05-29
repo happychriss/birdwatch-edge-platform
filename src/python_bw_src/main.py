@@ -893,6 +893,8 @@ def frame_detail():
                            prev_id=prev_entry.id if prev_entry else None,
                            next_id=next_entry.id if next_entry else None,
                            filter_qs=filter_qs,
+                           src_param=src_param,
+                           lbl_param=lbl_param,
                            time_diff=time_diff,
                            spec=DISPLAY_SPEC,
                            order=DISPLAY_ORDER,
