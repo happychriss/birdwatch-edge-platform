@@ -165,18 +165,6 @@
   }
   .lb-saved { left: auto; right: 10px; }
 
-  /* ── Pagination ── */
-  .pagination {
-    padding: 16px 18px; display: flex; gap: 10px;
-    align-items: center; justify-content: center; flex-wrap: wrap;
-  }
-  .pagination a {
-    padding: 8px 18px; background: #fff; color: #1a6fa8;
-    text-decoration: none; border-radius: 6px; font-size: 14px;
-    border: 1px solid #b0c8e0; min-height: 40px; display: inline-flex; align-items: center;
-  }
-  .pagination a:hover { background: #daeaf7; }
-  .pagination .current { color: #556; font-size: 13px; }
 </style>
 </head>
 <body>
@@ -305,13 +293,8 @@
 {% endfor %}
 </div>
 
-<!-- ── Pagination ── -->
-<div class="pagination">
-  {% set fq = '&src=' + src_param + '&lbl=' + lbl_param %}
-  {% if page > 1 %}<a href="/?page={{ page - 1 }}{{ fq }}">← prev</a>{% endif %}
-  <span class="current">page {{ page }} of {{ total_pages }}</span>
-  {% if page < total_pages %}<a href="/?page={{ page + 1 }}{{ fq }}">next →</a>{% endif %}
-</div>
+<!-- ── Infinite scroll sentinel ── -->
+<div id="scroll-sentinel" style="padding:28px 0; text-align:center; color:#8a9bb0; font-size:12px;"></div>
 
 <!-- ── Lightbox ── -->
 <div id="lightbox">
@@ -500,12 +483,68 @@ function pollBackfill() {
   });
 }
 
-// Save exact gallery URL (page + filters) so frame_detail Back button can return here
-document.querySelectorAll('.card a[href*="frame_detail"]').forEach(function(a) {
-  a.addEventListener('click', function() {
-    sessionStorage.setItem('bw_gallery_return', location.href);
+// Save exact gallery URL so frame_detail Back button can return here
+function _attachGalleryReturn(root) {
+  (root || document).querySelectorAll('.card a[href*="frame_detail"]').forEach(function(a) {
+    a.addEventListener('click', function() {
+      sessionStorage.setItem('bw_gallery_return', location.href);
+    });
   });
-});
+}
+_attachGalleryReturn();
+
+// ── Infinite scroll ───────────────────────────────────────────────────────────
+let _iPage = {{ page }};
+const _iTotalPages = {{ total_pages }};
+let _iLoading = false;
+const _sentinel = document.getElementById('scroll-sentinel');
+
+function _loadNextPage() {
+  if (_iLoading || _iPage >= _iTotalPages) return;
+  _iLoading = true;
+  _sentinel.textContent = 'Loading…';
+  const params = new URLSearchParams(location.search);
+  params.set('page', _iPage + 1);
+  fetch('/?' + params.toString())
+    .then(r => r.text())
+    .then(html => {
+      const doc = new DOMParser().parseFromString(html, 'text/html');
+      const newCards = Array.from(doc.querySelectorAll('#photo-grid .card'));
+      const grid = document.getElementById('photo-grid');
+      newCards.forEach(c => grid.appendChild(c));
+      _iPage++;
+      _iLoading = false;
+      _sentinel.textContent = _iPage < _iTotalPages ? '' : '— end —';
+      if (_iPage >= _iTotalPages) _iObs.unobserve(_sentinel);
+      // Apply active SIM/ESP mode to newly added cards
+      newCards.forEach(c => {
+        const simB = c.querySelector('.sim-badges');
+        const espB = c.querySelector('.esp-badges');
+        if (simB) simB.style.display = _cardMode === 'sim' ? '' : 'none';
+        if (espB) espB.style.display = _cardMode === 'esp' ? '' : 'none';
+      });
+      // Apply tile overlay to newly added cards if always-tiles is on
+      if (grid.classList.contains('always-tiles')) {
+        newCards.forEach(c => {
+          const wrap = c.querySelector('.card-img-wrap');
+          if (!wrap) return;
+          const img = wrap.querySelector('img'), canvas = wrap.querySelector('canvas');
+          if (!img || !canvas) return;
+          if (img.complete && img.naturalWidth) drawCardTiles(img, canvas);
+          else img.addEventListener('load', () => drawCardTiles(img, canvas), {once: true});
+        });
+      }
+      _attachGalleryReturn();
+    })
+    .catch(() => { _iLoading = false; _sentinel.textContent = 'Failed to load — scroll up and try again'; });
+}
+
+const _iObs = new IntersectionObserver(
+  entries => { if (entries[0].isIntersecting) _loadNextPage(); },
+  { rootMargin: '400px' }
+);
+if (_iPage < _iTotalPages) _iObs.observe(_sentinel);
+else _sentinel.textContent = '— end —';
 
 let refreshSecs = 300;
 const countdownEl = document.getElementById('countdown');
