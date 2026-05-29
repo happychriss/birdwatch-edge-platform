@@ -4,6 +4,10 @@
 // photo-buckets × 1 scene-bucket) and burst pre-filter, decides "clouds"
 // (suppress) or "process" (real event, upload).
 //
+// Background-model stages: WARMUP, DARK_BLOB, QUIET, AMBIGUOUS.
+// Burst stages: FIRST, BRIGHTNESS_SHIFT, DUPLICATE, BRIGHT_STABLE, DIFFUSE, SAFE, NIGHT.
+// DARK_OBJ and SCENE_DRIFT removed — DARK_BLOB replaces both.
+//
 // Caller is responsible for camera init/capture/deinit and JPEG decoding.
 // bw_cc_assess() only touches NVS and telemetry — no camera dependency.
 //

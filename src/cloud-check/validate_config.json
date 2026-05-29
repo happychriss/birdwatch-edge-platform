@@ -1,16 +1,16 @@
 {
-  "_comment": "ESP-vs-Python parity validator config. Edit this file to change what is checked — no code change needed.",
+  "_comment": "ESP-vs-Python parity validator config. Edit to change checks — no code change needed.",
 
   "server_base": "http://192.168.1.110:8000",
 
   "time_frame": {
     "from": "-24h",
-    "_comment_from": "ISO datetime OR relative: '-Nh' (last N hours), '-Nd' (last N days), 'now'",
+    "_comment_from": "ISO datetime OR relative: '-Nh' (N hours), '-Nd' (N days), 'now'",
     "to": "now"
   },
 
   "python_config": {
-    "_comment": "Must mirror ESP firmware constants in cloud_check.c / config.h exactly.",
+    "_comment": "Must mirror ESP firmware constants in cloud_check.c / config.h exactly. The ESP still uses 3 photo-buckets and no affine — use_affine_normalization is false here.",
     "num_photo_buckets": 3,
     "num_scene_buckets": 1,
     "bright_photo_threshold": 160,
@@ -25,7 +25,9 @@
     "dark_object_min_tiles": 1,
     "dark_blob_max_size": 5,
     "night_brightness_threshold": 70.0,
-    "chroma_dark_obj_gate_sq": 64
+    "chroma_dark_obj_gate_sq": 64,
+    "use_affine_normalization": false,
+    "use_chroma_normalization": false
   },
 
   "checks": [
@@ -36,6 +38,7 @@
       "type": "exact"
     },
     {
+      "_comment": "Stage name — ESP now emits DARK_BLOB instead of DARK_OBJ",
       "esp_key": "stage",
       "py_field": "trigger",
       "type": "exact"
@@ -47,7 +50,7 @@
       "type": "exact"
     },
     {
-      "_comment": "Dark-anomalous ratio — small float tolerance for rounding",
+      "_comment": "Dark-anomalous ratio — float tolerance for rounding",
       "esp_key": "ratio",
       "py_field": "anomaly_ratio",
       "type": "float",
@@ -62,6 +65,24 @@
       "esp_key": "warmup",
       "py_field": "warmup",
       "type": "bool"
+    },
+    {
+      "_comment": "dark_tiles: tiles dark vs model (Y delta or chroma). Core DARK_BLOB input.",
+      "esp_key": "dark_tiles",
+      "py_field": "dark_tiles",
+      "type": "int"
+    },
+    {
+      "_comment": "dark_blob_max: largest 8-connected dark-tile cluster. 1-5 → DARK_BLOB.",
+      "esp_key": "dark_blob_max",
+      "py_field": "dark_blob_max",
+      "type": "int"
+    },
+    {
+      "_comment": "n_chroma_changed: tiles with chroma deviation vs model. Diagnostic.",
+      "esp_key": "n_chroma_changed",
+      "py_field": "n_chroma_changed",
+      "type": "int"
     }
   ]
 }

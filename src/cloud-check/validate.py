@@ -151,20 +151,22 @@ def run(config_path: str | None = None) -> list[dict]:
     # Build Python Config from config overrides (defaults match ESP constants).
     pc = cfg_raw.get('python_config', {})
     py_cfg = Config(
-        num_photo_buckets        = pc.get('num_photo_buckets',        3),
-        num_scene_buckets        = pc.get('num_scene_buckets',        1),
-        bright_photo_threshold   = pc.get('bright_photo_threshold',   160),
-        lowlight_photo_threshold = pc.get('lowlight_photo_threshold', 80),
-        warmup_frames_per_bucket = pc.get('warmup_frames_per_bucket', 4),
-        ema_alpha                = pc.get('ema_alpha',                0.15),
-        var_floor                = pc.get('var_floor',                36.0),
-        init_var                 = pc.get('init_var',                 256.0),
-        tile_z_threshold         = pc.get('tile_z_threshold',         3.0),
-        quiet_anomaly_ratio      = pc.get('quiet_anomaly_ratio',      0.25),
-        dark_object_min_delta    = pc.get('dark_object_min_delta',    20.0),
-        dark_object_min_tiles    = pc.get('dark_object_min_tiles',    1),
-        dark_blob_max_size       = pc.get('dark_blob_max_size',       5),
-        chroma_dark_obj_gate_sq  = pc.get('chroma_dark_obj_gate_sq',  64),
+        num_photo_buckets         = pc.get('num_photo_buckets',         3),
+        num_scene_buckets         = pc.get('num_scene_buckets',         1),
+        bright_photo_threshold    = pc.get('bright_photo_threshold',    160),
+        lowlight_photo_threshold  = pc.get('lowlight_photo_threshold',  80),
+        warmup_frames_per_bucket  = pc.get('warmup_frames_per_bucket',  4),
+        ema_alpha                 = pc.get('ema_alpha',                 0.15),
+        var_floor                 = pc.get('var_floor',                 36.0),
+        init_var                  = pc.get('init_var',                  256.0),
+        tile_z_threshold          = pc.get('tile_z_threshold',          3.0),
+        quiet_anomaly_ratio       = pc.get('quiet_anomaly_ratio',       0.25),
+        dark_object_min_delta     = pc.get('dark_object_min_delta',     20.0),
+        dark_object_min_tiles     = pc.get('dark_object_min_tiles',     1),
+        dark_blob_max_size        = pc.get('dark_blob_max_size',        5),
+        chroma_dark_obj_gate_sq   = pc.get('chroma_dark_obj_gate_sq',   64),
+        use_affine_normalization  = pc.get('use_affine_normalization',  False),
+        use_chroma_normalization  = pc.get('use_chroma_normalization',  False),
     )
 
     model = BackgroundModel(py_cfg)
@@ -313,7 +315,8 @@ def run(config_path: str | None = None) -> list[dict]:
                 )
 
                 # Update policy mirrors ESP: only RTC frames update the model.
-                if meta.get('source') == 'rtc' and (was_warmup or py_result.label == 'clouds'):
+                # ESP updates on every RTC frame (was_warmup OR QUIET OR AMBIGUOUS/DARK_BLOB).
+                if meta.get('source') == 'rtc':
                     model.update(pb, sb, tile_mean_y, tile_mean_u, tile_mean_v)
 
             # ── compare configured checks ─────────────────────────────────

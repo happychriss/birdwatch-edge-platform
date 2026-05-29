@@ -183,12 +183,16 @@ Runs after the burst filter passes. Per-tile EMA background model with z-score a
 | `tile_delta_luma` | — | `tile_delta_luma` | 300-element Δluma = model_y − tile_y (positive = darker than model) |
 | `tile_delta_chroma` | — | `tile_delta_chroma` | 300-element Δchroma = √(ΔU²+ΔV²) vs model |
 
-### 2.4 Validation Results (147 labelled frames, online self-calibrating)
+### 2.4 Validation Results (342 frames id≥511, online self-calibrating, HP pipeline)
 
 | Metric | Value |
 |--------|-------|
-| Non-cloud recall (birds/people) | **1.000** — zero misses |
-| Cloud recall (false-trigger suppression) | **0.606** |
+| Bird recall (labelled frames) | **1.000** — 5/5, zero misses (incl. 3 previously missed) |
+| Suppression (non-bird, non-ignore, excl. DUPLICATE) | **~18%** |
+
+Note: `model_tile_means` in the DB currently holds the HP-adjusted model
+(written by `backfill_hp.py`). The raw overlay Δm therefore shows HP delta,
+not raw model delta. `result_prev`/`stage_prev` preserve the pre-HP values.
 
 ---
 
@@ -259,14 +263,14 @@ Background-model pipeline evaluated on labelled real-scene frames (online self-c
 | Cloud recall (false-trigger suppression) | **0.606** |
 
 Key parameter history (background-model pipeline):
-- `tile_z_threshold` 3.0 → 2.5 → **3.0**: reverted — 2.5 caused high sky-tile z-score inflation; 3.0 is the production value on the 20×15 grid.
-- `quiet_anomaly_ratio` 0.05 → 0.20 → **0.25**: compensates for more tiles flagged at lower z threshold; 0.25 is production.
-- `night_brightness_threshold` 80 → **70**: avoids model-state side effects from near-twilight frames.
-- `dark_object_min_delta` 30 → **35**: tighter model-delta check reduces cloud shadow false detections.
-- `temporal_dark_delta` 15 → **20**: tighter frame-to-frame check pairs with the above.
-- `scene_drift_min_tiles` 1 → **4**: require bigger persistent change before SCENE_DRIFT fires.
-- SCENE_DRIFT now resets warmup counter so model re-bootstraps after a scene change.
-- Grid upgraded from 16×12 (40×40 px tiles, VGA) to **20×15 (8×8 px tiles, QQVGA)** — smaller tiles improve spatial resolution for small birds; lower input resolution is faster on-device.
+- `tile_z_threshold` 3.0 → 2.5 → **3.0**: reverted — 2.5 caused high sky-tile z-score inflation.
+- `quiet_anomaly_ratio` 0.05 → 0.20 → **0.25**: production value.
+- `night_brightness_threshold` 80 → **70**: avoids near-twilight model side-effects.
+- `dark_object_min_delta` 30 → **35** → **20** (HP pipeline): HP removes illumination gradient so lower threshold viable.
+- SCENE_DRIFT removed: large blobs (>5 tiles) naturally reach AMBIGUOUS in HP space.
+- Grid upgraded from 16×12 to **20×15 (8×8 px tiles, QQVGA)**.
+- **2026-05-29**: DARK_OBJ replaced by DARK_BLOB (remove `new_dark_tiles` gate); blob upper-cap removed in HP pipeline.
+- **2026-05-29**: Affine illumination normalization replaced by spatial high-pass (box-blur k=5) in experimental Python pipeline (`backfill_hp.py`). ESP32 firmware still runs DARK_BLOB (no affine, no HP).
 
 ---
 
@@ -328,10 +332,20 @@ NVS key scheme (per photo-bucket, suffix `_n`/`_b`/`_l` for NORMAL/BRIGHT/LOWLIG
 
 Legacy keys (`cc_m0..3`, `cc_v0..3`, `cc_s0..3`) are erased on first flash after upgrade.
 
-**Phase 4 — Cleanup (pending, after 7+ days dual-schema data)**
-- Drop legacy `scene_bucket` int display from server (K=1 always 0 → no info).
-- Remove dead K=4 centroid arrays from `scene_buckets.py`.
-- Stop emitting `photo_mode` once `photo_bucket` fully adopted across all rows.
+**Phase 4 — Pipeline refactor (complete Python 2026-05-29, ESP32 pending)**
+- Python: DARK_BLOB replaces DARK_OBJ (no `new_dark_tiles` gate); NIGHT → Layer-1; SCENE_DRIFT removed; affine illumination fit added; single photo-bucket (num_photo_buckets=1).
+- ESP32: still runs DARK_OBJ + SCENE_DRIFT + 3 photo-buckets. **Pending: port DARK_BLOB to C** (see `cloud_check.c` TODO).
 
-**Phase 5 — Server feedback (future)**
-The home server can echo a corrective label per uploaded image to accelerate model re-calibration after scene changes, without requiring a firmware update.
+**Phase 5 — HP pipeline experiment (Python only, 2026-05-29)**
+`backfill_blur.py` and `backfill_hp.py` implement a spatial high-pass (box-blur) Layer-2
+that strips illumination gradients before anomaly detection. Recovers 3 previously-missed
+bird frames. Suppression ceiling ~22% on current 5-bird dataset.
+Key finding: suppression improvement blocked by lack of labelled bird data, not by algorithm.
+Target: 20+ labelled bird frames before re-tuning thresholds.
+
+**Phase 6 — ESP32 DARK_BLOB port (complete 2026-05-29)**
+See `cloud_check.c` for connected-component blob detection replacing `new_dark_tiles`.
+
+**Phase 7 — Server feedback (future)**
+The home server can echo a corrective label per uploaded image to accelerate model
+re-calibration after scene changes, without requiring a firmware update.

@@ -1,13 +1,17 @@
 // ─── Cloud-check filter — ESP32-S3 port of the Python pipeline ───────────────
 //
-// Algorithm matches src/cloud-check/ exactly.  Decision stages (priority order):
+// Algorithm matches src/cloud-check/cloud_check/classifier.py.
+// Decision stages (priority order):
 //
 //   NIGHT       — frame too dark for reliable detection → upload (sun is down)
 //   WARMUP      — model not yet bootstrapped; upload always (can't risk missing a bird)
-//   DARK_OBJ    — tiles newly dark vs both model AND previous frame → real object → upload
-//   QUIET       — ≤25 % dark-anomalous tiles → scene matches model → suppress
-//   SCENE_DRIFT — tiles dark vs model but NOT newly dark vs prev → stale model → upload + recalibrate
+//   DARK_BLOB   — compact cluster of dark tiles (1–5, 8-connected) vs model → real object → upload
+//   QUIET       — ≤25 % z-anomalous dark tiles → scene matches model → suppress
 //   AMBIGUOUS   — default → upload
+//
+// DARK_OBJ (required new_dark_tiles vs prev frame) and SCENE_DRIFT are removed.
+// A motionless bird must be detected on a single frame without frame-diff.
+// The blob upper-cap (≤5 tiles) rejects diffuse cloud shadows that span many tiles.
 //
 // Background model: 3 photo-buckets (NORMAL / BRIGHT / LOWLIGHT) × 1 scene-bucket.
 // Photo-bucket is selected from global Y mean vs BW_BRIGHT/LOWLIGHT_PHOTO_THRESHOLD.
@@ -64,10 +68,9 @@ static inline int photo_bucket_for(uint8_t gm)
 #define CC_INIT_CHROMA      128.0f  // U/V chroma prior (neutral)
 #define CC_Z_THRESHOLD      3.0f    // z-score to flag anomalous
 #define CC_QUIET_RATIO      0.25f   // ≤25 % dark-anomalous → QUIET → suppress
-#define CC_DARK_DELTA_MODEL 20.0f   // tile ≥20 DN darker than model mean (DARK_OBJ)
-#define CC_DARK_DELTA_PREV  20.0f   // tile ≥20 DN darker than previous frame
-#define CC_DARK_MIN_TILES        1  // ≥1 qualifying tile triggers DARK_OBJ
-#define CC_SCENE_DRIFT_MIN_TILES 4  // SCENE_DRIFT needs ≥4 persistently-dark tiles
+#define CC_DARK_DELTA_MODEL 20.0f   // tile ≥20 DN darker than model mean → dark_tile
+#define CC_DARK_MIN_TILES        1  // ≥1 dark_tile required for DARK_BLOB
+#define CC_DARK_BLOB_MAX_SIZE    5  // largest qualifying 8-connected blob (≤5 = bird-sized)
 #define CC_WARMUP_FRAMES    4       // frames before model is considered bootstrapped
 #define CC_NIGHT_THRESHOLD  70      // global mean below this → NIGHT
 
@@ -389,17 +392,17 @@ static void run_pipeline(const uint8_t *tile_y, const uint8_t *tile_u, const uin
 
     // ── Per-tile anomaly analysis ──────────────────────────────────────────────
     // dark_anomalous  : z > threshold AND tile darker than model (QUIET ratio — z-gated)
-    // dark_model_tiles: tile ≥ CC_DARK_DELTA_MODEL darker than model (no z-gate)
-    // new_dark_tiles  : tile ≥ CC_DARK_DELTA_PREV darker than previous frame (no z-gate)
+    // dark_tile_mask  : tile ≥ CC_DARK_DELTA_MODEL darker than model, OR chroma-shifted
     //
-    // DARK_OBJ chroma gate (when chroma available): tile only counts for dark_model_tiles
-    // if chroma also differs from the model — distinguishes a bird (chroma change) from a
-    // cloud shadow (Y drops but sky chroma stays the same).  A very large Y drop
-    // (>2× threshold) passes the gate unconditionally.
+    // Chroma gate: tile counts as dark if Y drop ≥ threshold OR (Y drop > 0 AND chroma
+    // deviates from model beyond BW_CC_CHROMA_DOBJ_GATE_SQ).  A very large Y drop
+    // (>2× threshold) passes unconditionally.  Distinguishes a bird (chroma change)
+    // from a pure cloud shadow (Y drops but chroma stays sky-blue).
     int dark_anomalous   = 0;
     int dark_model_tiles = 0;
-    int new_dark_tiles   = 0;
     int n_chroma_changed = 0;
+    // dark_tile_mask: 1 = qualifies as dark tile, 0 = normal
+    static uint8_t dark_tile_mask[CC_NUM_TILES];
 
     for (int i = 0; i < CC_NUM_TILES; i++) {
         float x_y = (float)tile_y[i];
@@ -409,63 +412,93 @@ static void run_pipeline(const uint8_t *tile_y, const uint8_t *tile_u, const uin
         float z = fabsf(m_y - x_y) / std;
         if (z > CC_Z_THRESHOLD && x_y < m_y) dark_anomalous++;   // z-gated, darker-only
 
-        bool y_dark_from_model = (m_y - x_y > CC_DARK_DELTA_MODEL);
-        if (y_dark_from_model) {
-            // Chroma gate: bypass when no chroma or when Y drop is very large
-            bool chroma_ok = true;
-            if (tile_u && tile_v) {
-                float du = (float)tile_u[i] - s_mean_u[pb][i];
-                float dv = (float)tile_v[i] - s_mean_v[pb][i];
-                float dc_sq = du*du + dv*dv;
-                chroma_ok = (dc_sq > (float)BW_CC_CHROMA_DOBJ_GATE_SQ)
-                         || (m_y - x_y > CC_DARK_DELTA_MODEL * 2.0f);
-                if (dc_sq > (float)BW_CC_CHROMA_DOBJ_GATE_SQ) n_chroma_changed++;
+        bool y_dark  = (m_y - x_y > CC_DARK_DELTA_MODEL);
+        bool is_dark = y_dark;
+        if (tile_u && tile_v) {
+            float du    = (float)tile_u[i] - s_mean_u[pb][i];
+            float dv    = (float)tile_v[i] - s_mean_v[pb][i];
+            float dc_sq = du*du + dv*dv;
+            if (dc_sq > (float)BW_CC_CHROMA_DOBJ_GATE_SQ) {
+                n_chroma_changed++;
+                if (x_y < m_y) is_dark = true;   // chroma-shifted AND darker → dark tile
             }
-            if (chroma_ok) dark_model_tiles++;
+            // Strong Y drop always dark regardless of chroma
+            if (m_y - x_y > CC_DARK_DELTA_MODEL * 2.0f) is_dark = true;
         }
-
-        if (s_prev_valid && (float)s_prev_y[i] - x_y > CC_DARK_DELTA_PREV) new_dark_tiles++;
+        dark_tile_mask[i] = is_dark ? 1 : 0;
+        if (is_dark) dark_model_tiles++;
     }
+
+    // ── Connected-component blob detection (8-connected, union-find) ──────────
+    // Finds the largest blob of dark tiles.  A blob of 1–CC_DARK_BLOB_MAX_SIZE
+    // tiles is bird-sized and triggers DARK_BLOB.  Larger blobs are cloud shadows
+    // or scene drift and fall through to QUIET/AMBIGUOUS.
+    //
+    // Simple two-pass label approach on 20×15 grid (300 tiles, fits on stack).
+    static int16_t label_buf[CC_NUM_TILES];
+    static int16_t parent[CC_NUM_TILES];
+    int next_label = 0;
+
+    // Initialise labels
+    for (int i = 0; i < CC_NUM_TILES; i++) label_buf[i] = -1;
+    for (int i = 0; i < CC_NUM_TILES; i++) parent[i]    = i;
+
+    // Root-find with path compression
+    #define CC_FIND(x) ({ int _r = (x); while (parent[_r] != _r) _r = parent[_r]; \
+                          int _n = (x); while (parent[_n] != _r) { int _t=parent[_n]; parent[_n]=_r; _n=_t; } _r; })
+    #define CC_UNION(a,b) { int _ra=CC_FIND(a), _rb=CC_FIND(b); if (_ra!=_rb) parent[_ra]=_rb; }
+
+    for (int row = 0; row < CC_TILES_Y; row++) {
+        for (int col = 0; col < CC_TILES_X; col++) {
+            int i = row * CC_TILES_X + col;
+            if (!dark_tile_mask[i]) continue;
+            label_buf[i] = next_label++;
+            // Check 8 neighbours already visited (top-left 5 of 8-connected)
+            int nr[] = {row-1, row-1, row-1, row,   row+1};
+            int nc[] = {col-1, col,   col+1, col-1, col-1};
+            for (int k = 0; k < 5; k++) {
+                if (nr[k]<0 || nr[k]>=CC_TILES_Y || nc[k]<0 || nc[k]>=CC_TILES_X) continue;
+                int j = nr[k]*CC_TILES_X + nc[k];
+                if (label_buf[j] < 0) continue;
+                CC_UNION(label_buf[i], label_buf[j]);
+            }
+        }
+    }
+
+    // Count component sizes
+    static uint16_t comp_size[CC_NUM_TILES];
+    memset(comp_size, 0, sizeof(comp_size));
+    for (int i = 0; i < CC_NUM_TILES; i++) {
+        if (dark_tile_mask[i]) comp_size[CC_FIND(label_buf[i])]++;
+    }
+
+    int dark_blob_max = 0;
+    for (int i = 0; i < CC_NUM_TILES; i++) {
+        if (comp_size[i] > (uint16_t)dark_blob_max) dark_blob_max = comp_size[i];
+    }
+    #undef CC_FIND
+    #undef CC_UNION
 
     float ratio = (float)dark_anomalous / CC_NUM_TILES;
     bw_tele_i("dark_anomalous",  (long)dark_anomalous);
     bw_tele_f("ratio",           (double)ratio);
     bw_tele_i("dark_tiles",      (long)dark_model_tiles);
-    bw_tele_i("new_dark_tiles",  (long)new_dark_tiles);
+    bw_tele_i("dark_blob_max",   (long)dark_blob_max);
     bw_tele_i("n_chroma_changed",(long)n_chroma_changed);
-    bw_tele_b("prev_valid",      s_prev_valid);
 
-    bool dark_obj_cond = (dark_model_tiles >= CC_DARK_MIN_TILES) &&
-                         (!s_prev_valid || new_dark_tiles >= CC_DARK_MIN_TILES);
-    bool stale_cond    = (dark_model_tiles >= CC_SCENE_DRIFT_MIN_TILES) &&
-                         s_prev_valid && (new_dark_tiles < CC_DARK_MIN_TILES);
+    bool dark_blob_cond = (dark_model_tiles >= CC_DARK_MIN_TILES)
+                       && (dark_blob_max >= 1)
+                       && (dark_blob_max <= CC_DARK_BLOB_MAX_SIZE);
 
-    // ── DARK_OBJ ──────────────────────────────────────────────────────────────
-    if (dark_obj_cond) {
+    // ── DARK_BLOB ─────────────────────────────────────────────────────────────
+    if (dark_blob_cond) {
         save_prev(tile_y, tile_u, tile_v, global_mean);
         strcpy(out->label, "process");
-        strcpy(out->stage, "DARK_OBJ");
+        strcpy(out->stage, "DARK_BLOB");
         bw_tele_s("result", "process");
-        bw_tele_s("stage",  "DARK_OBJ");
-        ESP_LOGI(TAG, "DARK_OBJ pb=%d (dark_m=%d new_dark=%d chroma=%d ratio=%.0f%%) → process",
-                 pb, dark_model_tiles, new_dark_tiles, n_chroma_changed, ratio * 100.0f);
-        return;
-    }
-
-    // ── SCENE_DRIFT ───────────────────────────────────────────────────────────
-    if (stale_cond) {
-        if (s_is_rtc_source) {
-            update_model(pb, tile_y, tile_u, tile_v);
-            s_frames_seen[pb] = 0;   // reset warmup for this bucket
-        }
-        save_model(pb);
-        save_prev(tile_y, tile_u, tile_v, global_mean);
-        strcpy(out->label, "process");
-        strcpy(out->stage, "SCENE_DRIFT");
-        bw_tele_s("result", "process");
-        bw_tele_s("stage",  "SCENE_DRIFT");
-        ESP_LOGI(TAG, "SCENE_DRIFT pb=%d (dark_m=%d new_dark=0) → process + warmup reset",
-                 pb, dark_model_tiles);
+        bw_tele_s("stage",  "DARK_BLOB");
+        ESP_LOGI(TAG, "DARK_BLOB pb=%d (dark_t=%d blob_max=%d chroma=%d ratio=%.0f%%) → process",
+                 pb, dark_model_tiles, dark_blob_max, n_chroma_changed, ratio * 100.0f);
         return;
     }
 
@@ -489,8 +522,8 @@ static void run_pipeline(const uint8_t *tile_y, const uint8_t *tile_u, const uin
     strcpy(out->stage, "AMBIGUOUS");
     bw_tele_s("result", "process");
     bw_tele_s("stage",  "AMBIGUOUS");
-    ESP_LOGI(TAG, "AMBIGUOUS pb=%d (ratio=%.0f%% dark_m=%d new_dark=%d) → process",
-             pb, ratio * 100.0f, dark_model_tiles, new_dark_tiles);
+    ESP_LOGI(TAG, "AMBIGUOUS pb=%d (ratio=%.0f%% dark_t=%d blob_max=%d) → process",
+             pb, ratio * 100.0f, dark_model_tiles, dark_blob_max);
 }
 
 // ── Public API ────────────────────────────────────────────────────────────────
