@@ -234,15 +234,15 @@
 
     <!-- ── Tile legend (shown when tiles overlay is on) ── -->
     <div class="tile-legend" id="tile-legend">
-      <div style="font-weight:700;margin-bottom:4px;opacity:0.8">Tile overlay — Y (luma) channel, BT.601</div>
-      <div class="tile-legend-row"><span class="tl-swatch" style="background:rgba(210,50,50,0.65)"></span> Y ≥ 20 DN <em>darker</em> than background model &nbsp;·&nbsp; DARK_OBJ algorithm threshold is 35 DN (z &gt; 3)</div>
-      <div class="tile-legend-row"><span class="tl-swatch" style="background:rgba(220,130,30,0.35)"></span> 10–20 DN darker than model &nbsp;·&nbsp; approaching threshold</div>
-      <div class="tile-legend-row"><span class="tl-swatch" style="background:rgba(50,110,220,0.32)"></span> ≥ 10 DN <em>brighter</em> than background model</div>
-      <div style="margin-top:5px;opacity:0.75">
-        Numbers per tile: &nbsp;<strong>Y</strong> = raw luma value (0–255) &nbsp;·&nbsp;
-        <strong>Δm</strong> = Y − model mean (+ brighter, − darker) &nbsp;·&nbsp;
+      <div style="font-weight:700;margin-bottom:4px;opacity:0.8">Tile overlay — dark object &amp; texture signals</div>
+      <div class="tile-legend-row"><span class="tl-swatch" style="background:rgba(210,50,50,0.65)"></span> <strong>dark_blob</strong> tile — compact cluster (1–5 tiles), triggers DARK_BLOB or texture signal → process</div>
+      <div class="tile-legend-row"><span class="tl-swatch" style="background:rgba(50,110,220,0.42)"></span> <strong>dark_model</strong> tile — ΔY ≥ 20 DN or chroma-shifted vs model, outside qualifying blob</div>
+      <div style="margin-top:3px;opacity:0.65;font-size:9px">Fallback (ESP view / legacy frames): red = ≥ 20 DN darker · orange = 10–20 DN · blue = ≥ 10 DN brighter</div>
+      <div style="margin-top:4px;opacity:0.75">
+        Numbers per tile: &nbsp;<strong>Y</strong> = raw luma (0–255) &nbsp;·&nbsp;
+        <strong>Δm</strong> = Y − model (+ brighter, − darker) &nbsp;·&nbsp;
         <strong>Δp</strong> = Y − previous frame &nbsp;·&nbsp;
-        Hover tile for details
+        Hover for details
       </div>
     </div>
 
@@ -318,7 +318,9 @@ const PREV_TILE_MEANS  = {{ prev_tile_means | tojson }};
 const MODEL_TILE_MEANS = {{ model_tile_means | tojson }};
 const GLOBAL_MEAN      = {{ (entry.meta.get('global_mean', 128) if entry.meta else 128) | tojson }};
 const DARK_TILES_COUNT = {{ (entry.meta.get('dark_tiles', 0) if entry.meta else 0) | tojson }};
-const NEW_DARK_COUNT   = {{ (entry.meta.get('new_dark_tiles', 0) if entry.meta else 0) | tojson }};
+const DARK_BLOB_MAX    = {{ (entry.meta.get('dark_blob_max', 0) if entry.meta else 0) | tojson }};
+// 0=background, 1=dark_model tile (blue), 2=dark_blob tile (red, compact cluster → DARK_BLOB/texture trigger)
+const TILE_COLOR_MASK  = {{ (entry.meta.get('tile_color_mask') if entry.meta else None) | tojson }};
 
 // ESP raw tile data (null when esp_meta absent)
 {% set _esp = (entry.meta.get('esp_meta') or {}) if entry.meta else {} %}
@@ -349,11 +351,12 @@ function _getActiveTileData() {
     model:  useSim ? MODEL_TILE_MEANS : MODEL_TILE_MEANS_ESP,
     gm:     useSim ? GLOBAL_MEAN      : GLOBAL_MEAN_ESP,
     prev:   useSim ? PREV_TILE_MEANS  : null,
+    mask:   useSim ? TILE_COLOR_MASK  : null,  // mask only for SIM view (backfill-computed)
   };
 }
 
 function drawTiles() {
-  const {tiles, model: modelArr, gm, prev: prevArr} = _getActiveTileData();
+  const {tiles, model: modelArr, gm, prev: prevArr, mask: maskArr} = _getActiveTileData();
   const img    = document.getElementById('frame-img');
   const canvas = document.getElementById('tile-canvas');
   if (!img || !canvas || !tiles) return;
@@ -368,33 +371,49 @@ function drawTiles() {
   const fs = Math.max(6, Math.min(9, Math.floor(th / 4.2)));
   const hasPrev  = prevArr  && prevArr.length  === tiles.length;
   const hasModel = modelArr && modelArr.length === tiles.length;
+  const hasMask  = maskArr  && maskArr.length  === tiles.length;
 
   for (let row = 0; row < TILE_ROWS; row++) {
     for (let col = 0; col < TILE_COLS; col++) {
       const idx      = row * TILE_COLS + col;
       const val      = tiles[idx];
       const modelRef = hasModel ? modelArr[idx] : gm;
-      const dModel   = val - modelRef;   // negative = tile darker than model/global (z uses this)
+      const dModel   = val - modelRef;   // negative = tile darker than model/global
       const dPrev    = hasPrev ? val - prevArr[idx] : null;
-      const darkDelta = modelRef - val;  // positive = tile darker than model → drives red fill
+      const darkDelta = modelRef - val;  // positive = tile darker than model
       const x = col * tw, y = row * th;
 
-      // Background fill:
-      //   red     = tile ≥ DARK_DELTA_MODEL (20 DN) darker than model → DARK_OBJ candidate
-      //   orange  = tile 10–20 DN darker than model → approaching threshold
-      //   blue    = tile ≥ 10 DN brighter than model
-      if (darkDelta >= DARK_DELTA_MODEL) {
-        const a = Math.min(0.78, 0.45 + (darkDelta - DARK_DELTA_MODEL) / 60);
-        ctx.fillStyle = `rgba(210,50,50,${a.toFixed(2)})`;
-        ctx.fillRect(x, y, tw, th);
-      } else if (darkDelta >= 10) {
-        const a = (darkDelta - 10) / (DARK_DELTA_MODEL - 10) * 0.38;
-        ctx.fillStyle = `rgba(220,130,30,${a.toFixed(2)})`;
-        ctx.fillRect(x, y, tw, th);
-      } else if (darkDelta <= -10) {
-        const a = Math.min(0.38, (-darkDelta - 10) / 70);
-        ctx.fillStyle = `rgba(50,110,220,${a.toFixed(2)})`;
-        ctx.fillRect(x, y, tw, th);
+      if (hasMask) {
+        // Mask-based coloring (backfill-computed, semantically correct):
+        //   2 = dark_blob tile — compact cluster (1–5 tiles) → DARK_BLOB or texture trigger → red
+        //   1 = dark_model tile — ΔY ≥ 20 DN or chroma-shifted, outside qualifying blob → blue
+        //   0 = background tile → no fill
+        const mv = maskArr[idx];
+        if (mv === 2) {
+          ctx.fillStyle = 'rgba(210,50,50,0.65)';
+          ctx.fillRect(x, y, tw, th);
+        } else if (mv === 1) {
+          ctx.fillStyle = 'rgba(50,110,220,0.42)';
+          ctx.fillRect(x, y, tw, th);
+        }
+      } else {
+        // Fallback luma-delta coloring (ESP view or legacy frames without mask):
+        //   red    = ≥ 20 DN darker than model
+        //   orange = 10–20 DN darker
+        //   blue   = ≥ 10 DN brighter
+        if (darkDelta >= DARK_DELTA_MODEL) {
+          const a = Math.min(0.78, 0.45 + (darkDelta - DARK_DELTA_MODEL) / 60);
+          ctx.fillStyle = `rgba(210,50,50,${a.toFixed(2)})`;
+          ctx.fillRect(x, y, tw, th);
+        } else if (darkDelta >= 10) {
+          const a = (darkDelta - 10) / (DARK_DELTA_MODEL - 10) * 0.38;
+          ctx.fillStyle = `rgba(220,130,30,${a.toFixed(2)})`;
+          ctx.fillRect(x, y, tw, th);
+        } else if (darkDelta <= -10) {
+          const a = Math.min(0.38, (-darkDelta - 10) / 70);
+          ctx.fillStyle = `rgba(50,110,220,${a.toFixed(2)})`;
+          ctx.fillRect(x, y, tw, th);
+        }
       }
 
       // Grid lines
@@ -463,7 +482,7 @@ const _tooltip = document.getElementById('tile-tooltip');
 const _imgWrap = document.getElementById('img-wrap');
 if (_imgWrap) {
   _imgWrap.addEventListener('mousemove', function(e) {
-    const {tiles: _tt, model: _tm, gm: _tgm, prev: _tp} = _getActiveTileData();
+    const {tiles: _tt, model: _tm, gm: _tgm, prev: _tp, mask: _tmask} = _getActiveTileData();
     if (!tilesOn || !_tt) { _tooltip.style.display = 'none'; return; }
     const img  = document.getElementById('frame-img');
     const rect = img.getBoundingClientRect();
@@ -477,20 +496,26 @@ if (_imgWrap) {
     const val = _tt[idx];
     const sign = v => (v >= 0 ? '+' : '') + Math.round(v);
     const hasM = _tm && _tm.length === _tt.length;
+    const hasMaskTip = _tmask && _tmask.length === _tt.length;
     const modelRef = hasM ? _tm[idx] : _tgm;
     const dModel = val - modelRef;
-    const darkObj = (modelRef - val) >= DARK_DELTA_MODEL;
     const modeTag = _activeMode === 'esp' ? ' [ESP]' : '';
+    let tileTag = '';
+    if (hasMaskTip) {
+      const mv = _tmask[idx];
+      tileTag = mv === 2 ? '  ★ dark_blob' : mv === 1 ? '  ● dark_model' : '';
+    } else {
+      tileTag = (modelRef - val) >= DARK_DELTA_MODEL ? '  ★ dark_model' : '';
+    }
     let lines = [
       `tile [${row},${col}]   DN: ${Math.round(val)}${modeTag}`,
-      `Δ ${hasM ? 'model' : 'global'}: ${sign(dModel)}  (${dModel >= 0 ? 'brighter' : 'darker'} than ${hasM ? 'bg model' : 'scene avg'})${darkObj ? '  ★ DARK_OBJ' : ''}`,
+      `Δ ${hasM ? 'model' : 'global'}: ${sign(dModel)}  (${dModel >= 0 ? 'brighter' : 'darker'} than ${hasM ? 'bg model' : 'scene avg'})${tileTag}`,
     ];
     if (_tp && _tp.length === _tt.length) {
       const dPrev = val - _tp[idx];
-      const newDark = (_tp[idx] - val) >= DARK_DELTA_PREV;
-      lines.push(`Δ prev:    ${sign(dPrev)}  (${dPrev >= 0 ? 'brighter' : 'darker'})${newDark ? '  ★ new dark' : ''}`);
+      lines.push(`Δ prev:    ${sign(dPrev)}  (${dPrev >= 0 ? 'brighter' : 'darker'})`);
     }
-    lines.push(`─── frame dark_tiles: ${DARK_TILES_COUNT}  new_dark: ${NEW_DARK_COUNT}`);
+    lines.push(`─── dark_tiles: ${DARK_TILES_COUNT}  dark_blob_max: ${DARK_BLOB_MAX}`);
     _tooltip.textContent = lines.join('\n');
     _tooltip.style.display = 'block';
     _tooltip.style.left = (e.clientX + 14) + 'px';

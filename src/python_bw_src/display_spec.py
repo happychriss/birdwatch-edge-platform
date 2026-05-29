@@ -115,6 +115,10 @@ DISPLAY_SPEC: dict = {
         "type": "numeric",
         "desc": "Largest 8-connected cluster of dark_tiles. 1–5 → DARK_BLOB (bird-sized). > 5 → AMBIGUOUS (too large to be a bird). Shown in red in tile overlay.",
     },
+    "texture_blob_max": {
+        "type": "numeric",
+        "desc": "Largest compact blob on texture+dark mask (std_y > 12 AND ΔY > 10 DN loosely). 1–5 → texture trigger for DARK_BLOB (second detection channel for structured plumage). 0 if texture signal inactive.",
+    },
     "n_chroma_changed": {
         "type": "numeric",
         "desc": "Tiles where ΔU² + ΔV² > 64 vs background model mean (chroma shift ≥ 8). Real objects (pigeons, people) shift chroma; cloud shadows do not.",
@@ -200,6 +204,6 @@ DISPLAY_SPEC: dict = {
 DISPLAY_ORDER = [
     "result", "stage", "burst_trigger", "source", "photo_bucket", "fresh_flash", "simulated",
     "battery", "trigger",
-    "global_mean", "ratio", "dark_tiles", "dark_blob_max",
+    "global_mean", "ratio", "dark_tiles", "dark_blob_max", "texture_blob_max",
     "n_chroma_changed", "burst_n_changed", "burst_n_dark", "burst_n_chroma",
 ]
