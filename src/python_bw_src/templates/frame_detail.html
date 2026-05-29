@@ -285,15 +285,15 @@
 
     <!-- ── Tile legend (shown when tiles overlay is on) ── -->
     <div class="tile-legend" id="tile-legend">
-      <div style="font-weight:700;margin-bottom:4px;opacity:0.8">Tile overlay — dark object &amp; texture signals</div>
-      <div class="tile-legend-row"><span class="tl-swatch" style="background:rgba(210,50,50,0.65)"></span> <strong>dark_blob</strong> tile — compact cluster (1–5 tiles), triggers DARK_BLOB or texture signal → process</div>
-      <div class="tile-legend-row"><span class="tl-swatch" style="background:rgba(50,110,220,0.42)"></span> <strong>dark_model</strong> tile — ΔY ≥ 20 DN or chroma-shifted vs model, outside qualifying blob</div>
-      <div style="margin-top:3px;opacity:0.65;font-size:9px">Fallback (ESP view / legacy frames): red = ≥ 20 DN darker · orange = 10–20 DN · blue = ≥ 10 DN brighter</div>
+      <div style="font-weight:700;margin-bottom:4px;opacity:0.8">Tile overlay — combined Δmodel + Δprev signal</div>
+      <div class="tile-legend-row"><span class="tl-swatch" style="background:rgba(210,50,50,0.75)"></span> <strong>Red</strong>: score &gt; 0 — tile darker than model AND/OR darker than previous frame</div>
+      <div class="tile-legend-row"><span class="tl-swatch" style="background:rgba(50,110,220,0.75)"></span> <strong>Blue</strong>: score &lt; 0 — tile brighter than model AND/OR brighter than previous frame</div>
+      <div style="margin-top:3px;opacity:0.75">Intensity linear to score magnitude · scaled to per-frame max (full range always used) · when no prev: model-only</div>
       <div style="margin-top:4px;opacity:0.75">
-        Numbers per tile: &nbsp;<strong>Y</strong> = raw luma (0–255) &nbsp;·&nbsp;
-        <strong>Δm</strong> = Y − model (+ brighter, − darker) &nbsp;·&nbsp;
-        <strong>Δp</strong> = Y − previous frame &nbsp;·&nbsp;
-        Hover for details
+        Numbers: &nbsp;<strong>Y</strong> = raw luma &nbsp;·&nbsp;
+        <strong>Δm</strong> = Y − model (+ brighter) &nbsp;·&nbsp;
+        <strong>Δp</strong> = Y − prev (+ brighter) &nbsp;·&nbsp;
+        Hover for score
       </div>
     </div>
 
@@ -421,7 +421,7 @@ function _getActiveTileData() {
 }
 
 function drawTiles() {
-  const {tiles, model: modelArr, gm, prev: prevArr, mask: maskArr} = _getActiveTileData();
+  const {tiles, model: modelArr, gm, prev: prevArr} = _getActiveTileData();
   const img    = document.getElementById('frame-img');
   const canvas = document.getElementById('tile-canvas');
   if (!img || !canvas || !tiles) return;
@@ -432,53 +432,41 @@ function drawTiles() {
   const ctx = canvas.getContext('2d');
   ctx.clearRect(0, 0, w, h);
   const tw = w / TILE_COLS, th = h / TILE_ROWS;
-  // Font sized so 3 lines fit vertically in each tile
   const fs = Math.max(6, Math.min(9, Math.floor(th / 4.2)));
   const hasPrev  = prevArr  && prevArr.length  === tiles.length;
   const hasModel = modelArr && modelArr.length === tiles.length;
-  const hasMask  = maskArr  && maskArr.length  === tiles.length;
+
+  // score[i] = Δmodel + Δprev  (positive = darker than model AND/OR darker than prev)
+  // Δmodel = modelRef − val  (positive = tile darker than model)
+  // Δprev  = prevArr[i] − val (positive = tile darker than previous frame)
+  const scores = new Float32Array(tiles.length);
+  let maxAbs = 1;
+  for (let i = 0; i < tiles.length; i++) {
+    const modelRef = hasModel ? modelArr[i] : gm;
+    const dm = modelRef - tiles[i];
+    const dp = hasPrev ? (prevArr[i] - tiles[i]) : 0;
+    scores[i] = dm + dp;
+    if (Math.abs(scores[i]) > maxAbs) maxAbs = Math.abs(scores[i]);
+  }
 
   for (let row = 0; row < TILE_ROWS; row++) {
     for (let col = 0; col < TILE_COLS; col++) {
       const idx      = row * TILE_COLS + col;
       const val      = tiles[idx];
       const modelRef = hasModel ? modelArr[idx] : gm;
-      const dModel   = val - modelRef;   // negative = tile darker than model/global
-      const dPrev    = hasPrev ? val - prevArr[idx] : null;
-      const darkDelta = modelRef - val;  // positive = tile darker than model
+      const dModel   = val - modelRef;          // + = brighter than model
+      const dPrev    = hasPrev ? val - prevArr[idx] : null;  // + = brighter than prev
       const x = col * tw, y = row * th;
 
-      if (hasMask) {
-        // Mask-based coloring (backfill-computed, semantically correct):
-        //   2 = dark_blob tile — compact cluster (1–5 tiles) → DARK_BLOB or texture trigger → red
-        //   1 = dark_model tile — ΔY ≥ 20 DN or chroma-shifted, outside qualifying blob → blue
-        //   0 = background tile → no fill
-        const mv = maskArr[idx];
-        if (mv === 2) {
-          ctx.fillStyle = 'rgba(210,50,50,0.65)';
-          ctx.fillRect(x, y, tw, th);
-        } else if (mv === 1) {
-          ctx.fillStyle = 'rgba(50,110,220,0.42)';
-          ctx.fillRect(x, y, tw, th);
-        }
-      } else {
-        // Fallback luma-delta coloring (ESP view or legacy frames without mask):
-        //   red    = ≥ 20 DN darker than model
-        //   orange = 10–20 DN darker
-        //   blue   = ≥ 10 DN brighter
-        if (darkDelta >= DARK_DELTA_MODEL) {
-          const a = Math.min(0.78, 0.45 + (darkDelta - DARK_DELTA_MODEL) / 60);
-          ctx.fillStyle = `rgba(210,50,50,${a.toFixed(2)})`;
-          ctx.fillRect(x, y, tw, th);
-        } else if (darkDelta >= 10) {
-          const a = (darkDelta - 10) / (DARK_DELTA_MODEL - 10) * 0.38;
-          ctx.fillStyle = `rgba(220,130,30,${a.toFixed(2)})`;
-          ctx.fillRect(x, y, tw, th);
-        } else if (darkDelta <= -10) {
-          const a = Math.min(0.38, (-darkDelta - 10) / 70);
-          ctx.fillStyle = `rgba(50,110,220,${a.toFixed(2)})`;
-          ctx.fillRect(x, y, tw, th);
-        }
+      // Linear colour: red = darker (score > 0), blue = brighter (score < 0)
+      // Full range: alpha spans 0..0.82 mapped to 0..maxAbs
+      const t = scores[idx] / maxAbs;           // −1..+1
+      if (t > 0) {
+        ctx.fillStyle = `rgba(210,50,50,${(t * 0.82).toFixed(2)})`;
+        ctx.fillRect(x, y, tw, th);
+      } else if (t < 0) {
+        ctx.fillStyle = `rgba(50,110,220,${(-t * 0.82).toFixed(2)})`;
+        ctx.fillRect(x, y, tw, th);
       }
 
       // Grid lines
@@ -486,23 +474,22 @@ function drawTiles() {
       ctx.lineWidth = 0.5;
       ctx.strokeRect(x + 0.5, y + 0.5, tw - 1, th - 1);
 
-      // Three text rows — bold for readability
+      // Three text rows
       const sign = v => (v >= 0 ? '+' : '') + v;
       ctx.font = `bold ${fs}px monospace`;
       ctx.shadowColor = 'rgba(0,0,0,0.9)';
       ctx.shadowBlur  = 2;
 
       ctx.fillStyle = 'rgba(255,255,255,0.97)';
-      ctx.fillText(val, x + 2, y + fs + 1);                       // row 1: tile mean
+      ctx.fillText(val, x + 2, y + fs + 1);
 
-      // row 2: Δ model (true per-tile) or Δ global if no model stored
       const mLabel = hasModel ? 'Δm' : 'Δg';
       ctx.fillStyle = dModel >= 0 ? 'rgba(160,210,255,0.97)' : 'rgba(255,160,140,0.97)';
-      ctx.fillText(mLabel + sign(dModel), x + 2, y + fs * 2 + 2); // row 2: Δ model
+      ctx.fillText(mLabel + sign(dModel), x + 2, y + fs * 2 + 2);
 
       if (dPrev !== null) {
         ctx.fillStyle = dPrev >= 0 ? 'rgba(160,255,190,0.97)' : 'rgba(255,215,120,0.97)';
-        ctx.fillText('Δp' + sign(dPrev), x + 2, y + fs * 3 + 3);  // row 3: Δ prev frame
+        ctx.fillText('Δp' + sign(dPrev), x + 2, y + fs * 3 + 3);
       }
 
       ctx.shadowBlur = 0;
@@ -547,7 +534,7 @@ const _tooltip = document.getElementById('tile-tooltip');
 const _imgWrap = document.getElementById('img-wrap');
 if (_imgWrap) {
   _imgWrap.addEventListener('mousemove', function(e) {
-    const {tiles: _tt, model: _tm, gm: _tgm, prev: _tp, mask: _tmask} = _getActiveTileData();
+    const {tiles: _tt, model: _tm, gm: _tgm, prev: _tp} = _getActiveTileData();
     if (!tilesOn || !_tt) { _tooltip.style.display = 'none'; return; }
     const img  = document.getElementById('frame-img');
     const rect = img.getBoundingClientRect();
@@ -561,24 +548,18 @@ if (_imgWrap) {
     const val = _tt[idx];
     const sign = v => (v >= 0 ? '+' : '') + Math.round(v);
     const hasM = _tm && _tm.length === _tt.length;
-    const hasMaskTip = _tmask && _tmask.length === _tt.length;
     const modelRef = hasM ? _tm[idx] : _tgm;
-    const dModel = val - modelRef;
+    const dm = modelRef - val;    // positive = darker than model
+    const dp = (_tp && _tp.length === _tt.length) ? (_tp[idx] - val) : null;
+    const score = dm + (dp !== null ? dp : 0);
     const modeTag = _activeMode === 'esp' ? ' [ESP]' : '';
-    let tileTag = '';
-    if (hasMaskTip) {
-      const mv = _tmask[idx];
-      tileTag = mv === 2 ? '  ★ dark_blob' : mv === 1 ? '  ● dark_model' : '';
-    } else {
-      tileTag = (modelRef - val) >= DARK_DELTA_MODEL ? '  ★ dark_model' : '';
-    }
     let lines = [
       `tile [${row},${col}]   DN: ${Math.round(val)}${modeTag}`,
-      `Δ ${hasM ? 'model' : 'global'}: ${sign(dModel)}  (${dModel >= 0 ? 'brighter' : 'darker'} than ${hasM ? 'bg model' : 'scene avg'})${tileTag}`,
+      `Δmodel: ${sign(-dm)}  (${dm > 0 ? 'darker' : 'brighter'} than bg)`,
     ];
-    if (_tp && _tp.length === _tt.length) {
-      const dPrev = val - _tp[idx];
-      lines.push(`Δ prev:    ${sign(dPrev)}  (${dPrev >= 0 ? 'brighter' : 'darker'})`);
+    if (dp !== null) {
+      lines.push(`Δprev:  ${sign(-dp)}  (${dp > 0 ? 'darker' : 'brighter'} than prev)`);
+      lines.push(`score:  ${sign(score)}  (Δm + Δp — ${score > 0 ? 'red' : score < 0 ? 'blue' : 'neutral'})`);
     }
     lines.push(`─── dark_tiles: ${DARK_TILES_COUNT}  dark_blob_max: ${DARK_BLOB_MAX}`);
     _tooltip.textContent = lines.join('\n');
