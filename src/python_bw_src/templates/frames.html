@@ -346,8 +346,24 @@ function submitFilters() {
   if (form.querySelector('[name=lbl_none]').checked)   lblParts.push('none');
   const src = srcParts.join(',') || 'pir';  // avoid empty string breaking defaults
   const lbl = lblParts.join(',') || 'none';
+  localStorage.setItem('bw_src_filter', src);
+  localStorage.setItem('bw_lbl_filter', lbl);
   location.href = '/?src=' + encodeURIComponent(src) + '&lbl=' + encodeURIComponent(lbl);
 }
+
+// Restore saved filters when landing on gallery without explicit URL params
+(function() {
+  const params = new URLSearchParams(location.search);
+  if (!params.has('src') && !params.has('lbl')) {
+    const savedSrc = localStorage.getItem('bw_src_filter');
+    const savedLbl = localStorage.getItem('bw_lbl_filter');
+    if (savedSrc || savedLbl) {
+      const src = savedSrc || 'pir,rtc';
+      const lbl = savedLbl || 'bird,ignore,special,cloud,none';
+      location.replace('/?src=' + encodeURIComponent(src) + '&lbl=' + encodeURIComponent(lbl));
+    }
+  }
+})();
 
 // ── SIM/ESP mode ──────────────────────────────────────────────────────────
 let _cardMode = localStorage.getItem('bw_sim_mode') || 'sim';
