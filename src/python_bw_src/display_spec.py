@@ -40,6 +40,9 @@ DISPLAY_SPEC: dict = {
             "QUIET":          "#3498db",
             "AMBIGUOUS":      "#f39c12",
             "CAM_ERR":        "#c0392b",
+            # HP blur experiment stages
+            "DARK_BLOB_HP":   "#16a085",
+            "QUIET_HP":       "#7fb3d3",
             # Legacy stages (historical data only)
             "NIGHT":          "#1a1a2e",
             "DARK_OBJ":       "#27ae60",
@@ -118,6 +121,11 @@ DISPLAY_SPEC: dict = {
     "texture_blob_max": {
         "type": "numeric",
         "desc": "Largest compact blob on texture+dark mask (std_y > 12 AND ΔY > 10 DN loosely). 1–5 → texture trigger for DARK_BLOB (second detection channel for structured plumage). 0 if texture signal inactive.",
+    },
+    "hp_score": {
+        "type": "format_val",
+        "format": "{:.1f} DN",
+        "desc": "Max high-pass delta = max(HF(model) − HF(tile)). Tile-local dark anomaly after blur removes illumination gradients. ≥ 25 DN → DARK_BLOB_HP (experimental).",
     },
     "n_chroma_changed": {
         "type": "numeric",
@@ -205,5 +213,6 @@ DISPLAY_ORDER = [
     "result", "stage", "burst_trigger", "source", "photo_bucket", "fresh_flash", "simulated",
     "battery", "trigger",
     "global_mean", "ratio", "dark_tiles", "dark_blob_max", "texture_blob_max",
+    "hp_score",
     "n_chroma_changed", "burst_n_changed", "burst_n_dark", "burst_n_chroma",
 ]
