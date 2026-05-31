@@ -115,6 +115,21 @@
 //   LOWLIGHT  global_mean < BW_LOWLIGHT_THRESHOLD : dusk / dawn / dim interior
 #define BW_BRIGHT_PHOTO_THRESHOLD    160
 #define BW_LOWLIGHT_PHOTO_THRESHOLD   80
+
+// ─── Shadow-lift exposure control ──────────────────────────────────────────
+// After the PHOTO AEC settles, the integration time is boosted so that the
+// BW_SHADOW_PERCENTILE-th histogram percentile of the LIGHTCHECK frame reaches
+// BW_SHADOW_TARGET_DN.  The lift is one-directional: shadow_factor ≥ 1.0 so a
+// well-exposed or bright scene (frame 812 etc.) is never darkened.
+//
+// Why percentile, not mean/median: the mean/median is pulled toward the dominant
+// bright-sky patch.  The 30th percentile sits in the foreground (darker content)
+// regardless of where in the frame the sky is, making the rule scene-geometry-
+// independent.
+#define BW_SHADOW_TARGET_DN    80   // target brightness for the shadow percentile
+#define BW_SHADOW_PERCENTILE   30   // histogram percentile representing dark content
+#define BW_SHADOW_FACTOR_MAX    8   // max boost (~3 stops); genuine night/dusk hits this
+#define BW_AEC_VALUE_MAX     1200   // OV2640 practical AEC integration ceiling
 // Hysteresis deadband around each threshold.  A state only changes when gm
 // crosses the threshold by at least this margin, so a single noisy frame
 // cannot flip the profile.  Effective edges:

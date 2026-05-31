@@ -302,8 +302,9 @@ static void run_normal_cycle(void)
     // A cheap QQVGA grayscale frame is captured to determine scene brightness
     // before the full JPEG capture.  This avoids adapting the JPEG exposure from
     // a JPEG that hasn't been taken yet.
-    bw_cam_mode_t photo_mode = BW_CAM_MODE_PHOTO;   // default: NORMAL
-    uint8_t gm_lightcheck    = 128;
+    bw_cam_mode_t photo_mode    = BW_CAM_MODE_PHOTO;   // default: NORMAL
+    uint8_t gm_lightcheck       = 128;
+    uint8_t p30_lightcheck      = 0;   // BW_SHADOW_PERCENTILE-th percentile for shadow-lift
 
     if (bw_cam_init(BW_CAM_MODE_LIGHTCHECK) == ESP_OK) {
         camera_fb_t *lc = bw_cam_capture();
@@ -318,6 +319,15 @@ static void run_normal_cycle(void)
             for (int b = 0; b < 256; b++) {
                 cum += hist[b];
                 if (cum >= half) { gm_lightcheck = (uint8_t)b; break; }
+            }
+            // Shadow percentile: walk to BW_SHADOW_PERCENTILE (30th) of the histogram.
+            // Represents the dark content of the scene; used by shadow-lift to boost
+            // the photo exposure independently of where the bright sky sits in the frame.
+            size_t p30_thresh = lc->len * BW_SHADOW_PERCENTILE / 100;
+            cum = 0;
+            for (int b = 0; b < 256; b++) {
+                cum += hist[b];
+                if (cum >= p30_thresh) { p30_lightcheck = (uint8_t)b; break; }
             }
         }
         if (lc) bw_cam_capture_return(lc);
@@ -401,6 +411,7 @@ static void run_normal_cycle(void)
         return;
     }
     bw_cam_discard_frames(6, 100);   // AEC settle: ~600 ms at 16 MHz SXGA
+    bw_cam_apply_shadow_exposure(p30_lightcheck);   // boost if p30 < BW_SHADOW_TARGET_DN
     camera_fb_t *fb = bw_cam_capture();
     if (!fb) {
         ESP_LOGE(TAG, "no frame captured — aborting cycle");
@@ -432,6 +443,7 @@ static void run_normal_cycle(void)
         bw_tele_s("stage",  "CAM_ERR");
         bw_tele_s("photo_bucket", photo_mode_str);
         bw_tele_i("global_mean", (long)gm_lightcheck);
+        bw_tele_i("shadow_p30", (long)p30_lightcheck);
         strcpy(cc.label, "process");
         strcpy(cc.stage, "CAM_ERR");
         strncpy(cc.photo_bucket, photo_mode_str, sizeof(cc.photo_bucket) - 1);

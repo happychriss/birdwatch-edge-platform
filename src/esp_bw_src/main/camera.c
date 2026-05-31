@@ -294,6 +294,69 @@ esp_err_t bw_cam_set_format(pixformat_t fmt, framesize_t size)
     return ESP_OK;
 }
 
+void bw_cam_apply_shadow_exposure(uint8_t p30)
+{
+    sensor_t *s = esp_camera_sensor_get();
+    if (!s) {
+        ESP_LOGW(TAG, "shadow_exp: no sensor");
+        return;
+    }
+
+    // Read AEC/AGC registers that settled during the discard-frame window.
+    // init_status() reads from SCCB hardware into s->status — it is safe to
+    // call after the camera is already running.
+    s->init_status(s);
+    uint16_t settled_aec  = s->status.aec_value;   // 0–1200
+    uint8_t  settled_gain = s->status.agc_gain;    // 0–30 table index (multiplier ≈ index+1)
+
+    if (settled_aec == 0) {
+        ESP_LOGW(TAG, "shadow_exp: settled_aec=0, keeping auto");
+        return;
+    }
+
+    // Shadow factor: how many times more exposure is needed so p30 reaches
+    // BW_SHADOW_TARGET_DN.  Clamped ≥ 1.0 — never darken a well-exposed frame.
+    float shadow_factor = 1.0f;
+    if (p30 > 0 && p30 < BW_SHADOW_TARGET_DN) {
+        shadow_factor = (float)BW_SHADOW_TARGET_DN / (float)p30;
+        if (shadow_factor > (float)BW_SHADOW_FACTOR_MAX)
+            shadow_factor = (float)BW_SHADOW_FACTOR_MAX;
+    }
+
+    // Total exposure units = aec_value × gain_multiplier.
+    // Scale up, then prefer longer integration (lower noise) over higher gain.
+    uint32_t E_settled = (uint32_t)settled_aec * ((uint32_t)settled_gain + 1u);
+    uint32_t E_target  = (uint32_t)((float)E_settled * shadow_factor + 0.5f);
+
+    uint16_t new_aec;
+    uint8_t  new_gain;
+    if (E_target <= BW_AEC_VALUE_MAX) {
+        new_aec  = (uint16_t)E_target;
+        new_gain = 0;   // 1× — lowest noise when integration alone is enough
+    } else {
+        new_aec  = BW_AEC_VALUE_MAX;
+        uint32_t need = (E_target + BW_AEC_VALUE_MAX - 1u) / (uint32_t)BW_AEC_VALUE_MAX;
+        new_gain = (need > 1u) ? (uint8_t)(need - 1u) : 0u;
+        if (new_gain > 30u) new_gain = 30u;
+    }
+
+    s->set_exposure_ctrl(s, 0);   // switch to manual AEC
+    s->set_gain_ctrl(s, 0);       // switch to manual AGC
+    s->set_aec_value(s, new_aec);
+    s->set_agc_gain(s, new_gain);
+
+    // Flush the ring buffer so bw_cam_capture() returns a frame captured
+    // entirely under the new manual settings.
+    camera_fb_t *flush = esp_camera_fb_get();
+    if (flush) esp_camera_fb_return(flush);
+
+    ESP_LOGI(TAG, "shadow_exp: p30=%u factor=%.2f settled=%u×%u "
+             "→ aec=%u gain_idx=%u (~%ux)",
+             p30, (double)shadow_factor,
+             settled_aec, (unsigned)(settled_gain + 1u),
+             new_aec, new_gain, (unsigned)(new_gain + 1u));
+}
+
 // ── JPEG → tile YUV means (TJpgDec ROM decoder) ──────────────────────────────
 
 typedef struct {

@@ -31,6 +31,14 @@ void         bw_cam_capture_return(camera_fb_t *fb);
 // taking the actual photo to avoid first-frame oddities.
 void bw_cam_discard_frames(int n, int delay_ms);
 
+// Shadow-lift exposure override — call after bw_cam_discard_frames() and
+// before bw_cam_capture().  Reads the AEC/AGC state that settled during the
+// discard window, then switches to manual exposure boosted so that the dark
+// content (LIGHTCHECK p30 percentile) reaches BW_SHADOW_TARGET_DN.
+// One-directional: shadow_factor is clamped ≥ 1.0, so bright/uniform scenes
+// (where p30 ≥ BW_SHADOW_TARGET_DN) get no boost and the settled AEC is kept.
+void bw_cam_apply_shadow_exposure(uint8_t p30);
+
 // Switch frame size / pixel format on the fly (for camera-server mode).
 esp_err_t bw_cam_set_format(pixformat_t fmt, framesize_t size);
 
