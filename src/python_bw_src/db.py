@@ -1,9 +1,9 @@
 """
 BirdWatch database schema — SQLAlchemy model + schema initialisation.
 
-Table: bw_photos  (database: birdwatch on 192.168.1.110)
+Table: bw_frames  (database: birdwatch on 192.168.1.110)
 
-Run directly to create the table and apply any missing column migrations:
+Run directly to create the table:
     python db.py
 
 Connection is configured via environment variables (see .env.example):
@@ -12,7 +12,7 @@ Connection is configured via environment variables (see .env.example):
 
 import os
 from dotenv import load_dotenv
-from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, text
+from sqlalchemy import create_engine, Column, Integer, String, DateTime
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.engine import URL
 from sqlalchemy.orm import DeclarativeBase, sessionmaker, scoped_session
@@ -37,22 +37,6 @@ class Base(DeclarativeBase):
     pass
 
 
-class BwPhoto(Base):
-    """One row per PIR-triggered capture cycle."""
-
-    __tablename__ = "bw_photos"
-
-    id         = Column(Integer, primary_key=True, autoincrement=True)
-    source     = Column(String)   # device identifier (e.g. BW_DEV)
-    date       = Column(DateTime) # server-side timestamp of upload
-    voltage    = Column(Float)    # battery voltage at capture (V)
-    debug      = Column(String)   # freeform debug / trigger info from firmware
-    filename   = Column(String)   # saved JPEG filename (no path)
-    brightdiff = Column(Float)    # brightness delta (legacy; firmware no longer sends this)
-    cc_label   = Column(String)   # cloud-check decision: "clouds" | "process"
-    cc_stage   = Column(String)   # cloud-check stage: WARMUP | DARK_OBJ | QUIET | SCENE_DRIFT | AMBIGUOUS
-    photo_mode = Column(String)   # camera exposure mode used for the JPEG: "NORMAL" | "LOWLIGHT"
-
 
 class BwFrame(Base):
     """One row per ESP capture cycle — new schema-less telemetry table.
@@ -73,32 +57,11 @@ class BwFrame(Base):
     # label and downloaded_at live inside meta["label"] / meta["downloaded_at"] — no column needed
 
 
-def _migrate_columns():
-    """Add new columns to an existing table without dropping data."""
-    migrations = [
-        ("cc_label",   "VARCHAR"),
-        ("cc_stage",   "VARCHAR"),
-        ("photo_mode", "VARCHAR"),
-    ]
-    with engine.connect() as conn:
-        for col_name, col_type in migrations:
-            try:
-                conn.execute(text(f"ALTER TABLE bw_photos ADD COLUMN {col_name} {col_type}"))
-                conn.commit()
-                print(f"bw_photos: added column '{col_name}'.")
-            except Exception:
-                pass  # column already exists
-
 
 def init_schema():
-    """Create tables if they do not exist, then apply any missing column migrations.
-
-    bw_photos — existing table, never altered (data preserved).
-    bw_frames  — new schema-less telemetry table, created on first run.
-    """
+    """Create bw_frames table if it does not exist."""
     Base.metadata.create_all(engine, checkfirst=True)
-    _migrate_columns()
-    print("schema verified / created (bw_photos + bw_frames).")
+    print("schema verified / created (bw_frames).")
 
 
 if __name__ == "__main__":
