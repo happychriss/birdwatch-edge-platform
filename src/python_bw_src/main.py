@@ -10,6 +10,7 @@ import threading
 import time
 from pathlib import Path
 from sqlalchemy.orm.attributes import flag_modified
+from sqlalchemy import text
 from db import BwPhoto, BwFrame, Session
 from display_spec import DISPLAY_SPEC, DISPLAY_ORDER
 
@@ -447,30 +448,35 @@ def browse_results():
 
 @app.route('/battery')
 def battery():
-    volt_rows = (session.query(BwPhoto.date, BwPhoto.voltage)
-                 .filter(BwPhoto.voltage.isnot(None), BwPhoto.voltage > 0)
-                 .order_by(BwPhoto.date.asc())
-                 .all())
-    photo_rows = (session.query(BwPhoto.date, BwPhoto.cc_label)
-                  .filter(BwPhoto.filename.isnot(None))
-                  .order_by(BwPhoto.date.asc())
-                  .all())
+    # bw_frames is the active table; battery lives in meta->>'battery'
+    volt_rows = session.execute(text("""
+        SELECT captured_at, (meta->>'battery')::float AS voltage
+        FROM bw_frames
+        WHERE meta->>'battery' IS NOT NULL
+          AND (meta->>'battery')::float > 0
+        ORDER BY captured_at ASC
+    """)).fetchall()
+    photo_rows = session.execute(text("""
+        SELECT captured_at, result AS cc_label
+        FROM bw_frames
+        WHERE filename IS NOT NULL
+        ORDER BY captured_at ASC
+    """)).fetchall()
 
     # Group by 3-hour windows: 00:00, 03:00, 06:00, 09:00, etc.
     volt_by_3h = defaultdict(list)
     for r in volt_rows:
-        if r.date:
-            # Round down to nearest 3-hour boundary
-            h3 = (r.date.hour // 3) * 3
-            bucket_time = r.date.replace(hour=h3, minute=0, second=0, microsecond=0)
+        if r.captured_at:
+            h3 = (r.captured_at.hour // 3) * 3
+            bucket_time = r.captured_at.replace(hour=h3, minute=0, second=0, microsecond=0)
             volt_by_3h[bucket_time].append(float(r.voltage))
 
     cloud_by_3h   = defaultdict(int)
     process_by_3h = defaultdict(int)
     for r in photo_rows:
-        if r.date:
-            h3 = (r.date.hour // 3) * 3
-            bucket_time = r.date.replace(hour=h3, minute=0, second=0, microsecond=0)
+        if r.captured_at:
+            h3 = (r.captured_at.hour // 3) * 3
+            bucket_time = r.captured_at.replace(hour=h3, minute=0, second=0, microsecond=0)
             if r.cc_label == 'clouds':
                 cloud_by_3h[bucket_time] += 1
             else:
@@ -504,8 +510,8 @@ def battery():
 
     daily = defaultdict(list)
     for r in volt_rows:
-        if r.date and r.voltage:
-            daily[r.date.strftime('%Y-%m-%d')].append(float(r.voltage))
+        if r.captured_at and r.voltage:
+            daily[r.captured_at.strftime('%Y-%m-%d')].append(float(r.voltage))
 
     daily_rows = [
         {'day': day, 'count': len(vs),
