@@ -108,38 +108,50 @@
 // GPIO5 pad latch holds HIGH during light sleep — TPS22918 stays on.
 #define BW_COOLDOWN_SLEEP_US    3000000ULL  // 3 s
 
-// ─── Camera light-mode switching ───────────────────────────────────────────
-// global_mean from the cloud-check QQVGA frame (0-255).  Three modes:
-//   BRIGHT    global_mean ≥ BW_BRIGHT_THRESHOLD  : full sun, protect sky from overexposure
-//   NORMAL    BW_LOWLIGHT_THRESHOLD ≤ mean < BW_BRIGHT_THRESHOLD : typical daylight / overcast
-//   LOWLIGHT  global_mean < BW_LOWLIGHT_THRESHOLD : dusk / dawn / dim interior
+// ─── Photo-bucket model labels (cloud-check only) ───────────────────────────
+// These thresholds are NO LONGER used to pick a capture profile (the camera now
+// uses a single ETTR-metered PHOTO profile — see below).  They survive solely
+// because cloud_check.c photo_bucket_for() still derives a model *label* from the
+// captured-JPEG global_mean.  Leave them until the illumination rework drops the
+// photo-bucket model entirely.
 #define BW_BRIGHT_PHOTO_THRESHOLD    160
 #define BW_LOWLIGHT_PHOTO_THRESHOLD   80
 
-// ─── Shadow-lift exposure control ──────────────────────────────────────────
-// After the PHOTO AEC settles, the integration time is boosted so that the
-// BW_SHADOW_PERCENTILE-th histogram percentile of the LIGHTCHECK frame reaches
-// BW_SHADOW_TARGET_DN.  The lift is one-directional: shadow_factor ≥ 1.0 so a
-// well-exposed or bright scene (frame 812 etc.) is never darkened.
-//
-// Why percentile, not mean/median: the mean/median is pulled toward the dominant
-// bright-sky patch.  The 30th percentile sits in the foreground (darker content)
-// regardless of where in the frame the sky is, making the rule scene-geometry-
-// independent.
-#define BW_SHADOW_TARGET_DN    80   // target brightness for the shadow percentile
-#define BW_SHADOW_PERCENTILE   30   // histogram percentile representing dark content
-#define BW_SHADOW_FACTOR_MAX    8   // max boost (~3 stops); genuine night/dusk hits this
-#define BW_AEC_VALUE_MAX     1200   // OV2640 practical AEC integration ceiling
-// Hysteresis deadband around each threshold.  A state only changes when gm
-// crosses the threshold by at least this margin, so a single noisy frame
-// cannot flip the profile.  Effective edges:
-//   NORMAL → LOWLIGHT : gm <  LO - H  (< 65)
-//   LOWLIGHT → NORMAL : gm >= LO + H  (>= 95)
-//   NORMAL → BRIGHT   : gm >= HI + H  (>= 175)
-//   BRIGHT → NORMAL   : gm <= HI - H  (<= 145)
-#define BW_PHOTO_BUCKET_HYSTERESIS    15
-// If the stored bucket is older than this, ignore it (stale overnight / first boot).
-#define BW_PHOTO_BUCKET_MAX_AGE_S   1800
+// ─── ETTR (expose-to-the-right) exposure control ───────────────────────────
+// Single unified PHOTO profile.  After the live AEC settles, we measure the
+// captured frame's luma histogram and LOCK manual AEC/AGC so the full-frame AEC
+// can no longer re-close on the bright sky window (the bug that crushed the
+// backlit foreground).  Exposure is driven up until a small fixed fraction of
+// pixels clips into the highlights — the bright sky absorbs the clip budget while
+// everything else (the railing/floor where birds sit) is pushed as bright as it
+// can go.  Histogram-driven, not scene-geometry-driven, so it is independent of
+// where the camera points or how it is framed.
+// Tuning note: these are STARTING values — telemetry (ettr_*, bracket_*) plus the
+// per-frame serial log expose every measured quantity, so refine on real frames.
+// Key constraint for the backlit balcony: the clip budget must be generous enough
+// to let the bright SKY blow out, otherwise ETTR protects the large sky region and
+// keeps the foreground dark (the original bug).  We therefore drive a foreground-
+// ceiling percentile (70th — above the foreground, below/into the sky boundary) up
+// to a bright target, allowing up to ~30% of the frame (the sky) to clip.
+#define BW_ETTR_HI_TARGET       220  // target DN for the foreground-ceiling percentile
+#define BW_ETTR_HI_PERCENTILE    70  // percentile driven to the target (foreground ceiling)
+#define BW_ETTR_CLIP_DN         250  // pixels ≥ this count as clipped highlights
+#define BW_ETTR_CLIP_BUDGET_PM  300  // allowed clipped fraction, per-mille (300 = 30%, ~the sky)
+#define BW_ETTR_RATIO_MIN_PCT    25  // min exposure multiplier, percent (0.25× — protect highlights)
+#define BW_ETTR_RATIO_MAX_PCT   800  // max exposure multiplier, percent (8× — lift deep shadow)
+#define BW_ETTR_ITERS             2  // metering iterations (probe → correct → [re-probe])
+#define BW_AEC_VALUE_MAX       1200  // OV2640 practical AEC integration ceiling
+
+// ─── Exposure bracketing ───────────────────────────────────────────────────
+// Pigeons linger → no time pressure → hedge against ETTR mis-metering by
+// capturing a few frames around the ETTR exposure E0 and keeping the best one.
+// Steps are exposure multipliers in percent of E0.  100 (1.0×) is the ETTR frame
+// itself and is reused, not recaptured.  The winner is the frame whose low-mid
+// foreground percentile lands closest to target without busting the clip budget.
+#define BW_BRACKET_N              3   // number of bracket frames (incl. the 1.0× ETTR frame)
+#define BW_BRACKET_STOPS_PCT  { 50, 100, 200 }   // E0 multipliers, percent: -1 stop / 0 / +1 stop
+#define BW_BRACKET_FG_PERCENTILE 40  // percentile used as the "foreground" proxy when scoring
+#define BW_BRACKET_FG_TARGET    110  // target DN for that foreground percentile
 
 // ─── Cloud-check chroma thresholds ─────────────────────────────────────────
 // Squared chroma distance (ΔU² + ΔV²) thresholds — avoids sqrt in inner loops.
@@ -155,8 +167,10 @@
 // Auto AWB misidentifies the plant green as the neutral reference and fails
 // to correct the OV2640's native green Bayer bias — making the cast worse.
 // Fixed presets (Sunny/Cloudy) apply a known colour matrix and ignore scene
-// content, which is more predictable for a fixed camera installation.
-#define BW_CAM_AWB_GAIN  1
+// content, which is more predictable for a fixed camera installation — and keep
+// the background colour constant frame-to-frame so the PIR-vs-RTC chroma diff
+// only fires on a real new object, not on an AWB re-balance.
+#define BW_CAM_AWB_GAIN  0
 
 // ─── Global mode codes (matches python server reply field) ─────────────────
 typedef enum {

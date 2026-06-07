@@ -150,9 +150,6 @@ static int solar_utc_minutes(int doy, bool is_sunset)
 // Formatted RTC and next-wakeup times for telemetry (populated by rtc_compute_next()).
 static char   s_rtc_now_str[32]    = "?";
 static char   s_next_wakeup_str[32] = "?";
-// Current-cycle UTC epoch — set by rtc_compute_next(), used by the exposure
-// bucket hysteresis staleness guard in run_normal_cycle().
-static time_t s_cycle_utc = 0;
 
 // Reads DS3231, computes next wakeup UTC clamped to daylight, logs the
 // daytime/night decision, populates s_next_wakeup_str.  Returns UTC epoch
@@ -169,7 +166,6 @@ static time_t rtc_compute_next(i2c_dev_t *rtc)
     tzset();
     now_local.tm_isdst = -1;   // DS3231 has no DST state; let mktime determine from date
     time_t now_utc = mktime(&now_local);
-    s_cycle_utc = now_utc;   // expose to run_normal_cycle() for bucket hysteresis
     if (now_utc <= 0) {
         ESP_LOGE(TAG, "DS3231 time not set");
         return 0;
@@ -298,112 +294,11 @@ static void run_normal_cycle(void)
     float battery_v = bw_adc_read_battery_voltage();
     ESP_LOGI(TAG, "battery=%.3fV", battery_v);
 
-    // ── Phase 1: Metering shot — LIGHTCHECK QQVGA → global_mean → photo_bucket ─
-    // A cheap QQVGA grayscale frame is captured to determine scene brightness
-    // before the full JPEG capture.  This avoids adapting the JPEG exposure from
-    // a JPEG that hasn't been taken yet.
-    bw_cam_mode_t photo_mode    = BW_CAM_MODE_PHOTO;   // default: NORMAL
-    uint8_t gm_lightcheck       = 128;
-    uint8_t p30_lightcheck      = 0;   // BW_SHADOW_PERCENTILE-th percentile for shadow-lift
-
-    if (bw_cam_init(BW_CAM_MODE_LIGHTCHECK) == ESP_OK) {
-        camera_fb_t *lc = bw_cam_capture();
-        if (lc && lc->len > 0) {
-            // Median luma: build a 256-bin histogram, walk to the 50th-percentile
-            // value.  The median ignores bright-sky highlight pixels (which can
-            // dominate the mean in this backlit balcony scene) and is therefore
-            // a better proxy for the foreground/subject brightness.
-            uint32_t hist[256] = {0};
-            for (size_t i = 0; i < lc->len; i++) hist[lc->buf[i]]++;
-            size_t half = lc->len / 2, cum = 0;
-            for (int b = 0; b < 256; b++) {
-                cum += hist[b];
-                if (cum >= half) { gm_lightcheck = (uint8_t)b; break; }
-            }
-            // Shadow percentile: walk to BW_SHADOW_PERCENTILE (30th) of the histogram.
-            // Represents the dark content of the scene; used by shadow-lift to boost
-            // the photo exposure independently of where the bright sky sits in the frame.
-            size_t p30_thresh = lc->len * BW_SHADOW_PERCENTILE / 100;
-            cum = 0;
-            for (int b = 0; b < 256; b++) {
-                cum += hist[b];
-                if (cum >= p30_thresh) { p30_lightcheck = (uint8_t)b; break; }
-            }
-        }
-        if (lc) bw_cam_capture_return(lc);
-        bw_cam_deinit();
-    } else {
-        ESP_LOGW(TAG, "LIGHTCHECK init failed — default NORMAL exposure");
-    }
-
-    // ── Exposure bucket selection with hysteresis ─────────────────────────────
-    // Load the bucket chosen on the previous cycle plus its timestamp.
-    // If the stored state is recent (< BW_PHOTO_BUCKET_MAX_AGE_S), apply
-    // a deadband: the bucket only changes when gm clearly crosses the
-    // threshold, preventing frame-to-frame flicker near the boundary.
-    uint8_t prev_bucket_byte = 1;   // 0=LOWLIGHT, 1=NORMAL, 2=BRIGHT; default NORMAL
-    uint32_t prev_bkt_ts     = 0;
-    {
-        nvs_handle_t h;
-        if (nvs_open("bw_meta", NVS_READONLY, &h) == ESP_OK) {
-            nvs_get_u8(h,  "cam_bucket", &prev_bucket_byte);
-            nvs_get_u32(h, "cam_bkt_ts", &prev_bkt_ts);
-            nvs_close(h);
-        }
-    }
-    bool prev_bkt_valid = (s_cycle_utc > 0 && prev_bkt_ts > 0 &&
-                           (uint32_t)s_cycle_utc >= prev_bkt_ts &&
-                           (uint32_t)s_cycle_utc - prev_bkt_ts < BW_PHOTO_BUCKET_MAX_AGE_S);
-
-    if (prev_bkt_valid) {
-        switch (prev_bucket_byte) {
-            case 0:  // was LOWLIGHT: stay until gm is clearly above the boundary
-                photo_mode = (gm_lightcheck >= BW_LOWLIGHT_PHOTO_THRESHOLD + BW_PHOTO_BUCKET_HYSTERESIS)
-                             ? BW_CAM_MODE_PHOTO : BW_CAM_MODE_PHOTO_LOWLIGHT;
-                break;
-            case 2:  // was BRIGHT: stay until gm is clearly below the boundary
-                photo_mode = (gm_lightcheck <= BW_BRIGHT_PHOTO_THRESHOLD - BW_PHOTO_BUCKET_HYSTERESIS)
-                             ? BW_CAM_MODE_PHOTO : BW_CAM_MODE_PHOTO_BRIGHT;
-                break;
-            default: // was NORMAL: only leave on a clear crossing
-                if      (gm_lightcheck >= BW_BRIGHT_PHOTO_THRESHOLD   + BW_PHOTO_BUCKET_HYSTERESIS)
-                    photo_mode = BW_CAM_MODE_PHOTO_BRIGHT;
-                else if (gm_lightcheck <  BW_LOWLIGHT_PHOTO_THRESHOLD - BW_PHOTO_BUCKET_HYSTERESIS)
-                    photo_mode = BW_CAM_MODE_PHOTO_LOWLIGHT;
-                else
-                    photo_mode = BW_CAM_MODE_PHOTO;
-                break;
-        }
-    } else {
-        // No valid prior (first boot, fresh flash, or state too old): plain thresholds.
-        if      (gm_lightcheck >= BW_BRIGHT_PHOTO_THRESHOLD)   photo_mode = BW_CAM_MODE_PHOTO_BRIGHT;
-        else if (gm_lightcheck >= BW_LOWLIGHT_PHOTO_THRESHOLD) photo_mode = BW_CAM_MODE_PHOTO;
-        else                                                    photo_mode = BW_CAM_MODE_PHOTO_LOWLIGHT;
-    }
-
-    // Persist the chosen bucket so the next cycle can apply hysteresis.
-    {
-        uint8_t new_byte = (photo_mode == BW_CAM_MODE_PHOTO_BRIGHT)   ? 2 :
-                           (photo_mode == BW_CAM_MODE_PHOTO_LOWLIGHT) ? 0 : 1;
-        nvs_handle_t h;
-        if (nvs_open("bw_meta", NVS_READWRITE, &h) == ESP_OK) {
-            nvs_set_u8(h,  "cam_bucket", new_byte);
-            nvs_set_u32(h, "cam_bkt_ts", (uint32_t)s_cycle_utc);
-            nvs_commit(h);
-            nvs_close(h);
-        }
-    }
-
-    const char *photo_mode_str = (photo_mode == BW_CAM_MODE_PHOTO_BRIGHT)   ? "BRIGHT"   :
-                                 (photo_mode == BW_CAM_MODE_PHOTO_LOWLIGHT) ? "LOWLIGHT" : "NORMAL";
-    ESP_LOGI(TAG, "metering: median=%u prev=%s(%s) → photo_mode=%s",
-             gm_lightcheck,
-             prev_bkt_valid ? (prev_bucket_byte==0?"LOWLIGHT":prev_bucket_byte==2?"BRIGHT":"NORMAL") : "none",
-             prev_bkt_valid ? "valid" : "stale",
-             photo_mode_str);
-
-    // ── Phase 2: JPEG capture at the selected exposure profile ────────────────
-    if (bw_cam_init(photo_mode) != ESP_OK) {
+    // ── Phase 1: Single PHOTO init + AEC settle ───────────────────────────────
+    // One unified profile (fixed daylight WB).  The live AEC is allowed to settle
+    // on the real SXGA stream; ETTR then locks manual exposure so the full-frame
+    // AEC cannot re-close on the bright sky and crush the backlit foreground.
+    if (bw_cam_init(BW_CAM_MODE_PHOTO) != ESP_OK) {
         ESP_LOGE(TAG, "camera init failed");
         bw_diag_push("CAM_INIT_FAIL");
         bw_blink(BW_BLINK_ERR_CAM_INIT);
@@ -411,66 +306,122 @@ static void run_normal_cycle(void)
         return;
     }
     bw_cam_discard_frames(6, 100);   // AEC settle: ~600 ms at 16 MHz SXGA
-    bw_cam_apply_shadow_exposure(p30_lightcheck);   // boost if p30 < BW_SHADOW_TARGET_DN
-    camera_fb_t *fb = bw_cam_capture();
-    if (!fb) {
-        ESP_LOGE(TAG, "no frame captured — aborting cycle");
-        bw_diag_push("CAM_CAPTURE_FAIL");
-        bw_blink(BW_BLINK_ERR_CAM_CAPTURE);
-        bw_cam_deinit();
-        bw_adc_deinit();
-        return;
-    }
 
-    // ── Phase 3: On-device JPEG decode → per-tile YUV means ──────────────────
-    // tile arrays live on the stack (300 B each — fine for ESP32-S3's 8 KB task stack)
-    uint8_t tile_y[CC_NUM_TILES], tile_u[CC_NUM_TILES], tile_v[CC_NUM_TILES];
-    bool decode_ok = (bw_cam_jpeg_decode_to_tile_means(
-        fb->buf, fb->len, tile_y, tile_u, tile_v, CC_TILES_X, CC_TILES_Y) == ESP_OK);
-    if (!decode_ok) {
-        ESP_LOGW(TAG, "JPEG decode failed — treating frame as process (safety)");
-    }
+    // ── Phase 2: ETTR meter + lock ────────────────────────────────────────────
+    uint16_t ettr_aec = 0;
+    uint8_t  ettr_gain = 0;
+    bool ettr_ok = (bw_cam_meter_ettr_lock(&ettr_aec, &ettr_gain) == ESP_OK);
+    uint32_t E0 = (uint32_t)ettr_aec * ((uint32_t)ettr_gain + 1u);
 
-    // ── Phase 4: Cloud-check pipeline ─────────────────────────────────────────
+    // ── Phase 3: Exposure bracket → keep the best frame ───────────────────────
+    // Capture BW_BRACKET_N frames at E0 × {steps}, decode each to per-tile YUV
+    // means + a luma histogram, and keep the one whose foreground percentile is
+    // closest to target without busting the highlight-clip budget.  The winner's
+    // JPEG is copied to PSRAM (we can't hold the fb across the next capture).
+    static const int bracket_pct[BW_BRACKET_N] = BW_BRACKET_STOPS_PCT;
+
+    // Large buffers are static (BSS, not stack) to stay well clear of the main
+    // task stack budget — this cycle is single-threaded so reuse is safe.
+    static uint8_t best_y[CC_NUM_TILES], best_u[CC_NUM_TILES], best_v[CC_NUM_TILES];
+    static uint8_t tile_y[CC_NUM_TILES], tile_u[CC_NUM_TILES], tile_v[CC_NUM_TILES];
+    static uint32_t hist[256];
+
+    uint8_t *best_img = NULL;   size_t best_len = 0;
+    uint8_t *fallback_img = NULL; size_t fallback_len = 0;
+    bool     best_valid = false;
+    int      best_idx = -1, best_score = (1 << 30);
+    uint8_t  best_fg = 0;
+
+    for (int i = 0; i < BW_BRACKET_N; i++) {
+        if (ettr_ok && E0 > 0) {
+            uint16_t a; uint8_t g;
+            uint32_t Ei = (uint32_t)((uint64_t)E0 * (uint32_t)bracket_pct[i] / 100u);
+            bw_cam_split_exposure(Ei, &a, &g);
+            bw_cam_set_exposure_manual(a, g);
+        }
+        camera_fb_t *fb = bw_cam_capture();
+        if (!fb) { ESP_LOGW(TAG, "bracket %d: capture failed", i); continue; }
+
+        memset(hist, 0, sizeof hist);
+        bool ok = (bw_cam_jpeg_decode_to_tile_means(
+            fb->buf, fb->len, tile_y, tile_u, tile_v, CC_TILES_X, CC_TILES_Y, hist) == ESP_OK);
+        if (!ok) {
+            ESP_LOGW(TAG, "bracket %d: decode failed", i);
+            if (!best_valid && !fallback_img) {   // keep one frame to upload as CAM_ERR
+                fallback_img = heap_caps_malloc(fb->len, MALLOC_CAP_SPIRAM);
+                if (fallback_img) { memcpy(fallback_img, fb->buf, fb->len); fallback_len = fb->len; }
+            }
+            bw_cam_capture_return(fb);
+            continue;
+        }
+
+        uint32_t total = 0;
+        for (int b = 0; b < 256; b++) total += hist[b];
+        uint8_t  fg      = bw_cam_hist_percentile(hist, total, BW_BRACKET_FG_PERCENTILE);
+        uint32_t clip    = bw_cam_hist_clip_count(hist, BW_ETTR_CLIP_DN);
+        uint32_t clip_pm = total ? (uint32_t)((uint64_t)clip * 1000u / total) : 0;
+
+        int score = (int)fg - BW_BRACKET_FG_TARGET; if (score < 0) score = -score;
+        if (clip_pm > BW_ETTR_CLIP_BUDGET_PM) score += (int)(clip_pm - BW_ETTR_CLIP_BUDGET_PM);
+
+        ESP_LOGI(TAG, "bracket %d (%d%%): fg_p%d=%u clip=%u%%o score=%d",
+                 i, bracket_pct[i], BW_BRACKET_FG_PERCENTILE, fg, (unsigned)clip_pm, score);
+
+        if (score < best_score) {
+            uint8_t *cp = heap_caps_malloc(fb->len, MALLOC_CAP_SPIRAM);
+            if (cp) {
+                memcpy(cp, fb->buf, fb->len);
+                if (best_img) free(best_img);
+                best_img = cp; best_len = fb->len;
+                best_score = score; best_idx = i; best_fg = fg;
+                memcpy(best_y, tile_y, sizeof best_y);
+                memcpy(best_u, tile_u, sizeof best_u);
+                memcpy(best_v, tile_v, sizeof best_v);
+                best_valid = true;
+            } else {
+                ESP_LOGE(TAG, "bracket %d: PSRAM copy failed (%u B)", i, (unsigned)fb->len);
+            }
+        }
+        bw_cam_capture_return(fb);
+    }
+    bw_cam_deinit();
+
+    // ── Phase 4: Cloud-check on the chosen frame ──────────────────────────────
     bw_cc_result_t cc;
-    if (decode_ok) {
+    uint8_t *img;
+    size_t   img_len;
+    if (best_valid) {
+        if (fallback_img) free(fallback_img);
+        img = best_img; img_len = best_len;
         bw_cc_set_source(s_wakeup_source == BW_WAKE_RTC);
-        bw_cc_assess(tile_y, tile_u, tile_v, &cc);
-    } else {
-        // Decode failed: skip the model, upload unconditionally (safety bias)
+        bw_cc_assess(best_y, best_u, best_v, &cc);
+        // ETTR / bracket diagnostics (added after assess, which resets telemetry)
+        bw_tele_i("ettr_aec",       (long)ettr_aec);
+        bw_tele_i("ettr_gain",      (long)ettr_gain);
+        bw_tele_i("bracket_n",      BW_BRACKET_N);
+        bw_tele_i("bracket_chosen", best_idx);
+        bw_tele_i("bracket_fg_p",   (long)best_fg);
+    } else if (fallback_img) {
+        // No frame decoded but we captured one — upload it (safety bias).
+        img = fallback_img; img_len = fallback_len;
+        ESP_LOGW(TAG, "all bracket decodes failed — uploading frame as CAM_ERR");
         bw_tele_reset();
         bw_tele_s("result", "process");
         bw_tele_s("stage",  "CAM_ERR");
-        bw_tele_s("photo_bucket", photo_mode_str);
-        bw_tele_i("global_mean", (long)gm_lightcheck);
-        bw_tele_i("shadow_p30", (long)p30_lightcheck);
         strcpy(cc.label, "process");
         strcpy(cc.stage, "CAM_ERR");
-        strncpy(cc.photo_bucket, photo_mode_str, sizeof(cc.photo_bucket) - 1);
-        cc.global_mean = gm_lightcheck;
-    }
-    ESP_LOGI(TAG, "cloud-check: bucket=%s gm=%u → %s (%s)",
-             cc.photo_bucket, cc.global_mean, cc.label, cc.stage);
-
-    // ── Phase 5: Copy JPEG to PSRAM, stop camera ──────────────────────────────
-    // All frames are uploaded regardless of cloud-check result so that the
-    // server's Python backfill can replay the background model in exact
-    // chronological order.  The result/stage fields in the telemetry metadata
-    // let the server display and filter frames as needed.
-    size_t   img_len = fb->len;
-    uint8_t *img     = heap_caps_malloc(img_len, MALLOC_CAP_SPIRAM);
-    if (!img) {
-        ESP_LOGE(TAG, "PSRAM alloc failed (%u B) — aborting cycle", (unsigned)img_len);
-        bw_diag_push("CAM_ALLOC_FAIL");
-        bw_blink(BW_BLINK_ERR_CAM_ALLOC);
-        bw_cam_capture_return(fb);
-        bw_cam_deinit();
+        strncpy(cc.photo_bucket, "NORMAL", sizeof(cc.photo_bucket) - 1);
+        cc.global_mean = 0;
+    } else {
+        ESP_LOGE(TAG, "no usable frame captured — aborting cycle");
+        bw_diag_push("CAM_CAPTURE_FAIL");
+        bw_blink(BW_BLINK_ERR_CAM_CAPTURE);
         bw_adc_deinit();
         return;
     }
-    memcpy(img, fb->buf, img_len);
-    bw_cam_capture_return(fb);
-    bw_cam_deinit();
+    ESP_LOGI(TAG, "cloud-check: bucket=%s gm=%u → %s (%s)  [bracket %d/%d, ettr aec=%u gain=%u]",
+             cc.photo_bucket, cc.global_mean, cc.label, cc.stage,
+             best_idx, BW_BRACKET_N, ettr_aec, ettr_gain);
 
     bw_blink(BW_BLINK_CAM_OK);
 
