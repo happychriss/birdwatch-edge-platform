@@ -242,7 +242,9 @@ void bw_cam_split_exposure(uint32_t E, uint16_t *aec_out, uint8_t *gain_out)
         aec = BW_AEC_VALUE_MAX;
         uint32_t need = (E + BW_AEC_VALUE_MAX - 1u) / (uint32_t)BW_AEC_VALUE_MAX;
         gain = (need > 1u) ? (uint8_t)(need - 1u) : 0u;
-        if (gain > 30u) gain = 30u;
+        // Cap well below the table max (30 ≈ 32×): a max-gain JPEG overflows the
+        // frame buffer (FB-OVF).  Better a slightly dark frame than no frame.
+        if (gain > BW_AGC_GAIN_IDX_MAX) gain = BW_AGC_GAIN_IDX_MAX;
     }
     if (aec_out)  *aec_out  = aec;
     if (gain_out) *gain_out = gain;
@@ -323,16 +325,26 @@ esp_err_t bw_cam_meter_ettr_lock(uint16_t *aec0, uint8_t *gain0)
 
     for (int it = 0; it < BW_ETTR_ITERS; it++) {
         camera_fb_t *fb = esp_camera_fb_get();
-        if (!fb) { ESP_LOGW(TAG, "ettr: probe capture failed (it=%d)", it); return ESP_FAIL; }
+        if (!fb) { ESP_LOGW(TAG, "ettr: probe capture failed (it=%d)", it); goto keep_auto; }
         uint32_t hist[256] = {0};
         esp_err_t derr = bw_cam_jpeg_decode_to_tile_means(
             fb->buf, fb->len, ty, tu, tv, CC_TILES_X, CC_TILES_Y, hist);
         esp_camera_fb_return(fb);
-        if (derr != ESP_OK) { ESP_LOGW(TAG, "ettr: probe decode failed (%d)", (int)derr); return ESP_FAIL; }
+        if (derr != ESP_OK) { ESP_LOGW(TAG, "ettr: probe decode failed (%d)", (int)derr); goto keep_auto; }
 
         uint32_t total = 0;
         for (int b = 0; b < 256; b++) total += hist[b];
-        if (total == 0) return ESP_FAIL;
+        if (total == 0) goto keep_auto;
+
+        // Night / no-headroom guard: if even the brightest content is dim there is
+        // no highlight to expose toward — lifting would only crank gain into the
+        // FB-OVF regime.  Keep the settled auto exposure (cloud-check labels NIGHT).
+        uint8_t headroom = bw_cam_hist_percentile(hist, total, BW_ETTR_HEADROOM_PCT);
+        if (headroom < BW_ETTR_HEADROOM_DN) {
+            ESP_LOGI(TAG, "ettr: no headroom (p%d=%u < %d) — night/flat, keeping auto exposure",
+                     BW_ETTR_HEADROOM_PCT, headroom, BW_ETTR_HEADROOM_DN);
+            goto keep_auto;
+        }
 
         uint8_t  p_hi    = bw_cam_hist_percentile(hist, total, BW_ETTR_HI_PERCENTILE);
         uint32_t clip    = bw_cam_hist_clip_count(hist, BW_ETTR_CLIP_DN);
@@ -354,8 +366,8 @@ esp_err_t bw_cam_meter_ettr_lock(uint16_t *aec0, uint8_t *gain0)
         bw_cam_split_exposure(E_new, &new_aec, &new_gain);
         bw_cam_set_exposure_manual(new_aec, new_gain);
 
-        ESP_LOGI(TAG, "ettr it=%d: p_hi=%u clip=%u%%o ratio=%.2f E %u->%u → aec=%u gain_idx=%u",
-                 it, p_hi, (unsigned)clip_pm, (double)ratio,
+        ESP_LOGI(TAG, "ettr it=%d: p_hi=%u clip=%u%%o headroom=%u ratio=%.2f E %u->%u → aec=%u gain_idx=%u",
+                 it, p_hi, (unsigned)clip_pm, headroom, (double)ratio,
                  (unsigned)E_cur, (unsigned)E_new, new_aec, new_gain);
 
         cur_aec = new_aec; cur_gain = new_gain;
@@ -367,6 +379,13 @@ esp_err_t bw_cam_meter_ettr_lock(uint16_t *aec0, uint8_t *gain0)
     if (aec0)  *aec0  = cur_aec;
     if (gain0) *gain0 = cur_gain;
     return ESP_OK;
+
+keep_auto:
+    // Restore auto AEC/AGC so the caller falls back to a known-good exposure
+    // (the settled auto exposure yields a valid frame even when ETTR bails).
+    s->set_exposure_ctrl(s, 1);
+    s->set_gain_ctrl(s, 1);
+    return ESP_FAIL;
 }
 
 // ── JPEG → tile YUV means (TJpgDec ROM decoder) ──────────────────────────────

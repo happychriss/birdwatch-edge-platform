@@ -142,6 +142,20 @@
 #define BW_ETTR_ITERS             2  // metering iterations (probe → correct → [re-probe])
 #define BW_AEC_VALUE_MAX       1200  // OV2640 practical AEC integration ceiling
 
+// Manual AGC gain cap.  The OV2640 gain table tops out at index 30 (≈32×); a
+// max-gain frame of a dark scene is so noisy its JPEG overflows the 256 KB frame
+// buffer (FB-OVF / NO-EOI → capture wedges).  Cap the manual gain well below that
+// and lean on integration time instead.  ≈8–10× — raise only after on-device test.
+#define BW_AGC_GAIN_IDX_MAX       8
+
+// Night / no-headroom guard.  ETTR only makes sense when the scene has a bright
+// region to expose toward (the sky).  If the brightest content (BW_ETTR_HEADROOM_PCT
+// percentile) is below BW_ETTR_HEADROOM_DN, the scene is uniformly dim (night) —
+// skip the lift and keep the settled auto exposure (which yields a valid, if dark,
+// frame that cloud-check then labels NIGHT).  Avoids cranking gain into FB-OVF.
+#define BW_ETTR_HEADROOM_DN      90
+#define BW_ETTR_HEADROOM_PCT     99
+
 // ─── Exposure bracketing ───────────────────────────────────────────────────
 // Pigeons linger → no time pressure → hedge against ETTR mis-metering by
 // capturing a few frames around the ETTR exposure E0 and keeping the best one.
