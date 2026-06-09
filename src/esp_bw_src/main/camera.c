@@ -457,6 +457,7 @@ typedef struct {
     uint16_t img_w, img_h;
     tile_acc_t *acc;
     uint32_t   *hist;   // optional 256-bin luma histogram (NULL to skip)
+    uint32_t   blocks;  // MCU-block counter — drives the periodic idle-task yield
 } jpeg_ctx_t;
 
 static UINT jpeg_infunc(JDEC *jd, BYTE *buf, UINT nbytes)
@@ -498,6 +499,11 @@ static UINT jpeg_outfunc(JDEC *jd, void *bitmap, JRECT *rect)
             }
         }
     }
+    // Full-res SXGA decode is a ~2.7 s tight CPU loop with no blocking call, which
+    // starves the IDLE0 task and trips the Task Watchdog (TWDT, 5 s).  Yield one
+    // tick every 1024 MCU blocks (≈7 yields per frame) so IDLE0 runs and the TWDT
+    // stays fed.  Costs ~tens of ms total; tile means / histogram are unaffected.
+    if ((++ctx->blocks & 0x3FFu) == 0) vTaskDelay(1);
     return 1;   // continue
 }
 
@@ -520,6 +526,7 @@ esp_err_t bw_cam_jpeg_decode_to_tile_means(
         .grid_w = grid_w, .grid_h = grid_h,
         .acc = acc,
         .hist = hist256,
+        .blocks = 0,
     };
 
     static uint8_t s_jd_pool[4096];   // TJpgDec work area — 3100 B min, 4096 B safe
