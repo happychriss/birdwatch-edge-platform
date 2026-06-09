@@ -133,7 +133,7 @@
 // keeps the foreground dark (the original bug).  We therefore drive a foreground-
 // ceiling percentile (70th — above the foreground, below/into the sky boundary) up
 // to a bright target, allowing up to ~30% of the frame (the sky) to clip.
-#define BW_ETTR_HI_TARGET       220  // target DN for the foreground-ceiling percentile
+#define BW_ETTR_HI_TARGET       130  // target DN for the foreground-ceiling percentile
 #define BW_ETTR_HI_PERCENTILE    70  // percentile driven to the target (foreground ceiling)
 #define BW_ETTR_CLIP_DN         250  // pixels ≥ this count as clipped highlights
 #define BW_ETTR_CLIP_BUDGET_PM  300  // allowed clipped fraction, per-mille (300 = 30%, ~the sky)
