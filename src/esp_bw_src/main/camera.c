@@ -305,6 +305,57 @@ uint32_t bw_cam_hist_clip_count(const uint32_t hist[256], int from_dn)
     return c;
 }
 
+esp_err_t bw_cam_awb_settle_and_lock(int n_frames, uint8_t *r_out, uint8_t *g_out, uint8_t *b_out)
+{
+    sensor_t *s = esp_camera_sensor_get();
+    if (!s) return ESP_FAIL;
+
+    // Enable AWB auto so the algorithm adapts to scene colour temperature.
+    // DSP bank: CTRL1 bit3 = AWB algorithm, bit2 = AWB gain application.
+    // wb_mode=0 clears the manual-preset bit (0xC7 bit6) so the algorithm runs.
+    s->set_whitebal(s, 1);
+    s->set_awb_gain(s, 1);
+    s->set_wb_mode(s, 0);
+
+    // Flush n_frames — each full SXGA JPEG gives the AWB algorithm real scene data.
+    for (int i = 0; i < n_frames; i++) {
+        camera_fb_t *fb = esp_camera_fb_get();
+        if (fb) esp_camera_fb_return(fb);
+    }
+
+    // Read the settled per-channel gains from DSP bank 0xCC/0xCD/0xCE.
+    // get_reg encodes bank in bit 8: 0x00XX = DSP bank, 0x01XX = sensor bank.
+    int r = s->get_reg(s, 0x00CC, 0xFF);
+    int g = s->get_reg(s, 0x00CD, 0xFF);
+    int b = s->get_reg(s, 0x00CE, 0xFF);
+
+    if (r < 0 || g < 0 || b < 0) {
+        ESP_LOGW(TAG, "awb lock: readback failed (r=%d g=%d b=%d) — restoring Sunny preset", r, g, b);
+        s->set_whitebal(s, 0);
+        s->set_awb_gain(s, 0);
+        s->set_wb_mode(s, 1);   // Sunny fallback
+        return ESP_FAIL;
+    }
+
+    // Lock: set the manual-WB bit (0xC7 bit6) and write the settled values back
+    // explicitly so they are held even if residual AWB register activity occurs.
+    s->set_reg(s, 0x00C7, 0x40, 0x40);   // manual WB mode
+    s->set_reg(s, 0x00CC, 0xFF, r);
+    s->set_reg(s, 0x00CD, 0xFF, g);
+    s->set_reg(s, 0x00CE, 0xFF, b);
+    // Stop the algorithm — the locked values in 0xCC/0xCD/0xCE remain applied
+    // because AWB gain (CTRL1 bit2) stays enabled.
+    s->set_whitebal(s, 0);
+
+    ESP_LOGI(TAG, "awb lock: R=0x%02x G=0x%02x B=0x%02x (after %d frame(s))",
+             (unsigned)r, (unsigned)g, (unsigned)b, n_frames);
+
+    if (r_out) *r_out = (uint8_t)r;
+    if (g_out) *g_out = (uint8_t)g;
+    if (b_out) *b_out = (uint8_t)b;
+    return ESP_OK;
+}
+
 esp_err_t bw_cam_meter_ettr_lock(uint16_t *aec0, uint8_t *gain0)
 {
     sensor_t *s = esp_camera_sensor_get();

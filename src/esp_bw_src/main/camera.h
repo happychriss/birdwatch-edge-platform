@@ -47,6 +47,15 @@ void bw_cam_split_exposure(uint32_t E, uint16_t *aec_out, uint8_t *gain_out);
 // Returns false if there is no sensor or the settled AEC is 0 (not yet running).
 bool bw_cam_get_settled_exposure(uint16_t *aec_out, uint8_t *gain_out);
 
+// AWB settle + lock.  Call after bw_cam_init(PHOTO) + bw_cam_discard_frames().
+// Enables AWB auto, flushes n_frames full-res JPEGs so the algorithm adapts to
+// scene colour temperature, then reads back the settled per-channel gains from
+// DSP registers 0xCC/0xCD/0xCE, writes them as a locked manual preset, and stops
+// the AWB algorithm.  All subsequent captures share the same locked WB.
+// r_out/g_out/b_out receive the gain bytes (for telemetry); pass NULL to skip.
+// Returns ESP_OK, or ESP_FAIL if register readback failed (Sunny preset restored).
+esp_err_t bw_cam_awb_settle_and_lock(int n_frames, uint8_t *r_out, uint8_t *g_out, uint8_t *b_out);
+
 // ETTR meter + lock.  Call after bw_cam_init(PHOTO) + bw_cam_discard_frames().
 // Captures a probe JPEG, measures its luma histogram, and locks manual AEC/AGC so
 // that the BW_ETTR_HI_PERCENTILE-th percentile sits near BW_ETTR_HI_TARGET with at

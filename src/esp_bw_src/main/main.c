@@ -307,6 +307,14 @@ static void run_normal_cycle(void)
     }
     bw_cam_discard_frames(6, 100);   // AEC settle: ~600 ms at 16 MHz SXGA
 
+    // ── Phase 1b: AWB settle + lock ───────────────────────────────────────────
+    // Enable AWB auto for 2 full-res frames so the algorithm adapts to scene
+    // colour temperature (sun/cloud/shade), then freeze the settled per-channel
+    // gains as a manual lock.  All bracket captures share these identical gains,
+    // so the PIR-vs-RTC chroma diff is not confounded by per-frame AWB drift.
+    uint8_t awb_r = 0, awb_g = 0, awb_b = 0;
+    bw_cam_awb_settle_and_lock(2, &awb_r, &awb_g, &awb_b);
+
     // ── Phase 2: ETTR meter + lock ────────────────────────────────────────────
     uint16_t ettr_aec = 0;
     uint8_t  ettr_gain = 0;
@@ -401,6 +409,9 @@ static void run_normal_cycle(void)
         bw_tele_i("bracket_n",      BW_BRACKET_N);
         bw_tele_i("bracket_chosen", best_idx);
         bw_tele_i("bracket_fg_p",   (long)best_fg);
+        bw_tele_i("awb_r",          (long)awb_r);
+        bw_tele_i("awb_g",          (long)awb_g);
+        bw_tele_i("awb_b",          (long)awb_b);
     } else if (fallback_img) {
         // No frame decoded but we captured one — upload it (safety bias).
         img = fallback_img; img_len = fallback_len;
