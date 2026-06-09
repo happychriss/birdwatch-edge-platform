@@ -331,6 +331,26 @@ esp_err_t bw_cam_awb_settle_and_lock(int n_frames, uint8_t *r_out, uint8_t *g_ou
         return ESP_FAIL;
     }
 
+    // Only keep the lock when AWB found a real DIFFERENTIAL colour correction.
+    // A flat reading (R≈G≈B, e.g. 0x80/0x80/0x80) means the scene was too dim for
+    // AWB to find a white reference — it just boosted every channel uniformly,
+    // which adds no colour benefit but amplifies sensor noise and overflows the
+    // SXGA JPEG buffer when stacked on high night-AGC / ETTR exposure.  Revert to
+    // the fixed Sunny preset (no per-channel digital boost) — exactly the proven
+    // pre-AWB behaviour for dim/neutral scenes.
+    int mx = r > g ? (r > b ? r : b) : (g > b ? g : b);
+    int mn = r < g ? (r < b ? r : b) : (g < b ? g : b);
+    if (mx - mn < BW_AWB_MIN_SPREAD) {
+        ESP_LOGI(TAG, "awb lock: flat R=0x%02x G=0x%02x B=0x%02x spread=%d < %d — dim/neutral, using Sunny preset",
+                 (unsigned)r, (unsigned)g, (unsigned)b, mx - mn, BW_AWB_MIN_SPREAD);
+        s->set_wb_mode(s, 1);   // Sunny preset (fixed daylight matrix, no boost)
+        s->set_whitebal(s, 0);  // stop AWB algorithm
+        if (r_out) *r_out = (uint8_t)r;   // report what AWB read (for telemetry)
+        if (g_out) *g_out = (uint8_t)g;
+        if (b_out) *b_out = (uint8_t)b;
+        return ESP_FAIL;
+    }
+
     // Lock: set the manual-WB bit (0xC7 bit6) and write the settled values back
     // explicitly so they are held even if residual AWB register activity occurs.
     s->set_reg(s, 0x00C7, 0x40, 0x40);   // manual WB mode

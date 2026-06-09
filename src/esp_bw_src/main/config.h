@@ -186,6 +186,18 @@
 // only fires on a real new object, not on an AWB re-balance.
 #define BW_CAM_AWB_GAIN  0
 
+// ─── AWB settle-and-lock (per-cycle adaptive white balance) ─────────────────
+// After the AEC settle, bw_cam_awb_settle_and_lock() reads the auto-AWB's
+// settled per-channel gains (DSP 0xCC/0xCD/0xCE) and freezes them for the cycle.
+// A *useful* correction is DIFFERENTIAL (R≠G≠B) — e.g. the Sunny preset is
+// 0x5e/0x41/0x54, spread ≈ 29.  A dim or neutral scene instead drives every
+// channel UP to a flat ≈0x80 (the AWB just boosts gain uniformly, finding no
+// white reference).  That flat boost adds no colour benefit but amplifies sensor
+// noise — stacked on high night AGC / ETTR exposure it overflows the SXGA JPEG
+// buffer (FB-OVF).  So only KEEP the lock when the channel spread (max−min) is at
+// least this; otherwise revert to the fixed Sunny preset (no digital boost).
+#define BW_AWB_MIN_SPREAD  6
+
 // ─── Global mode codes (matches python server reply field) ─────────────────
 typedef enum {
     BW_MODE_ERROR        = -1,
