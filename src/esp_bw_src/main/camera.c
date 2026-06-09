@@ -426,6 +426,16 @@ esp_err_t bw_cam_meter_ettr_lock(uint16_t *aec0, uint8_t *gain0)
     return ESP_OK;
 
 keep_auto:
+    // Night / flat scene.  Revert WB to the fixed Sunny preset with adaptive gain
+    // OFF — exactly the proven pre-AWB night state.  Auto-AWB boosts every channel
+    // gain toward ~0x80 in a dark scene; stacked on the high night AGC gain this
+    // amplifies sensor noise enough to overflow the 256 KB SXGA JPEG buffer
+    // (FB-OVF cascade).  The fixed Sunny matrix adds no per-channel digital boost,
+    // so the night frame stays small and the bracket captures succeed (as they did
+    // before the AWB-lock change).  Daytime keeps the locked auto-AWB gains.
+    s->set_whitebal(s, 1);   // AWB algorithm on, but…
+    s->set_awb_gain(s, 0);   // …no adaptive per-channel digital gain
+    s->set_wb_mode(s, 1);    // fixed Sunny preset (5500K daylight)
     // Restore auto AEC/AGC so the caller falls back to a known-good exposure
     // (the settled auto exposure yields a valid frame even when ETTR bails).
     s->set_exposure_ctrl(s, 1);
