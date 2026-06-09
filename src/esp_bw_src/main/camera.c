@@ -45,12 +45,13 @@ static void apply_photo_settings(sensor_t *s)
     s->set_quality(s, 10);
     s->set_special_effect(s, 0);
 
-    // Fixed daylight WB — identical for every capture so the PIR-vs-RTC chroma
-    // comparison is not confounded by per-frame AWB re-balancing, and the in-frame
-    // green plants cannot pull the white point (see config.h BW_CAM_AWB_GAIN note).
+    // AWB auto — runs during init drain + discard frames so it adapts to scene
+    // colour temperature before bw_cam_awb_settle_and_lock() reads and freezes
+    // the gains.  Enabling here (not mid-cycle) avoids switching AWB mode while
+    // JPEG streaming is active, which corrupts the OV2640 DSP/JPEG pipeline.
     s->set_whitebal(s, 1);
-    s->set_awb_gain(s, BW_CAM_AWB_GAIN);  // 0 → fixed matrix, no adaptive gain
-    s->set_wb_mode(s, 1);                 // Sunny (5500K): neutral outdoor daylight
+    s->set_awb_gain(s, 1);
+    s->set_wb_mode(s, 0);    // auto WB — locked after settle, before ETTR
 
     // Auto AEC/AGC during the settle window; ETTR then locks manual exposure.
     s->set_exposure_ctrl(s, 1);
@@ -71,7 +72,7 @@ static void apply_photo_settings(sensor_t *s)
     s->set_vflip(s, 0);
     s->set_dcw(s, 0);
     s->set_colorbar(s, 0);
-    ESP_LOGI(TAG, "applied PHOTO (unified daylight, fixed WB) settings");
+    ESP_LOGI(TAG, "applied PHOTO (AWB auto, locks after settle) settings");
 }
 
 static void apply_lightcheck_settings(sensor_t *s)
@@ -310,18 +311,12 @@ esp_err_t bw_cam_awb_settle_and_lock(int n_frames, uint8_t *r_out, uint8_t *g_ou
     sensor_t *s = esp_camera_sensor_get();
     if (!s) return ESP_FAIL;
 
-    // Enable AWB auto so the algorithm adapts to scene colour temperature.
-    // DSP bank: CTRL1 bit3 = AWB algorithm, bit2 = AWB gain application.
-    // wb_mode=0 clears the manual-preset bit (0xC7 bit6) so the algorithm runs.
-    s->set_whitebal(s, 1);
-    s->set_awb_gain(s, 1);
-    s->set_wb_mode(s, 0);
-
-    // Flush n_frames — each full SXGA JPEG gives the AWB algorithm real scene data.
-    for (int i = 0; i < n_frames; i++) {
-        camera_fb_t *fb = esp_camera_fb_get();
-        if (fb) esp_camera_fb_return(fb);
-    }
+    // AWB was enabled in apply_photo_settings() and has been running since init.
+    // n_frames is ignored: settling happened during the init drain (500 ms) plus
+    // bw_cam_discard_frames() in main — plenty of time without any mid-stream
+    // register changes (switching AWB mode while JPEG is streaming corrupts the
+    // OV2640 DSP/JPEG pipeline → FB-OVF cascade, as observed).
+    (void)n_frames;
 
     // Read the settled per-channel gains from DSP bank 0xCC/0xCD/0xCE.
     // get_reg encodes bank in bit 8: 0x00XX = DSP bank, 0x01XX = sensor bank.
@@ -330,10 +325,9 @@ esp_err_t bw_cam_awb_settle_and_lock(int n_frames, uint8_t *r_out, uint8_t *g_ou
     int b = s->get_reg(s, 0x00CE, 0xFF);
 
     if (r < 0 || g < 0 || b < 0) {
-        ESP_LOGW(TAG, "awb lock: readback failed (r=%d g=%d b=%d) — restoring Sunny preset", r, g, b);
-        s->set_whitebal(s, 0);
-        s->set_awb_gain(s, 0);
-        s->set_wb_mode(s, 1);   // Sunny fallback
+        ESP_LOGW(TAG, "awb lock: readback failed (r=%d g=%d b=%d) — falling back to Sunny preset", r, g, b);
+        s->set_wb_mode(s, 1);   // Sunny preset writes 0xCC/0xCD/0xCE + sets manual bit
+        s->set_whitebal(s, 0);  // stop AWB algorithm
         return ESP_FAIL;
     }
 
