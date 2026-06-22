@@ -162,8 +162,8 @@
 // Steps are exposure multipliers in percent of E0.  100 (1.0×) is the ETTR frame
 // itself and is reused, not recaptured.  The winner is the frame whose low-mid
 // foreground percentile lands closest to target without busting the clip budget.
-#define BW_BRACKET_N              3   // number of bracket frames (incl. the 1.0× ETTR frame)
-#define BW_BRACKET_STOPS_PCT  { 50, 100, 200 }   // E0 multipliers, percent: -1 stop / 0 / +1 stop
+#define BW_BRACKET_N              2   // number of bracket frames (incl. the 1.0× ETTR frame)
+#define BW_BRACKET_STOPS_PCT  { 100, 200 }   // E0 multipliers, percent: 0 / +1 stop (−1 stop dropped: chosen <0.3% of 864 frames)
 #define BW_BRACKET_FG_PERCENTILE 40  // percentile used as the "foreground" proxy when scoring
 #define BW_BRACKET_FG_TARGET    110  // target DN for that foreground percentile
 
