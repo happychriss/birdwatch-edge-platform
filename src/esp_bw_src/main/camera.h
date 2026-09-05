@@ -15,6 +15,10 @@
 typedef enum {
     BW_CAM_MODE_PHOTO      = 0,   // single unified daylight profile, fixed WB, ETTR-locked
     BW_CAM_MODE_LIGHTCHECK = 1,   // grayscale brightness probe (camera-server / diagnostics)
+    BW_CAM_MODE_THUMB      = 2,   // audit thumbnail for a suppressed PIR event:
+                                  // JPEG at BW_THUMB_FRAMESIZE, no ETTR, no bracket.
+                                  // The OV2640 encodes in hardware, so this costs one
+                                  // grab and no decode.
 } bw_cam_mode_t;
 
 esp_err_t bw_cam_init(bw_cam_mode_t mode);

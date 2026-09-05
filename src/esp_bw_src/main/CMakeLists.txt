@@ -8,6 +8,8 @@ idf_component_register(
         "camera.c"
         "telemetry.c"
         "cloud_check.c"
+        "presuppress.c"
+        "batch_store.c"
         "http_client.c"
         "camera_server.c"
         "diag.c"
@@ -28,6 +30,7 @@ idf_component_register(
         esp_driver_gpio
         espressif__cjson
         spi_flash
+        spiffs
         esp_psram
         esp_hw_support
         esp_pm

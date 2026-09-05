@@ -115,13 +115,18 @@ esp_err_t bw_cam_init(bw_cam_mode_t mode)
     }
 
     bool is_photo = (mode == BW_CAM_MODE_PHOTO);
-    pixformat_t fmt   = is_photo ? PIXFORMAT_JPEG      : PIXFORMAT_GRAYSCALE;
+    // THUMB shares the JPEG/PSRAM path with PHOTO — it differs only in frame
+    // size and in skipping ETTR/bracketing, which the caller controls.
+    bool is_jpeg  = (mode == BW_CAM_MODE_PHOTO || mode == BW_CAM_MODE_THUMB);
+    pixformat_t fmt   = is_jpeg ? PIXFORMAT_JPEG       : PIXFORMAT_GRAYSCALE;
     // SXGA (1280x960): 2.56x more pixels than SVGA, comfortable memory budget.
     // Driver allocates fb_size = w*h/5 per buffer in PSRAM (JPEG AUTO mode):
     //   2 FBs = 480 KB, +copy buffer = 720 KB total — well within 8 MB PSRAM.
     // UXGA (1600x1200) is available but the buffer ceiling (375 KB) is too
     // close to what a dense outdoor scene can produce at quality 10.
-    framesize_t size  = is_photo ? FRAMESIZE_SXGA      : FRAMESIZE_QQVGA;
+    framesize_t size  = is_photo ? FRAMESIZE_SXGA
+                      : (mode == BW_CAM_MODE_THUMB ? BW_THUMB_FRAMESIZE
+                                                   : FRAMESIZE_QQVGA);
 
     camera_config_t cfg = {
         .pin_pwdn      = CAM_PIN_PWDN,
@@ -145,14 +150,16 @@ esp_err_t bw_cam_init(bw_cam_mode_t mode)
         .ledc_channel  = LEDC_CHANNEL_0,
         .pixel_format  = fmt,
         .frame_size    = size,
-        .jpeg_quality  = is_photo ? 12 : 0,
+        .jpeg_quality  = is_photo ? 12
+                       : (mode == BW_CAM_MODE_THUMB ? BW_THUMB_JPEG_QUALITY : 0),
         .fb_count      = 2,
-        .fb_location   = is_photo ? CAMERA_FB_IN_PSRAM : CAMERA_FB_IN_DRAM,
-        .grab_mode     = is_photo ? CAMERA_GRAB_LATEST : CAMERA_GRAB_WHEN_EMPTY,
+        .fb_location   = is_jpeg ? CAMERA_FB_IN_PSRAM : CAMERA_FB_IN_DRAM,
+        .grab_mode     = is_jpeg ? CAMERA_GRAB_LATEST : CAMERA_GRAB_WHEN_EMPTY,
     };
 
+    static const char * const mode_name[] = { "PHOTO", "LIGHTCHECK", "THUMB" };
     ESP_LOGI(TAG, "init mode=%s fmt=%d size=%d",
-             mode == BW_CAM_MODE_PHOTO ? "PHOTO" : "LIGHTCHECK", fmt, size);
+             mode <= BW_CAM_MODE_THUMB ? mode_name[mode] : "?", fmt, size);
 
     esp_err_t err = esp_camera_init(&cfg);
     if (err != ESP_OK) return bw_log_err(TAG, "esp_camera_init", err);
@@ -166,8 +173,10 @@ esp_err_t bw_cam_init(bw_cam_mode_t mode)
     ESP_LOGI(TAG, "sensor PID=0x%02x VER=0x%02x MIDH=0x%02x MIDL=0x%02x",
              s->id.PID, s->id.VER, s->id.MIDH, s->id.MIDL);
 
-    if (mode == BW_CAM_MODE_PHOTO) apply_photo_settings(s);
-    else                            apply_lightcheck_settings(s);
+    // THUMB uses the same daylight profile as PHOTO (fixed WB, same tone) so an
+    // audit thumbnail is directly comparable to a normal frame.
+    if (is_jpeg) apply_photo_settings(s);
+    else         apply_lightcheck_settings(s);
 
     // Drain frames for 500 ms while AEC/AGC converges.
     // QQVGA runs at ~70 fps (14 ms/frame); a 100 ms vTaskDelay between fb_get

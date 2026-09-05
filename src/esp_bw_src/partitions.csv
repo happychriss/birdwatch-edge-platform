@@ -1,6 +1,18 @@
 # Custom partition table for 8 MB flash.
+#
+# `factory` was 0x600000 while the app binary is ~1.2 MB — nearly 5 MB of dead
+# space.  The batched-record store needs room for suppressed-event images at
+# half the capture resolution (~60-100 KB each), which the old 1 MB `storage`
+# could barely hold ten of.  Shrinking `factory` to 2.3 MB still leaves ~2x
+# headroom over the current binary and gives the store ~5.6 MB — several days
+# of backlog even if WiFi stays down.
+#
+# CHANGING THIS REQUIRES `idf.py erase-flash` ONCE: the offsets move, and a
+# plain flash would leave the old table in place.  That also wipes NVS,
+# including the WiFi PMK cache, so expect one slower WPA2 handshake afterwards.
+#
 # Name,   Type, SubType, Offset,   Size,    Flags
 nvs,      data, nvs,     0x9000,   0x6000,
 phy_init, data, phy,     0xf000,   0x1000,
-factory,  app,  factory, 0x10000,  0x600000,
-storage,  data, spiffs,  ,         0x100000,
+factory,  app,  factory, 0x10000,  0x250000,
+storage,  data, spiffs,  ,         0x5A0000,

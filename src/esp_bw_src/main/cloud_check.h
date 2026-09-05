@@ -1,12 +1,17 @@
 #pragma once
-// ─── Cloud-check false-trigger filter (ESP32-S3 port) ────────────────────────
-// Receives pre-decoded YUV tile means, runs EMA z-score background model (3
-// photo-buckets × 1 scene-bucket) and burst pre-filter, decides "clouds"
-// (suppress) or "process" (real event, upload).
+// ─── Burst false-trigger filter (ESP32-S3) ───────────────────────────────────
+// Receives pre-decoded YUV tile means, compares them to the previous frame, and
+// decides "clouds" (suppress) or "process" (real event, upload).
 //
-// Background-model stages: WARMUP, DARK_BLOB, QUIET, AMBIGUOUS.
+// The per-tile background model that used to sit behind this (EMA z-score over
+// 3 photo-buckets, stages WARMUP / DARK_BLOB / QUIET / AMBIGUOUS) has been
+// REMOVED.  Measured on 87 labelled birds it reached 32% recall at a 10%
+// false-positive rate against a requirement of 100% — it could not separate
+// birds on this scene.  Suppression now happens before the camera is powered,
+// from the clock alone; see presuppress.c.  This module remains as a cheap
+// second gate for the cases that genuinely need a decoded frame.
+//
 // Burst stages: FIRST, BRIGHTNESS_SHIFT, DUPLICATE, BRIGHT_STABLE, DIFFUSE, SAFE, NIGHT.
-// DARK_OBJ and SCENE_DRIFT removed — DARK_BLOB replaces both.
 //
 // Caller is responsible for camera init/capture/deinit and JPEG decoding.
 // bw_cc_assess() only touches NVS and telemetry — no camera dependency.
@@ -24,13 +29,12 @@
 
 typedef struct {
     char    label[16];        // "process" or "clouds"
-    char    stage[20];        // burst stage or background-model stage
-    char    photo_bucket[12]; // "NORMAL" | "BRIGHT" | "LOWLIGHT"
+    char    stage[20];        // burst stage
     uint8_t global_mean;      // mean Y over all tiles (0-255)
 } bw_cc_result_t;
 
-// Tell the cloud-check module the wakeup source before calling bw_cc_assess().
-// Only RTC frames update the background model; PIR frames are evidence-only.
+// Tell the module the wakeup source before calling bw_cc_assess().
+// Retained because the burst stages still log it; no model is updated now.
 void bw_cc_set_source(bool is_rtc);
 
 // Run the cloud-check pipeline against pre-decoded tile means.
@@ -40,7 +44,7 @@ void bw_cc_set_source(bool is_rtc);
 esp_err_t bw_cc_assess(const uint8_t *tile_y, const uint8_t *tile_u,
                        const uint8_t *tile_v, bw_cc_result_t *out);
 
-// Erase the NVS background model (all cc_* keys, including legacy keys).
-// Called on firmware update so the first run starts from the same clean
-// prior as the Python validator.
+// Erase all cc_* NVS keys, including those of the retired background model.
+// Called on firmware update so a device flashed without a full erase still
+// reclaims the ~3.6 KB the old per-bucket model occupied.
 void bw_cc_reset(void);

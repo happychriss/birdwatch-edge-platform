@@ -54,6 +54,8 @@
 #include "wifi_sta.h"
 #include "camera.h"
 #include "cloud_check.h"
+#include "presuppress.h"
+#include "batch_store.h"
 #include "http_client.h"
 #include "camera_server.h"
 #include "diag.h"
@@ -150,6 +152,9 @@ static int solar_utc_minutes(int doy, bool is_sunset)
 // Formatted RTC and next-wakeup times for telemetry (populated by rtc_compute_next()).
 static char   s_rtc_now_str[32]    = "?";
 static char   s_next_wakeup_str[32] = "?";
+// UTC epoch of this cycle, also from rtc_compute_next().  0 means the RTC could
+// not be read — pre-suppression treats that as "never suppress".
+static time_t s_now_utc = 0;
 
 // Reads DS3231, computes next wakeup UTC clamped to daylight, logs the
 // daytime/night decision, populates s_next_wakeup_str.  Returns UTC epoch
@@ -170,6 +175,7 @@ static time_t rtc_compute_next(i2c_dev_t *rtc)
         ESP_LOGE(TAG, "DS3231 time not set");
         return 0;
     }
+    s_now_utc = now_utc;
     ESP_LOGI(TAG, "RTC now: %04d-%02d-%02d %02d:%02d:%02d local",
              now_local.tm_year+1900, now_local.tm_mon+1, now_local.tm_mday,
              now_local.tm_hour, now_local.tm_min, now_local.tm_sec);
@@ -293,6 +299,66 @@ static void run_normal_cycle(void)
     }
     float battery_v = bw_adc_read_battery_voltage();
     ESP_LOGI(TAG, "battery=%.3fV", battery_v);
+
+    bool is_pir = (s_wakeup_source != BW_WAKE_RTC);
+
+    // ── Phase 0: pre-suppression — decide BEFORE powering the camera ─────────
+    // Detecting a bird on-device is not feasible (measured: a bird is ~100
+    // anomalous px in 480k).  The answerable question is whether this trigger
+    // was already EXPLAINED by its timing — rapid cloud re-fires, low sun.
+    // That needs no pixels, so it runs before the camera, and a suppressed
+    // event skips the ETTR/bracket work AND WiFi entirely.
+    //
+    // Nothing is discarded: a suppressed event still gets a thumbnail stored
+    // for review.  If the store is unavailable we must NOT suppress — an
+    // unrecorded suppression is exactly the invisible failure this design
+    // exists to avoid.
+    bool store_ok = (bw_batch_init() == ESP_OK);
+    bw_presup_t ps;
+    bw_presup_decide(s_now_utc, is_pir, &ps);
+    // Commit immediately: the decision has already read the previous state, and
+    // every later path — suppress, burst-reject, camera failure, WiFi failure —
+    // must still advance the quiet-gap and burst counters, or the next event
+    // would see a stale gap and score wrongly.
+    bw_presup_commit(s_now_utc, is_pir);
+
+    if (ps.suppress && store_ok) {
+        ESP_LOGI(TAG, "pre-suppressed (score=%u < thr=%u) — thumbnail only, no WiFi",
+                 ps.score, ps.threshold);
+        uint8_t *thumb = NULL; size_t thumb_len = 0;
+        if (bw_cam_init(BW_CAM_MODE_THUMB) == ESP_OK) {
+            bw_cam_discard_frames(3, 60);          // brief AEC settle, no ETTR
+            camera_fb_t *fb = bw_cam_capture();
+            if (fb && fb->len) {
+                thumb = malloc(fb->len);
+                if (thumb) { memcpy(thumb, fb->buf, fb->len); thumb_len = fb->len; }
+            }
+            if (fb) bw_cam_capture_return(fb);
+            bw_cam_deinit();
+        }
+
+        bw_tele_reset();
+        bw_tele_s("result",   "batched");
+        bw_tele_s("stage",    "PRESUPPRESS");
+        bw_tele_s("source",   is_pir ? "pir" : "rtc");
+        bw_tele_s("trigger",  trigger);
+        bw_tele_s("rtc_time", s_rtc_now_str);
+        bw_tele_f("battery",  (double)battery_v);
+        bw_tele_b("batched",  true);
+        bw_presup_telemetry(&ps);
+        if (bw_batch_append(bw_tele_json(), thumb, thumb_len) != ESP_OK)
+            bw_diag_push("BATCH_APPEND_FAIL");
+        free(thumb);
+
+        bw_blink(BW_BLINK_CAM_OK);
+        bw_adc_deinit();
+        ESP_LOGI(TAG, "batch store: %d pending, %u bytes, %lu dropped",
+                 bw_batch_count(), (unsigned)bw_batch_bytes(),
+                 (unsigned long)bw_batch_dropped());
+        return;                                    // no WiFi — this is the win
+    }
+    if (ps.suppress && !store_ok)
+        ESP_LOGW(TAG, "would suppress but the batch store is unavailable — uploading");
 
     // ── Phase 1: Single PHOTO init + AEC settle ───────────────────────────────
     // One unified profile (fixed daylight WB).  The live AEC is allowed to settle
@@ -421,7 +487,6 @@ static void run_normal_cycle(void)
         bw_tele_s("stage",  "CAM_ERR");
         strcpy(cc.label, "process");
         strcpy(cc.stage, "CAM_ERR");
-        strncpy(cc.photo_bucket, "NORMAL", sizeof(cc.photo_bucket) - 1);
         cc.global_mean = 0;
     } else {
         ESP_LOGE(TAG, "no usable frame captured — aborting cycle");
@@ -430,11 +495,35 @@ static void run_normal_cycle(void)
         bw_adc_deinit();
         return;
     }
-    ESP_LOGI(TAG, "cloud-check: bucket=%s gm=%u → %s (%s)  [bracket %d/%d, ettr aec=%u gain=%u]",
-             cc.photo_bucket, cc.global_mean, cc.label, cc.stage,
+    ESP_LOGI(TAG, "burst check: gm=%u → %s (%s)  [bracket %d/%d, ettr aec=%u gain=%u]",
+             cc.global_mean, cc.label, cc.stage,
              best_idx, BW_BRACKET_N, ettr_aec, ettr_gain);
 
     bw_blink(BW_BLINK_CAM_OK);
+
+    // ── Phase 3b: burst filter as a second gate ──────────────────────────────
+    // The burst stages (DUPLICATE, NIGHT, …) need a decoded frame, so unlike
+    // pre-suppression they cannot run before the capture.  A rejection here no
+    // longer saves the camera work, but it still saves the WiFi cycle — and the
+    // frame already in hand is the best possible audit image, so it is stored
+    // at full resolution rather than re-grabbed.
+    if (is_pir && store_ok && strcmp(cc.label, "clouds") == 0) {
+        ESP_LOGI(TAG, "burst filter rejected (%s) — batching, no WiFi", cc.stage);
+        bw_tele_s("result",  "batched");
+        bw_tele_b("batched", true);
+        bw_tele_s("source",  "pir");
+        bw_tele_s("trigger", trigger);
+        bw_tele_s("rtc_time", s_rtc_now_str);
+        bw_tele_f("battery", (double)battery_v);
+        bw_presup_telemetry(&ps);
+        if (bw_batch_append(bw_tele_json(), img, img_len) != ESP_OK)
+            bw_diag_push("BATCH_APPEND_FAIL");
+        free(img);
+        bw_adc_deinit();
+        ESP_LOGI(TAG, "batch store: %d pending, %u bytes",
+                 bw_batch_count(), (unsigned)bw_batch_bytes());
+        return;
+    }
 
     // ── WiFi up & upload ───────────────────────────────────────────────────
     if (bw_wifi_connect_blocking() != ESP_OK) {
@@ -479,6 +568,18 @@ static void run_normal_cycle(void)
     // mid-transfer drop (e.g. MISSING_ACKS) does not strand the retry loop on
     // a dead connection.  Total attempts are bounded; the watchdog is the hard
     // backstop for the whole cycle.
+    // Flush batched records BEFORE the image upload.  Bounded by count and by
+    // wall time so a large backlog cannot push the cycle past BW_CYCLE_TIMEOUT_MS,
+    // and ordered first only because a failure here must never cost the photo —
+    // records survive in the store and go out on the next cycle.
+    if (store_ok && bw_batch_count() > 0) {
+        int pending = bw_batch_count();
+        int sent = bw_batch_flush(bw_http_post_batch, BW_BATCH_FLUSH_MAX,
+                                  BW_BATCH_FLUSH_MS);
+        ESP_LOGI(TAG, "batch flush: %d/%d sent, %d still pending",
+                 sent, pending, bw_batch_count());
+    }
+
     bw_mode_t mode = BW_MODE_ERROR;
     bool wifi_lost = false;
     for (int attempt = 1; attempt <= BW_HTTP_MAX_RETRIES; attempt++) {
@@ -503,6 +604,9 @@ static void run_normal_cycle(void)
         bw_tele_s("source",       s_wakeup_source == BW_WAKE_RTC ? "rtc" : "pir");
         bw_tele_s("rtc_time",     s_rtc_now_str);
         bw_tele_s("next_wakeup",  s_next_wakeup_str);
+        bw_presup_telemetry(&ps);
+        if (bw_batch_dropped())
+            bw_tele_i("batch_dropped", (long)bw_batch_dropped());
         if (s_fresh_flash) {
             bw_tele_b("fresh_flash", true);
             bw_tele_s("fw_build",   s_fw_build);

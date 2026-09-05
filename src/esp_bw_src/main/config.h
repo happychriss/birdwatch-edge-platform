@@ -39,6 +39,7 @@
 #define BW_SERVER_BASE "http://" BW_SERVER_HOST ":8000"
 #define BW_UPLOAD_URL  BW_SERVER_BASE "/frame"
 #define BW_STATUS_URL  BW_SERVER_BASE "/status"
+#define BW_BATCH_URL   BW_SERVER_BASE "/batch"
 // ─── HTTP client retry ──────────────────────────────────────────────────────
 #define BW_HTTP_TIMEOUT_MS    20000
 #define BW_HTTP_MAX_RETRIES   3
@@ -89,7 +90,13 @@
 // Minutes between RTC-triggered wakeups during the evening capture window.
 // Read from NVS key "cycle_min" (u8, namespace "bw_meta") at runtime; this is
 // the fallback.
-#define BW_ALARM_CYCLE_MIN_DEFAULT   15
+//
+// Was 15 min to feed the per-tile background model.  That model is retired —
+// measurement showed background subtraction cannot separate birds on this
+// scene — so RTC frames now serve only as a daylight proof-of-life and as the
+// guaranteed flush point for the batched-record store.  2 h is ample for both
+// and cuts RTC wakeups from ~30/day to ~7/day.
+#define BW_ALARM_CYCLE_MIN_DEFAULT   120
 
 // ─── Bird-active capture window ─────────────────────────────────────────────
 // RTC wakeups active from sunrise through sunset + BW_BIRD_ACTIVE_WINDOW_POST_MIN.
@@ -102,6 +109,31 @@
 //   Jul 21:45–21:20   Aug 21:10–20:20   Sep 20:15–19:10
 //   Oct 19:00–17:10 (DST −1 h jump)     Nov 16:50–16:30   Dec 16:25–16:35
 #define BW_BIRD_ACTIVE_WINDOW_POST_MIN      30   // minutes after sunset
+
+// ─── Pre-suppression + batched-record store ─────────────────────────────────
+// A PIR trigger whose timing already explains it (rapid cloud re-fires, low sun
+// angle) skips the camera bracket and WiFi entirely.  The event is not lost: a
+// thumbnail plus the decision inputs go to the batch store and are flushed on
+// the next cycle that raises WiFi, arriving as `batched` rows for review.
+// Scoring table lives in presuppress_table.h, generated from labelled data by
+// src/cloud-check/presuppress_model.py.  Threshold override: NVS "ps_thr" (u8).
+
+#define BW_BATCH_PARTITION       "storage"    // must match partitions.csv
+#define BW_BATCH_MOUNT           "/batch"
+// Bounded by bytes, not record count — an SVGA thumbnail and a full SXGA frame
+// from a burst rejection differ by ~3x.  Leaves headroom under the ~5.6 MB
+// partition for SPIFFS metadata and the sequence file.
+#define BW_BATCH_MAX_BYTES       (5UL * 1024 * 1024)
+// Bound the flush so a large backlog cannot push the cycle past BW_WATCHDOG.
+#define BW_BATCH_FLUSH_MAX       8
+#define BW_BATCH_FLUSH_MS        20000
+
+// Thumbnail for a suppressed event.  Capture is SXGA 1280x1024, so SVGA is
+// larger than half the original in both axes — enough to see whether a bird
+// was there, which is the whole point of the audit trail.  The OV2640 encodes
+// JPEG in hardware, so this costs one grab and no decode.
+#define BW_THUMB_FRAMESIZE       FRAMESIZE_SVGA
+#define BW_THUMB_JPEG_QUALITY    12
 
 // ─── Post-cycle cooldown (light sleep before power release / reboot) ────────
 // Halts CPU so residual switching noise does not extend the PIR pulse.
