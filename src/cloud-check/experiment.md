@@ -385,6 +385,58 @@ Best configuration found anywhere in this work: previous RTC frame + `cd_max`,
 **32% bird recall at a threshold passing 10% of RTC frames** (6% at 1%).
 Against a hard requirement of recall = 1.0, that is not deployable.
 
+## THE ESP32 PRE-FILTER IS SAVEABLE - by inverting the question
+
+Detecting a bird on-device is hopeless (~100 anomalous px in 480k). But
+recognising that a trigger was **explained by a lighting event** is a large,
+global, low-frequency signal, and it is suppression-only, so it cannot cost
+recall: a pigeon does not change the whole frame.
+
+Device telemetry was deliberately NOT used - `tile_means` etc. come from the
+old firmware across months of changing ETTR/AWB behaviour. All features below
+are recomputed from the JPGs exactly as new firmware would compute them
+(`presuppress_probe.py`).
+
+### Timing is the strongest signal found anywhere in this work
+Rapid cloud changes re-trigger the PIR; a long quiet spell means something
+actually arrived. Bird rate against quiet-time before the trigger:
+
+| quiet before trigger | frames | birds | bird rate |
+|---|---:|---:|---:|
+| 0-30 s | 497 | 6 | **1.21%** |
+| 1-5 min | 427 | 14 | 3.28% |
+| 1-3 h | 150 | 11 | 7.33% |
+| > 3 h | 83 | 9 | **10.84%** |
+
+A **9x** swing, from a feature that costs nothing - the RTC already knows the
+time of the last event. Position within a rapid burst (<60 s apart) is just as
+clean: position 0 = 4.77% birds, position 4 = **0%**, position >=5 = **0%**
+(118 frames, not one bird).
+
+### The rule, and what it buys
+Suppress when `quiet < G` **or** `burst_position >= P` **or** `res_p95 > R`,
+where `res_p95` is the 95th-percentile tile residual after a global
+illumination fit `a*prev + b` against the previous frame.
+
+| G | P | R | PIR suppressed | birds lost | margin |
+|---:|---:|---:|---:|---:|---|
+| 15 s | 4 | 60 | **24.2%** | 0/68 | R has NO margin (bird max 60.1) |
+| 15 s | 5 | 72 | 17.6% | 0/68 | ~20% on all three |
+| 15 s | 4 | off | 11.8% | 0/68 | **no image processing at all** |
+| 10 s | 6 | 90 | 10.7% | 0/68 | large margins |
+
+Recommended: **G=15 s, P=5, R=72 -> 17.6%** at zero bird loss with real margin
+on every threshold. The temporal-only variant (11.8%) needs no pixels at all
+and is the cheapest defensible thing the firmware could do.
+
+### Caveat that decides how aggressively to set it
+Thresholds are fitted to 68 labelled birds. Setting a bound exactly at the most
+extreme observed bird (the 24.2% row) has zero margin and will break on the
+first bird outside the range. Suppression here removes an *upload*, not a
+wake-up - the WiFi transmit is the dominant battery cost, so 17.6% fewer
+uploads is a real saving, but this is a modest win, not a solution to the
+99%-empty problem.
+
 ## Open items / next steps
 
 - **Priority: build the Horprasert alpha/CD + structure-occlusion detector** (see
