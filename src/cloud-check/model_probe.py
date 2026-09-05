@@ -76,6 +76,14 @@ def desc(g):
     return np.array([f.mean() / 255, f.std() / 64, (hi / max(lo, 1)) / 8], np.float32)
 
 
+def thumb(g, out=(30, 40)):
+    """Block-average to a fixed tiny grid so frames loaded at different sizes
+    land in the SAME feature space (the PCA basis is shared)."""
+    h, w = g.shape
+    fh, fw = h // out[0], w // out[1]
+    return g[:out[0]*fh, :out[1]*fw].reshape(out[0], fh, out[1], fw).mean((1, 3)).ravel()
+
+
 def affine(ref, tgt):
     """tgt ~ a*ref + b, least squares — removes any global gain/offset so the
     residual measures STRUCTURE error, not exposure difference."""
@@ -176,7 +184,8 @@ def main():
     pool = []
     for i, (fid, fn, t, _, _) in enumerate(rtc):
         try:
-            pool.append((fid, fn, t, desc(gray(load(fn, args.photo_server, small)))))
+            gs = gray(load(fn, args.photo_server, small))
+            pool.append((fid, fn, t, desc(gs), thumb(gs)))
         except Exception:
             continue
         if i % 400 == 0:
@@ -184,11 +193,21 @@ def main():
     print(f"  pool = {len(pool)}")
     P_t = np.array([p[2].timestamp() for p in pool])
     P_d = np.stack([p[3] for p in pool])
+    # appearance basis: PCA over tiny thumbnails of the RTC pool.  group_probe.py
+    # measured this to be by far the best way to find "a day that looked like
+    # today" — 4.21 DN causal, against 5.94 for the previous frame and 22.0 EMA.
+    TH = np.stack([p[4] for p in pool]).astype(np.float32)
+    th_mu = TH.mean(0)
+    _, _, Vt = np.linalg.svd(TH - th_mu, full_matrices=False)
+    BASIS = Vt[:8]
+    P_pca = (TH - th_mu) @ BASIS.T
+    P_STD = P_pca.std(0)
+    P_pca = P_pca / (P_STD + 1e-6)
 
     # ── build the EMA reference once, in time order (what the pipeline uses)
     print("building EMA reference ...")
     ema = None
-    for fid, fn, t, _ in pool[::3]:                    # every 3rd frame is plenty
+    for fid, fn, t, _, _ in pool[::3]:                 # every 3rd frame is plenty
         try:
             r = load(fn, args.photo_server, size)
         except Exception:
@@ -201,7 +220,7 @@ def main():
          [("bird", b[0], b[1], b[2]) for b in birds]
     print(f"evaluating {len(ev)} frames ({sum(1 for e in ev if e[0]=='bird')} birds) ...")
 
-    KEYS = ("prev", "ema", "knn", "prev+mad")
+    KEYS = ("prev", "ema", "knn", "prev+mad", "retrieval", "retr+mad")
     out = {k: {"rtc": [], "bird": []} for k in KEYS}
     resp = {k: {"rtc": [], "bird": []} for k in KEYS}
     for n, (kind, fid, fn, t) in enumerate(ev):
@@ -244,6 +263,24 @@ def main():
                         response(cur, prev_rgb, np.maximum(mad, 3.0)))
             except Exception:
                 pass
+        # retrieval: the single most similar PAST RTC frame by appearance,
+        # plus a variant taking median/MAD over the top 5 for a per-pixel sigma
+        if len(idx):
+            q = ((thumb(cg) - th_mu) @ BASIS.T) / (P_STD + 1e-6)
+            order = idx[np.argsort(np.linalg.norm(P_pca[idx] - q, axis=1))]
+            try:
+                r1 = load(pool[order[0]][1], args.photo_server, size)
+                out["retrieval"][kind].append(pred_err(gray(r1), cg))
+                resp["retrieval"][kind].append(response(cur, r1, np.full_like(r1, 8.0)))
+                if len(order) >= 5:
+                    st5 = np.stack([load(pool[j][1], args.photo_server, size)
+                                    for j in order[:5]])
+                    mad5 = np.median(np.abs(st5 - np.median(st5, 0)), 0) * 1.4826
+                    out["retr+mad"][kind].append(pred_err(gray(r1), cg))
+                    resp["retr+mad"][kind].append(
+                        response(cur, r1, np.maximum(mad5, 3.0)))
+            except Exception:
+                pass
         if n % 100 == 0:
             print(f"  {n}/{len(ev)}")
 
@@ -270,10 +307,14 @@ def main():
     # AUC hides WHERE the overlap is.  Detection is a tail problem: the bird's
     # peak response has to beat the worst background artifact in the frame, so
     # print both distributions and see how far they actually sit apart.
-    print("\n=== overlap: peak response per frame, prev reference ===")
-    for s in ("cd_max", "ad_max"):
-        a = np.array([r[s] for r in resp["prev"]["rtc"]])
-        b = np.array([r[s] for r in resp["prev"]["bird"]])
+    print("\n=== overlap: peak response per frame ===")
+    for ref_name in ("prev", "retrieval", "retr+mad"):
+      for s in ("cd_max", "ad_max"):
+        if not resp[ref_name]["rtc"]:
+            continue
+        print(f"[{ref_name}]")
+        a = np.array([r[s] for r in resp[ref_name]["rtc"]])
+        b = np.array([r[s] for r in resp[ref_name]["bird"]])
         print(f"  {s:>8}  RTC  p50={np.percentile(a,50):7.2f} p90={np.percentile(a,90):7.2f} "
               f"p99={np.percentile(a,99):7.2f}")
         print(f"  {'':>8}  BIRD p50={np.percentile(b,50):7.2f} p90={np.percentile(b,90):7.2f} "

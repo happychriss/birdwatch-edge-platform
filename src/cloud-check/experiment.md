@@ -339,6 +339,52 @@ against every leaf, glint and registration error anywhere in the image.
 but no locations, the actual signal-to-noise at the bird cannot be measured.
 That single gap blocks any further honest evaluation of this approach.
 
+## Grouping / retrieval — `group_probe.py` + retrieval in `model_probe.py`
+
+"Group the RTC frames by time and cloud conditions, build a model per group."
+Measured over 1996 RTC frames, train/test split, detector-free prediction error:
+
+| reference | error |
+|---|---:|
+| EMA (both failed pipelines) | 22.0 DN |
+| global median (K=1) | 12.48 |
+| clock-hour groups, K=128 | 12.40 |
+| solar elevation+azimuth, K=128 | 11.65 |
+| solar + cloud, K=128 | 10.01 |
+| previous RTC frame | 5.94 |
+| **appearance retrieval, causal** | **4.21** |
+
+Solar geometry was expected to dominate (shadow position is deterministic from
+the sun) - it barely helps, and clock time does nothing. Averaging hurts
+monotonically (n=1 3.32 < n=3 3.35 < n=5 3.54 < n=15 4.25 << EMA 22.0).
+Retrieval is genuine lighting matching, not temporal adjacency: only 40% of
+matches lie within an hour, 27% are more than a day away.
+
+### THE TRAP: a better model made detection WORSE
+
+| reference | prediction error | AUC (cd_max) | recall @10% RTC FP |
+|---|---:|---:|---:|
+| previous RTC frame | 5.6 DN | **0.712** | **32%** |
+| appearance retrieval | **3.8 DN** | 0.591 | 9% |
+
+Retrieval wins the model metric decisively and **loses detection by 3.5x**.
+
+Cause: `pred_err` measures **luma** (affine-normalised grey), and the retrieval
+features are PCA over **greyscale** thumbnails - but the detector's strongest
+cue is **CD, a chroma statistic**. Retrieval therefore selects frames matched in
+brightness structure while free to differ in white balance, and every AWB
+mismatch shows up as chroma distortion across the whole frame. Background
+`cd_max` p50 rises 7.17 -> 9.50 even as luma error falls 5.6 -> 3.8.
+
+**Methodological lesson: the reference was selected with a proxy metric not
+aligned to the objective.** Optimising Metric A actively damaged Metric B.
+Any future reference search must be scored on the detector's own statistic.
+
+### Where background subtraction actually tops out
+Best configuration found anywhere in this work: previous RTC frame + `cd_max`,
+**32% bird recall at a threshold passing 10% of RTC frames** (6% at 1%).
+Against a hard requirement of recall = 1.0, that is not deployable.
+
 ## Open items / next steps
 
 - **Priority: build the Horprasert alpha/CD + structure-occlusion detector** (see
