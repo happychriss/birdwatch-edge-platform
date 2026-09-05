@@ -27,9 +27,10 @@ DISPLAY_SPEC: dict = {
         "colors": {
             "clouds":  ("#d6eaf8", "#1a6fa8"),
             "process": ("#d5f5e3", "#1e8449"),
+            "batched": ("#fdebd0", "#b9770e"),
         },
         "fallback": ("#eee", "#778"),
-        "desc": "Final decision — process: bird/event candidate uploaded; clouds: suppressed as false trigger",
+        "desc": "Final decision — process: uploaded; clouds: suppressed by the burst filter; batched: suppressed on-device from the clock, thumbnail kept for review",
     },
     "stage": {
         "type": "stage_badge",
@@ -56,6 +57,8 @@ DISPLAY_SPEC: dict = {
             "BRIGHT_STABLE":  "#2471a3",
             "DIFFUSE":        "#154360",
             "SAFE":           "#27ae60",
+            # Clock-based pre-suppression (runs before the camera)
+            "PRESUPPRESS":    "#b9770e",
         },
         "fallback": "#aab",
         "desc": "Pipeline stage: DARK_BLOB=compact bird-sized dark cluster, QUIET=scene calm, WARMUP=model warming up, DUPLICATE=identical re-fire, BRIGHTNESS_SHIFT=whole-scene shift, DIFFUSE=cloud shadow",
@@ -72,6 +75,8 @@ DISPLAY_SPEC: dict = {
             "NIGHT":          "#1a1a2e",
             "DIFFUSE":        "#154360",
             "SAFE":           "#27ae60",
+            # Clock-based pre-suppression (runs before the camera)
+            "PRESUPPRESS":    "#b9770e",
         },
         "fallback": "#aab",
         "desc": "Burst pre-filter (Layer-1) result comparing frame to previous. NIGHT fires here — raw sensor property, no model needed.",
@@ -85,16 +90,6 @@ DISPLAY_SPEC: dict = {
         "fallback": ("#eee", "#778"),
         "desc": "Wakeup source — pir: motion sensor; rtc: scheduled 15-min reference cycle (only RTC frames update the background model)",
     },
-    "photo_bucket": {
-        "type": "badge",
-        "colors": {
-            "BRIGHT":   ("#fff3cd", "#856404"),
-            "NORMAL":   ("#d6eaf8", "#1a6fa8"),
-            "LOWLIGHT": ("#e8e8e8", "#555555"),
-        },
-        "fallback": ("#eee", "#778"),
-        "desc": "Exposure regime from metering shot — BRIGHT: gm ≥ 160, NORMAL: 80–159, LOWLIGHT: < 80. Selects the camera AEC profile and indexes the background model.",
-    },
     "battery": {
         "type": "format_val",
         "format": "{:.2f} V",
@@ -104,32 +99,6 @@ DISPLAY_SPEC: dict = {
     "global_mean": {
         "type": "numeric",
         "desc": "Mean Y (luma) across all 300 tiles, 0–255. Used to pick photo_bucket (BRIGHT/NORMAL/LOWLIGHT) and to detect NIGHT (< 70).",
-    },
-    "ratio": {
-        "type": "format_val",
-        "format": "{:.3f}",
-        "desc": "dark_tiles / 300. ≤ 0.25 → QUIET (suppress). Measures fraction of tiles with confirmed dark anomalies.",
-    },
-    "dark_tiles": {
-        "type": "numeric",
-        "desc": "Tiles ≥ 20 DN darker than model mean (Y drop) OR chroma-shifted vs model. ≥ 1 required for DARK_BLOB. Shown in blue in tile overlay.",
-    },
-    "dark_blob_max": {
-        "type": "numeric",
-        "desc": "Largest 8-connected cluster of dark_tiles. 1–5 → DARK_BLOB (bird-sized). > 5 → AMBIGUOUS (too large to be a bird). Shown in red in tile overlay.",
-    },
-    "texture_blob_max": {
-        "type": "numeric",
-        "desc": "Largest compact blob on texture+dark mask (std_y > 12 AND ΔY > 10 DN loosely). 1–5 → texture trigger for DARK_BLOB (second detection channel for structured plumage). 0 if texture signal inactive.",
-    },
-    "hp_score": {
-        "type": "format_val",
-        "format": "{:.1f} DN",
-        "desc": "Max high-pass delta = max(HF(model) − HF(tile)). Tile-local dark anomaly after blur removes illumination gradients. ≥ 25 DN → DARK_BLOB_HP (experimental).",
-    },
-    "n_chroma_changed": {
-        "type": "numeric",
-        "desc": "Tiles where ΔU² + ΔV² > 64 vs background model mean (chroma shift ≥ 8). Real objects (pigeons, people) shift chroma; cloud shadows do not.",
     },
     "burst_n_changed": {
         "type": "numeric",
@@ -148,8 +117,6 @@ DISPLAY_SPEC: dict = {
         "format": "{:.1f} DN",
         "desc": "Global mean Y change vs previous frame. > 12 DN → BRIGHTNESS_SHIFT (whole-scene lighting event; passes through regardless of tile pattern).",
     },
-    "dark_anomalous":    {"type": "numeric"},
-    "warmup":            {"type": "numeric"},
     "prev_valid":        {"type": "numeric"},
     # Simulated marker — shown when meta was computed by backfill_meta.py, not firmware.
     "simulated": {
@@ -164,15 +131,39 @@ DISPLAY_SPEC: dict = {
     "tile_means":           {"type": "detail_only", "desc": "300 Y (luma) tile means, 20×15 grid, uint8 (0–255). Drives the tile overlay Δm/Δp display."},
     "tile_means_u":         {"type": "detail_only", "desc": "300 U (Cb) tile means, BT.601 full-range, centred at 128."},
     "tile_means_v":         {"type": "detail_only", "desc": "300 V (Cr) tile means, BT.601 full-range, centred at 128."},
-    "model_tile_means":     {"type": "detail_only", "desc": "Background model Y means snapshot before this frame's update. Used for Δm in the tile overlay."},
-    "model_tile_means_u":   {"type": "detail_only"},
-    "model_tile_means_v":   {"type": "detail_only"},
     # Tile overlay — debug arrays for blob visualisation.
     # tile_color_mask: 0=none, 1=blue (dark_model tile), 2=red (qualifying dark blob tile).
-    "tile_color_mask":      {"type": "detail_only", "desc": "300 tile classification values: 0=background, 1=dark_model tile (blue, Δluma ≥ 20 or chroma-shifted), 2=dark_blob tile (red, in compact 1–5 tile cluster)."},
-    "tile_delta_luma":      {"type": "detail_only", "desc": "300 per-tile Δluma = model_y − tile_y (positive = tile darker than model). Threshold for blue: ≥ 20 DN."},
-    "tile_delta_chroma":    {"type": "detail_only", "desc": "300 per-tile Δchroma = √(ΔU² + ΔV²) vs background model mean. Threshold for chroma contribution: √64 ≈ 8 DN."},
     # Backfill-computed fields — suppress from card badge row; visible in detail table.
+    # ── clock-based pre-suppression (presuppress.c) ──────────────────────────
+    "why": {
+        "type": "stage_badge",
+        "palette": {
+            "SCORE":   "#b9770e",   # table score below threshold → suppressed
+            "PROCEED": "#27ae60",   # scored above threshold → uploaded
+            "RTC":     "#3498db",   # scheduled frame, never suppressed
+            "NO_TIME": "#c0392b",   # RTC unreadable → never suppress on a guess
+        },
+        "fallback": "#aab",
+        "desc": "Why this frame was or was not suppressed before the camera ran.",
+    },
+    "solar_elev": {"type": "format_val", "format": "{:.1f}°",
+                   "desc": "Sun elevation above the horizon. Negative = night. "
+                           "Seasonally comparable, unlike clock time."},
+    "quiet_gap":  {"type": "numeric",
+                   "desc": "Seconds since the previous PIR event. Long quiet means a real "
+                           "arrival is far more likely (1.2% birds under 30 s, 10.8% beyond 3 h)."},
+    "burst_pos":  {"type": "numeric",
+                   "desc": "Position in a run of triggers <60 s apart. Position 4+ contained "
+                           "no birds at all across 181 frames."},
+    "ps_score":   {"type": "numeric",
+                   "desc": "Lookup-table score 0-255; below ps_thr the event is suppressed."},
+    "ps_thr":     {"type": "numeric",
+                   "desc": "Active threshold (NVS ps_thr). Higher = more aggressive suppression."},
+    "batched":    {"type": "numeric", "desc": "Stored on-device and flushed later."},
+    "batch_dropped": {"type": "numeric",
+                      "desc": "Records dropped for capacity since the last flush. Non-zero means "
+                              "the store is undersized or WiFi has been failing for a long time."},
+
     "downloaded_at": {"type": "plain"},
     "burst_label":   {"type": "plain", "desc": "Burst filter decision label (mirrors burst_trigger stage name)."},
     # Firmware-flash marker — badge only on the first frame after a new build.
@@ -210,9 +201,10 @@ DISPLAY_SPEC: dict = {
 
 # Key display order for the card info panel (unlisted keys are appended after).
 DISPLAY_ORDER = [
-    "result", "stage", "burst_trigger", "source", "photo_bucket", "fresh_flash", "simulated",
+    "result", "stage", "why", "source", "burst_trigger", "fresh_flash", "simulated",
     "battery", "trigger",
-    "global_mean", "ratio", "dark_tiles", "dark_blob_max", "texture_blob_max",
-    "hp_score",
-    "n_chroma_changed", "burst_n_changed", "burst_n_dark", "burst_n_chroma",
+    # clock-based pre-suppression inputs — these decide whether a frame is sent
+    "solar_elev", "quiet_gap", "burst_pos", "ps_score", "ps_thr",
+    "global_mean", "burst_n_changed", "burst_n_dark", "burst_n_chroma",
+    "batch_dropped",
 ]

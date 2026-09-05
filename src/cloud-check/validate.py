@@ -1,3 +1,15 @@
+"""RETIRED 2026-09-05 — kept for reference only, do not run.
+
+This assumes the per-tile background model (EMA z-score over photo buckets,
+stages WARMUP / DARK_BLOB / QUIET / AMBIGUOUS).  That model was removed from the
+firmware after measurement showed it could not separate birds on this scene:
+32% recall at a 10% false-positive rate, against a requirement of 100%.
+
+Suppression now happens before the camera is powered, from the clock alone —
+solar elevation, quiet gap, burst position.  See presuppress_model.py, which
+fits that rule and exports the lookup table the firmware uses, and experiment.md
+for how the conclusion was reached.
+"""
 """
 validate.py — ESP-vs-Python parity validator.
 

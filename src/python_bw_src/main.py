@@ -24,6 +24,15 @@ _cc_abs = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)
 if _cc_abs not in sys.path:
     sys.path.insert(0, _cc_abs)
 
+# The server-side "shadow pipeline" re-runs the per-tile background model on
+# every upload and writes its verdict into meta.  That model is retired — it
+# measured 32% bird recall at a 10% false-positive rate against a requirement of
+# 100% — and the fields it produced (dark_tiles, ratio, dark_blob_max, …) have
+# been removed from the display spec, so leaving it on only re-introduces them
+# as unlabelled rows.  Off by default; set BW_SHADOW_PIPELINE=1 to re-enable it
+# for a one-off comparison rather than deleting the code outright.
+SHADOW_PIPELINE = os.getenv('BW_SHADOW_PIPELINE', '0') == '1'
+
 _LIVE_OK     = False
 _live_ready  = False
 _live_model  = None
@@ -204,7 +213,8 @@ def _get_tile_features(meta: dict, jpg_path) -> 'tuple':
 birdwatch_http = "http://192.168.1.43"
 global_status = "PIR_Sensor"
 session = Session  # scoped_session proxy — each thread gets its own Session instance
-threading.Thread(target=_warm_live_model, daemon=True).start()
+if SHADOW_PIPELINE:
+    threading.Thread(target=_warm_live_model, daemon=True).start()
 
 app = Flask(__name__, static_folder=os.getenv('JPG_FOLDER_PATH'), static_url_path='/static')
 
@@ -307,6 +317,38 @@ def battery():
 
 # ─────────────────────────────── /frame (new telemetry upload) ───────────────
 
+def _save_upload_image(image, prefix=''):
+    """Stream a multipart image part to disk and return (filename, path).
+
+    Shared by /frame and /batch: the ESP sends both with the same chunked body
+    and Image-Length header, and the read loop has to tolerate the stream
+    stalling mid-transfer, so it lives in one place rather than being copied.
+    Raises TimeoutError if the body never completes.
+    """
+    filename = prefix + datetime.now().strftime('%Y%m%d_%H%M%S_%f')[:-3] + '.jpg'
+    file_path = os.path.join(os.getenv('JPG_FOLDER_PATH', '/tmp'), filename)
+    image_length = int(request.headers.get('Image-Length', 0))
+    chunk_size = 2048
+    total_size = 0
+    wait_count = 0
+    with open(file_path, 'wb') as f:
+        while True:
+            chunk = image.stream.read(chunk_size)
+            if chunk:
+                f.write(chunk)
+                total_size += len(chunk)
+                continue
+            if image_length and total_size >= image_length:
+                break
+            if not image_length and total_size > 0:
+                break
+            wait_count += 1
+            time.sleep(0.5)
+            if wait_count > 20:
+                raise TimeoutError('image body never completed')
+    return filename, file_path
+
+
 @app.route('/frame', methods=['POST'])
 def process_frame_upload():
     """Generic upload endpoint for the new schema-less telemetry pipeline.
@@ -325,30 +367,10 @@ def process_frame_upload():
         if not image:
             return jsonify({'message': 'No image in request'}), 400
 
-        filename = datetime.now().strftime('%Y%m%d_%H%M%S') + '.jpg'
-        file_path = os.path.join(os.getenv('JPG_FOLDER_PATH', '/tmp'), filename)
-
-        with open(file_path, 'wb') as f:
-            image_length = int(request.headers.get('Image-Length', 0))
-            content_length = request.content_length
-            chunk_size = 2048
-            total_size = 0
-            wait_count = 0
-            while True:
-                chunk = image.stream.read(chunk_size)
-                if chunk:
-                    f.write(chunk)
-                    total_size += len(chunk)
-                else:
-                    if image_length and total_size >= image_length:
-                        break
-                    elif not image_length and total_size > 0:
-                        break
-                    else:
-                        wait_count += 1
-                        time.sleep(0.5)
-                        if wait_count > 20:
-                            return jsonify({'message': 'Timeout waiting for image data'}), 408
+        try:
+            filename, file_path = _save_upload_image(image)
+        except TimeoutError:
+            return jsonify({'message': 'Timeout waiting for image data'}), 408
 
         meta_raw = request.form.get('meta', '{}')
         try:
@@ -372,7 +394,7 @@ def process_frame_upload():
         # Re-run burst + background-model classification using the live Python model.
         # Overwrites algorithm fields in meta; preserves manual/external fields.
         # Raw ESP values are preserved under meta['esp_meta'] for comparison.
-        if _LIVE_OK and _live_ready:
+        if SHADOW_PIPELINE and _LIVE_OK and _live_ready:
             arr_y, arr_u, arr_v, gm = _get_tile_features(meta, file_path)
             if arr_y is not None:
                 try:
@@ -511,6 +533,69 @@ def process_frame_upload():
         return jsonify({'message': 'Server error'}), 500
 
 
+# ─────────────────────────────── /batch upload ───────────────────────────────
+
+@app.route('/batch', methods=['POST'])
+def process_batch_upload():
+    """One suppressed PIR event, held on the device and flushed later.
+
+    The ESP32 decides from the clock alone (solar elevation, quiet gap, burst
+    position) that a trigger was already explained, and skips both the camera
+    bracket and WiFi.  It still stores a thumbnail plus the decision inputs, and
+    sends them here on the next cycle that raises WiFi.  That is what makes an
+    aggressive suppression threshold safe: a wrong suppression shows up as a
+    reviewable `batched` row instead of vanishing.
+
+    Same multipart shape as /frame, but the row is marked result='batched' and
+    the server-side shadow pipeline is skipped — it expects a full-resolution
+    frame, and it is being retired along with the background model anyway.
+    """
+    try:
+        image = request.files.get('image')
+        filename = None
+        if image:
+            try:
+                filename, _ = _save_upload_image(image, prefix='thumb_')
+            except TimeoutError:
+                return jsonify({'message': 'Timeout waiting for image data'}), 408
+
+        try:
+            meta = json.loads(request.form.get('meta', '{}'))
+        except (json.JSONDecodeError, ValueError):
+            meta = {}
+
+        # captured_at must be the ORIGINAL event time, not receive time — these
+        # records arrive minutes to hours late, and the gallery orders by it.
+        captured_at = None
+        rtc_time = meta.get('rtc_time')
+        if rtc_time and rtc_time != '?':
+            try:
+                captured_at = datetime.strptime(rtc_time, '%Y-%m-%d %H:%M:%S')
+            except ValueError:
+                captured_at = None
+        if captured_at is None:
+            captured_at = datetime.now()
+
+        meta['esp_meta'] = dict(meta)
+        meta['batched'] = True
+        meta.setdefault('result', 'batched')
+
+        session.add(BwFrame(
+            captured_at=captured_at,
+            result='batched',
+            filename=filename,
+            meta=meta,
+        ))
+        session.commit()
+        print(f"[batch] {filename} why={meta.get('why')} "
+              f"score={meta.get('ps_score')} gap={meta.get('quiet_gap')}", flush=True)
+        return jsonify({'message': 'batched record stored'}), 200
+
+    except Exception as e:
+        print(f"Exception in /batch: {e}")
+        return jsonify({'message': 'Server error'}), 500
+
+
 # ─────────────────────────────── /frames gallery ─────────────────────────────
 
 @app.route('/')
@@ -528,13 +613,14 @@ def frames_index():
     show_rtc   = 'rtc' in src_active
 
     # Label checkboxes: ?lbl=bird,ignore,special,cloud,none  (defaults: all on)
-    lbl_param    = request.args.get('lbl', 'bird,ignore,special,cloud,none')
+    lbl_param    = request.args.get('lbl', 'bird,ignore,special,cloud,none,batched')
     lbl_active   = set(lbl_param.split(',')) if lbl_param else set()
     show_bird    = 'bird'    in lbl_active
     show_deleted = 'ignore'  in lbl_active
     show_special = 'special' in lbl_active
     show_cloud   = 'cloud'   in lbl_active   # result='clouds'
     show_none    = 'none'    in lbl_active   # unlabeled process frames
+    show_batched = 'batched' in lbl_active   # result='batched' — suppressed on-device
 
     from sqlalchemy import or_, and_, false as sql_false, true as sql_true
 
@@ -553,11 +639,14 @@ def frames_index():
             q = q.filter(BwFrame.meta['source'].astext == 'rtc')
 
     # Label / result filter
-    all_lbl = show_bird and show_deleted and show_special and show_cloud and show_none
+    all_lbl = (show_bird and show_deleted and show_special and show_cloud
+               and show_none and show_batched)
     if not all_lbl:
         lbl_clauses = []
         if show_cloud:
             lbl_clauses.append(BwFrame.result == 'clouds')
+        if show_batched:
+            lbl_clauses.append(BwFrame.result == 'batched')
         # Process frames filtered by label
         process_clauses = []
         if show_bird:
@@ -570,6 +659,7 @@ def frames_index():
             process_clauses.append(and_(
                 BwFrame.meta['label'].astext.is_(None),
                 BwFrame.result != 'clouds',
+                BwFrame.result != 'batched',
             ))
         if process_clauses:
             lbl_clauses.append(or_(*process_clauses))
@@ -582,6 +672,11 @@ def frames_index():
     total_pages = max(1, (total + per_page - 1) // per_page)
     page       = min(page, total_pages)
     entries    = q.order_by(BwFrame.captured_at.desc()).offset((page - 1) * per_page).limit(per_page).all()
+
+    batched_total = session.query(BwFrame).filter(BwFrame.result == 'batched').count()
+    batched_birds = (session.query(BwFrame)
+                     .filter(BwFrame.result == 'batched')
+                     .filter(BwFrame.meta['label'].astext == 'bird').count())
 
     latest = (session.query(BwFrame)
               .filter(BwFrame.filename.isnot(None))
@@ -606,6 +701,8 @@ def frames_index():
                            order=DISPLAY_ORDER,
                            src_active=src_active,
                            lbl_active=lbl_active,
+                           batched_total=batched_total,
+                           batched_birds=batched_birds,
                            src_param=src_param,
                            lbl_param=lbl_param)
 

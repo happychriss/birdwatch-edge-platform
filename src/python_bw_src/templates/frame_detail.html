@@ -382,8 +382,6 @@ const TILE_MEANS_V     = {{ (entry.meta.get('tile_means_v') if entry.meta else N
 const PREV_TILE_MEANS  = {{ prev_tile_means | tojson }};
 const MODEL_TILE_MEANS = {{ model_tile_means | tojson }};
 const GLOBAL_MEAN      = {{ (entry.meta.get('global_mean', 128) if entry.meta else 128) | tojson }};
-const DARK_TILES_COUNT = {{ (entry.meta.get('dark_tiles', 0) if entry.meta else 0) | tojson }};
-const DARK_BLOB_MAX    = {{ (entry.meta.get('dark_blob_max', 0) if entry.meta else 0) | tojson }};
 // 0=background, 1=dark_model tile (blue), 2=dark_blob tile (red, compact cluster → DARK_BLOB/texture trigger)
 const TILE_COLOR_MASK  = {{ (entry.meta.get('tile_color_mask') if entry.meta else None) | tojson }};
 
@@ -561,7 +559,6 @@ if (_imgWrap) {
       lines.push(`Δprev:  ${sign(-dp)}  (${dp > 0 ? 'darker' : 'brighter'} than prev)`);
       lines.push(`score:  ${sign(score)}  (Δm + Δp — ${score > 0 ? 'red' : score < 0 ? 'blue' : 'neutral'})`);
     }
-    lines.push(`─── dark_tiles: ${DARK_TILES_COUNT}  dark_blob_max: ${DARK_BLOB_MAX}`);
     _tooltip.textContent = lines.join('\n');
     _tooltip.style.display = 'block';
     _tooltip.style.left = (e.clientX + 14) + 'px';

@@ -86,6 +86,13 @@
                   font-size: 10px; letter-spacing: 0.5px; white-space: nowrap; }
   .filter-cb { display: flex; align-items: center; gap: 3px; cursor: pointer; white-space: nowrap; }
   .filter-cb input[type=checkbox] { width: 14px; height: 14px; cursor: pointer; accent-color: #1a6fa8; }
+  .cb-batched { color: #b9770e; }
+  .audit-counter { margin-left: 10px; font-size: 11px; color: #666; cursor: help; }
+  /* Batched rows are thumbnails of events the device chose not to send, so mark
+     them clearly — they are evidence to review, not normal captures. */
+  .card.result-batched { border: 1px dashed #b9770e; background: #fffaf2; }
+  .card.result-batched .card-img-wrap { opacity: .82; }
+  .flag-batched { background: #b9770e; color: #fff; }
   .filter-cb.cb-pir    input { accent-color: #c0392b; }
   .filter-cb.cb-rtc    input { accent-color: #1a7d5c; }
   .filter-cb.cb-bird   input { accent-color: #27ae60; }
@@ -244,6 +251,18 @@
       <input type="checkbox" name="lbl_none" value="1" onchange="submitFilters()"
              {{ 'checked' if 'none' in lbl_active }}>Unlabeled
     </label>
+    <label class="filter-cb cb-batched" title="Suppressed on-device from the clock; thumbnail kept for review">
+      <input type="checkbox" name="lbl_batched" value="1" onchange="submitFilters()"
+             {{ 'checked' if 'batched' in lbl_active }}>Batched
+    </label>
+    {% if batched_total %}
+    <span class="audit-counter"
+          title="Batched rows later labelled bird — the measured field miss-rate. This is what tells you whether the suppression threshold is set too aggressively.">
+      batched {{ batched_total }} &nbsp;|&nbsp;
+      <b{% if batched_birds %} style="color:#c0392b"{% endif %}>{{ batched_birds }} were birds</b>
+      {%- if batched_total %} ({{ '%.1f'|format(100 * batched_birds / batched_total) }}%){% endif %}
+    </span>
+    {% endif %}
   </div>
 </form>
 
@@ -253,7 +272,7 @@
   {% set meta = entry.meta or {} %}
   {% set esp_meta = meta.get('esp_meta') or {} %}
   {% set result = meta.get('result', 'unknown') %}
-  {% set card_cls = 'result-' + result if result in ('clouds', 'process') else 'result-unknown' %}
+  {% set card_cls = 'result-' + result if result in ('clouds', 'process', 'batched') else 'result-unknown' %}
 
   <div class="card {{ card_cls }}"
        ondblclick="openPhoto('{{ url_for('static', filename=entry.filename) if entry.filename else '' }}','{{ meta.get('label') or '' }}',{{ 'true' if meta.get('downloaded_at') else 'false' }})">
@@ -273,6 +292,8 @@
         </div>
         {% if lbl %}<span class="label-flag flag-{{ lbl }}">{{ lbl }}</span>{% endif %}
         {% if dl %}<span class="label-flag flag-saved">saved</span>{% endif %}
+        {% if result == 'batched' %}<span class="label-flag flag-batched"
+             title="Suppressed on-device — never uploaded live. Label it 'bird' if the suppression was wrong.">batched</span>{% endif %}
       </a>
     {% else %}
       <div class="no-photo">no image</div>
@@ -327,6 +348,7 @@ function submitFilters() {
   if (form.querySelector('[name=lbl_special]').checked) lblParts.push('special');
   if (form.querySelector('[name=lbl_cloud]').checked)  lblParts.push('cloud');
   if (form.querySelector('[name=lbl_none]').checked)   lblParts.push('none');
+  if (form.querySelector('[name=lbl_batched]').checked) lblParts.push('batched');
   const src = srcParts.join(',') || 'pir';  // avoid empty string breaking defaults
   const lbl = lblParts.join(',') || 'none';
   localStorage.setItem('bw_src_filter', src);
@@ -342,7 +364,7 @@ function submitFilters() {
     const savedLbl = localStorage.getItem('bw_lbl_filter');
     if (savedSrc || savedLbl) {
       const src = savedSrc || 'pir,rtc';
-      const lbl = savedLbl || 'bird,ignore,special,cloud,none';
+      const lbl = savedLbl || 'bird,ignore,special,cloud,none,batched';
       location.replace('/?src=' + encodeURIComponent(src) + '&lbl=' + encodeURIComponent(lbl));
     }
   }
