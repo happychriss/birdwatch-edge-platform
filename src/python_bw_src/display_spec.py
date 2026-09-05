@@ -176,6 +176,14 @@ DISPLAY_SPEC: dict = {
         "desc": "First frame captured after a new firmware flash. Background model was reset.",
     },
     "fw_build":    {"type": "detail_only"},
+    "fw_version":  {"type": "plain",
+                    "desc": "Git describe string embedded in the running image. Compared against "
+                            "/firmware/version by app_elf_sha256 to decide whether to pull an update."},
+    "ota_pending": {"type": "badge",
+                    "colors": {"True": ("#fdebd0", "#b9770e"), "1": ("#fdebd0", "#b9770e")},
+                    "fallback": ("#eee", "#778"),
+                    "desc": "Image booted from OTA and is on probation. It is confirmed only after a "
+                            "successful upload; otherwise the bootloader reverts it on the next boot."},
     # Manual annotation labels (set via keyboard in frame_detail view).
     "label": {
         "type": "badge",
@@ -206,5 +214,5 @@ DISPLAY_ORDER = [
     # clock-based pre-suppression inputs — these decide whether a frame is sent
     "solar_elev", "quiet_gap", "burst_pos", "ps_score", "ps_thr",
     "global_mean", "burst_n_changed", "burst_n_dark", "burst_n_chroma",
-    "batch_dropped",
+    "batch_dropped", "ota_pending",
 ]

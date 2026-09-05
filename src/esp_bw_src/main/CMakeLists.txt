@@ -10,6 +10,7 @@ idf_component_register(
         "cloud_check.c"
         "presuppress.c"
         "batch_store.c"
+        "ota.c"
         "http_client.c"
         "camera_server.c"
         "diag.c"

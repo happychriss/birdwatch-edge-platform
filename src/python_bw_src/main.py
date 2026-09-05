@@ -1,8 +1,9 @@
-from flask import Flask, request, jsonify, render_template, redirect, send_from_directory, abort
+from flask import Flask, request, jsonify, render_template, redirect, send_from_directory, send_file, abort
 from datetime import datetime, timedelta
 from collections import defaultdict
 import json
 import os
+import struct
 import sys
 import requests
 import subprocess
@@ -531,6 +532,72 @@ def process_frame_upload():
     except Exception as e:
         print(f"Exception in /frame: {e}")
         return jsonify({'message': 'Server error'}), 500
+
+
+# ─────────────────────────────── firmware / OTA ──────────────────────────────
+# The device cannot be flashed remotely — it is power-gated and only reachable
+# over USB during a brief active window — so it PULLS updates during an RTC wake
+# cycle.  Nothing here pushes: the server just states which image it wants
+# running, and the device collects it the next time it happens to call in.
+
+FIRMWARE_PATH = os.getenv(
+    'BW_FIRMWARE_PATH',
+    os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                 'esp_bw_src', 'build', 'birdwatch.bin'))
+
+
+def _read_app_desc(path):
+    """Parse the esp_app_desc_t ESP-IDF embeds in every image.
+
+    It sits right after the 24-byte image header plus an 8-byte segment header.
+    Reading it here means the server and the device compare the *same* field —
+    app_elf_sha256, which is exact per build — instead of trusting a filename or
+    an out-of-band version string that can drift from the binary.
+    """
+    with open(path, 'rb') as f:
+        head = f.read(240)
+    if len(head) < 208:
+        raise ValueError('firmware too short to contain an app descriptor')
+    off = 32
+    magic = struct.unpack_from('<I', head, off)[0]
+    if magic != 0xABCD5432:
+        raise ValueError(f'bad app-descriptor magic 0x{magic:08X}')
+
+    def field(rel, n):
+        return head[off + rel:off + rel + n].split(b'\0')[0].decode('ascii', 'replace')
+
+    return {
+        'version':      field(16, 32),
+        'project_name': field(48, 32),
+        'time':         field(80, 16),
+        'date':         field(96, 16),
+        'idf_ver':      field(112, 32),
+        'sha256':       head[off + 144:off + 176].hex(),
+    }
+
+
+@app.route('/firmware/version')
+def firmware_version():
+    """What image should the device be running?  Non-200 simply means 'stay put'."""
+    try:
+        d = _read_app_desc(FIRMWARE_PATH)
+        d['size'] = os.path.getsize(FIRMWARE_PATH)
+        return jsonify(d), 200
+    except FileNotFoundError:
+        return jsonify({'message': 'no firmware published'}), 404
+    except Exception as e:
+        print(f"/firmware/version: {e}")
+        return jsonify({'message': str(e)}), 500
+
+
+@app.route('/firmware/bin')
+def firmware_bin():
+    """Serve the image itself.  The device streams it straight into the inactive
+    OTA slot, so a Content-Length must be present — send_file sets it."""
+    if not os.path.exists(FIRMWARE_PATH):
+        return jsonify({'message': 'no firmware published'}), 404
+    return send_file(FIRMWARE_PATH, mimetype='application/octet-stream',
+                     as_attachment=False, conditional=False)
 
 
 # ─────────────────────────────── /batch upload ───────────────────────────────

@@ -40,6 +40,8 @@
 #define BW_UPLOAD_URL  BW_SERVER_BASE "/frame"
 #define BW_STATUS_URL  BW_SERVER_BASE "/status"
 #define BW_BATCH_URL   BW_SERVER_BASE "/batch"
+#define BW_OTA_VERSION_URL BW_SERVER_BASE "/firmware/version"
+#define BW_OTA_BIN_URL     BW_SERVER_BASE "/firmware/bin"
 // ─── HTTP client retry ──────────────────────────────────────────────────────
 #define BW_HTTP_TIMEOUT_MS    20000
 #define BW_HTTP_MAX_RETRIES   3
@@ -134,6 +136,18 @@
 // JPEG in hardware, so this costs one grab and no decode.
 #define BW_THUMB_FRAMESIZE       FRAMESIZE_SVGA
 #define BW_THUMB_JPEG_QUALITY    12
+
+// ─── OTA firmware update ────────────────────────────────────────────────────
+// The device cannot be flashed remotely (power-gated; no USB except during the
+// brief active window), so updates are pulled during a wake cycle.  Checked on
+// RTC wakes ONLY — a PIR wake may have a bird waiting, and delaying that upload
+// by a ~1.2 MB download to save at most one RTC interval of latency is a bad
+// trade.  The device never reboots for an update: the image is written to the
+// inactive slot and the next natural wake boots it.
+#define BW_OTA_ENABLE        1
+// The download is the one phase that can outlast a normal cycle, so it gets its
+// own watchdog deadline rather than looking like a hung cycle on a slow link.
+#define BW_OTA_TIMEOUT_MS    120000
 
 // ─── Post-cycle cooldown (light sleep before power release / reboot) ────────
 // Halts CPU so residual switching noise does not extend the PIR pulse.

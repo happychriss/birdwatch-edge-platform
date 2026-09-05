@@ -1,18 +1,30 @@
 # Custom partition table for 8 MB flash.
 #
-# `factory` was 0x600000 while the app binary is ~1.2 MB — nearly 5 MB of dead
-# space.  The batched-record store needs room for suppressed-event images at
-# half the capture resolution (~60-100 KB each), which the old 1 MB `storage`
-# could barely hold ten of.  Shrinking `factory` to 2.3 MB still leaves ~2x
-# headroom over the current binary and gives the store ~5.6 MB — several days
-# of backlog even if WiFi stays down.
+# Two changes from the old single-`factory` layout, both made at once because
+# each needs a full erase and the device is hard to reach physically:
+#
+#  1. `factory` was 0x600000 while the app binary is ~1.2 MB — nearly 5 MB of
+#     dead space.  The batched-record store needs room for suppressed-event
+#     images at half the capture resolution (~60-100 KB each); the old 1 MB
+#     `storage` could barely hold ten.
+#  2. OTA slots, because the device cannot be flashed remotely — it is
+#     power-gated and /dev/ttyACM0 only exists during a brief active window.
+#     Reserving the slots now costs ~0.9 MB of store; adding them later would
+#     cost another erase-flash and another trip to the device.
+#
+# ota_0/ota_1 are 0x190000 (1.6 MB) — 1.35x the current binary, so there is
+# real headroom for growth while still leaving ~4.9 MB for batched records
+# (~55, several days of backlog against a flush that happens every 20 min-2 h).
+# App partitions must start on a 64 KB boundary, hence ota_0 at 0x20000.
 #
 # CHANGING THIS REQUIRES `idf.py erase-flash` ONCE: the offsets move, and a
 # plain flash would leave the old table in place.  That also wipes NVS,
 # including the WiFi PMK cache, so expect one slower WPA2 handshake afterwards.
 #
-# Name,   Type, SubType, Offset,   Size,    Flags
-nvs,      data, nvs,     0x9000,   0x6000,
-phy_init, data, phy,     0xf000,   0x1000,
-factory,  app,  factory, 0x10000,  0x250000,
-storage,  data, spiffs,  ,         0x5A0000,
+# Name,     Type, SubType, Offset,   Size,     Flags
+nvs,        data, nvs,     0x9000,   0x6000,
+otadata,    data, ota,     0xf000,   0x2000,
+phy_init,   data, phy,     0x11000,  0x1000,
+ota_0,      app,  ota_0,   0x20000,  0x190000,
+ota_1,      app,  ota_1,   ,         0x190000,
+storage,    data, spiffs,  ,         0x4C0000,

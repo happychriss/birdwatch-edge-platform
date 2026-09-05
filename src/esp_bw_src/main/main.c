@@ -56,6 +56,7 @@
 #include "cloud_check.h"
 #include "presuppress.h"
 #include "batch_store.h"
+#include "ota.h"
 #include "http_client.h"
 #include "camera_server.h"
 #include "diag.h"
@@ -611,6 +612,8 @@ static void run_normal_cycle(void)
             bw_tele_b("fresh_flash", true);
             bw_tele_s("fw_build",   s_fw_build);
         }
+        bw_tele_s("fw_version", bw_ota_version());
+        if (bw_ota_pending_verify()) bw_tele_b("ota_pending", true);
         mode = bw_http_upload_image(bw_tele_json(), img, img_len);
         if (mode != BW_MODE_ERROR) break;
     }
@@ -624,7 +627,25 @@ static void run_normal_cycle(void)
         bw_diag_push("UPLOAD_FAIL");
         bw_blink(BW_BLINK_ERR_UPLOAD);
         bw_http_post_status(0.0f, "Error sending image");
-    } else if (mode == BW_MODE_CAMERA_SERVER) {
+    } else {
+        // Reached only on a genuinely successful upload — this image
+        // demonstrably talks to the server, which is the whole bar for
+        // cancelling the pending rollback.  Firmware that cannot get here
+        // reverts itself on the next boot with nobody touching the device.
+        bw_ota_mark_valid();
+
+#if BW_OTA_ENABLE
+        // RTC wakes only: a PIR wake may have a bird queued behind this, and a
+        // ~1.2 MB download would delay it to save at most one RTC interval.
+        if (s_wakeup_source == BW_WAKE_RTC) {
+            esp_err_t ota = bw_ota_check_and_apply();
+            if (ota == ESP_OK)
+                ESP_LOGI(TAG, "new image staged — it boots on the next wake");
+        }
+#endif
+    }
+
+    if (mode == BW_MODE_CAMERA_SERVER) {
         ESP_LOGI(TAG, "server requested CAMERA_SERVER mode");
         bw_http_post_status(battery_v, "Camera Start");
         bw_watchdog_stop();  // camera server is user-controlled; loop has its own timeout
