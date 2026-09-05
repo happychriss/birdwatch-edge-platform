@@ -5,3 +5,11 @@ reports/*.png
 reports/*.csv
 reports/*.json
 synth-data/
+
+# generated experiment artifacts — large, reproducible from the scripts
+.jpg_cache/
+bird_pipeline_out/
+regime_diff_out/
+pixel_delta_out/
+bird_seed.npz
+model_seed.json
