@@ -240,6 +240,28 @@ def set_status():
 
 
 
+@app.route('/status', methods=['POST'])
+def device_status():
+    """Heartbeat / diagnostic flush from the device.
+
+    bw_http_post_status() posts here whenever the firmware has queued errors
+    (bw_diag_push) or wants to announce a mode change, and it only clears its
+    local diagnostic log when this returns 2xx.  The route did not exist on
+    either server, so every such post 404'd and the device's error log could
+    never drain or reach us.  Deliberately does NOT create a bw_frames row —
+    these are log lines, not captures, and rows without images would clutter
+    the gallery.
+    """
+    try:
+        d = request.get_json(silent=True) or request.form.to_dict() or {}
+        print(f"[status] battery={d.get('battery')} source={d.get('source')} "
+              f"trigger={d.get('trigger')!r}", flush=True)
+        return jsonify({'message': 'ok', 'global_status': global_status}), 200
+    except Exception as e:
+        print(f"Exception in /status: {e}")
+        return jsonify({'message': 'Server error'}), 500
+
+
 @app.route('/battery')
 def battery():
     # bw_frames is the active table; battery lives in meta->>'battery'

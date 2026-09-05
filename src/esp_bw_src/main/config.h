@@ -29,14 +29,23 @@
 #define BW_BATT_SAMPLE_DELAY_MS   10
 
 // ─── Server endpoint ─────────────────────────────────────────────────────────
-// TARGET_ZO -> use second WiFi/server pair, otherwise primary.
-#define BW_TARGET_ZO 1
-#if BW_TARGET_ZO
+// 0 = PRODUCTION   192.168.1.110 — the Zo server.
+// 1 = DEV/TEST     192.168.1.100 — the docker host; :8000 is published into the
+//                  dev container, so this reaches a server started from
+//                  src/python_bw_src/ there.  Verified by fetching
+//                  /firmware/version and matching the container's own sha256.
+//                  NOTE: the dev server writes to the SAME database as
+//                  production (DB_HOST=192.168.1.110), so test frames appear in
+//                  the normal gallery.
+#define BW_TARGET  1
+
+#if   BW_TARGET == 0
   #define BW_SERVER_HOST "192.168.1.110"
 #else
   #define BW_SERVER_HOST "192.168.1.100"
 #endif
-#define BW_SERVER_BASE "http://" BW_SERVER_HOST ":8000"
+#define BW_SERVER_PORT "8000"
+#define BW_SERVER_BASE "http://" BW_SERVER_HOST ":" BW_SERVER_PORT
 #define BW_UPLOAD_URL  BW_SERVER_BASE "/frame"
 #define BW_STATUS_URL  BW_SERVER_BASE "/status"
 #define BW_BATCH_URL   BW_SERVER_BASE "/batch"
