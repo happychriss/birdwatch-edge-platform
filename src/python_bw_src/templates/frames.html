@@ -1,4 +1,4 @@
-{% from '_meta_render.html' import render_badges %}
+{% from '_meta_render.html' import render_key_badges %}
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -301,12 +301,12 @@
     <div class="info">
       <div class="date-text">{{ entry.captured_at.strftime("%d.%m.%y %H:%M") if entry.captured_at else '—' }}</div>
       <div class="row sim-badges">
-        {{ render_badges(meta, spec, order) }}
+        {{ render_key_badges(meta, spec, card_fields) }}
       </div>
       {% if esp_meta %}
       <div class="row esp-badges" style="display:none">
         <span class="badge" style="background:#e67e22;color:#fff;font-size:9px;padding:1px 4px;">ESP</span>
-        {{ render_badges(esp_meta, spec, order) }}
+        {{ render_key_badges(esp_meta, spec, card_fields) }}
       </div>
       {% endif %}
     </div>

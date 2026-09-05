@@ -109,6 +109,11 @@
         {% else %}
           <span class="badge" style="background:#f4f6f7;color:#556;border:1px solid #dce">{{ fmt.format(val) }}</span>
         {% endif %}
+      {% elif rtype not in ('detail_only', 'hide_values') %}
+        {# plain numeric/bool — shown only because the caller asked for this key #}
+        {% if val is not none %}
+          <span class="badge" style="background:#f4f6f7;color:#556;border:1px solid #dce">{{ k }}: {{ val }}</span>
+        {% endif %}
       {% endif %}
     {% endif %}
   {% endfor %}

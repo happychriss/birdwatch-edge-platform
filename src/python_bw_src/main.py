@@ -13,7 +13,7 @@ from pathlib import Path
 from sqlalchemy.orm.attributes import flag_modified
 from sqlalchemy import text
 from db import BwFrame, Session
-from display_spec import DISPLAY_SPEC, DISPLAY_ORDER
+from display_spec import DISPLAY_SPEC, DISPLAY_ORDER, DISPLAY_CARD_FIELDS
 
 # ─── Live background model ────────────────────────────────────────────────────
 # Maintains an in-process BackgroundModel that mirrors the ESP's NVS state.
@@ -238,6 +238,30 @@ def set_status():
             print(f"Error: {e}")
     return redirect('/')
 
+
+
+# ── /static fallback to the photo server ────────────────────────────────────
+# The dev container shares the production DATABASE but not the photo files: the
+# gallery lists all 4600+ frames while only a handful of JPEGs exist locally, so
+# almost every thumbnail 404s and the page looks empty.  Copying ~1 GB of images
+# to test /batch and OTA would be silly, so serve what is here and redirect the
+# rest to the machine that actually holds them.
+#
+# Overrides Flask's built-in 'static' view rather than adding a second route, so
+# url_for('static', ...) in the templates keeps working untouched.
+PHOTO_FALLBACK = os.getenv('BW_PHOTO_FALLBACK', 'http://192.168.1.110:8000')
+
+
+def _static_with_fallback(filename):
+    folder = os.getenv('JPG_FOLDER_PATH', '/tmp')
+    if os.path.exists(os.path.join(folder, filename)):
+        return send_from_directory(folder, filename)
+    if PHOTO_FALLBACK:
+        return redirect(f"{PHOTO_FALLBACK.rstrip('/')}/static/{filename}", code=302)
+    abort(404)
+
+
+app.view_functions['static'] = _static_with_fallback
 
 
 @app.route('/status', methods=['POST'])
@@ -533,7 +557,12 @@ def process_frame_upload():
                 except Exception as _pipe_exc:
                     print(f"[sim] pipeline error for {filename}: {_pipe_exc}", flush=True)
 
-        meta['esp_meta'] = esp_meta   # always store raw ESP snapshot
+        # esp_meta exists to preserve the raw ESP values before the shadow
+        # pipeline overwrites them.  With that pipeline off it is a byte-identical
+        # copy, which doubled every detail page (55 rows, each field twice) and
+        # doubled the JSONB stored per frame.  Keep it only when it says something.
+        if esp_meta != {k: v for k, v in meta.items() if k != 'esp_meta'}:
+            meta['esp_meta'] = esp_meta
         result = meta.get('result')
 
         frame = BwFrame(
@@ -788,6 +817,7 @@ def frames_index():
                            last_seen_detail=last_seen_detail,
                            spec=DISPLAY_SPEC,
                            order=DISPLAY_ORDER,
+                           card_fields=DISPLAY_CARD_FIELDS,
                            src_active=src_active,
                            lbl_active=lbl_active,
                            batched_total=batched_total,

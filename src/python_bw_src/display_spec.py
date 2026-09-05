@@ -208,8 +208,21 @@ DISPLAY_SPEC: dict = {
 }
 
 # Key display order for the card info panel (unlisted keys are appended after).
+# Gallery card: a STRICT whitelist, rendered with render_key_badges so unlisted
+# meta keys are never auto-appended.  Before this the card showed 22 badges per
+# frame — 12 of them camera internals (awb_*, ettr_*, bracket_*, next_wakeup)
+# that nobody reads at thumbnail size.  Exception fields are listed too but cost
+# nothing on a normal frame, because absent keys render nothing.
+DISPLAY_CARD_FIELDS = [
+    "result", "stage", "why",        # what happened, and why it was or was not sent
+    "source", "battery",             # rtc vs pir, and the one health number
+    "fresh_flash", "ota_pending", "batch_dropped",   # only ever appear when true
+]
+
+# Detail page ordering.  The detail table renders every meta key regardless;
+# this just puts the interesting ones first.
 DISPLAY_ORDER = [
-    "result", "stage", "why", "source", "burst_trigger", "fresh_flash", "simulated",
+    "result", "stage", "why", "source", "burst_trigger", "fresh_flash",
     "battery", "trigger",
     # clock-based pre-suppression inputs — these decide whether a frame is sent
     "solar_elev", "quiet_gap", "burst_pos", "ps_score", "ps_thr",
