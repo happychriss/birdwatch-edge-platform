@@ -50,11 +50,6 @@
     min-height: 40px; display: inline-flex; align-items: center;
   }
   .btn:hover { background: #daeaf7; }
-  .btn-pir { background: #e8f5e9; border-color: #a5d6a7; color: #2e7d32; }
-  .btn-pir:hover { background: #c8e6c9; }
-  .btn-backfill { background: #fef9e7; border-color: #f9ca24; color: #7d6608; }
-  .btn-backfill:hover { background: #fdebd0; }
-  .btn-backfill:disabled { opacity: 0.5; cursor: default; }
 
   /* ── Label flag on card image ── */
   .label-flag {
@@ -180,7 +175,6 @@
 <header>
   <h1>🐦 BirdWatch</h1>
   <a class="nav-link" href="/battery">Battery</a>
-  <a class="nav-link" href="/validate">Validate</a>
   <span class="header-mode">{{ status }} &nbsp;·&nbsp; <span id="countdown">5:00</span></span>
 </header>
 
@@ -201,13 +195,6 @@
 
 <!-- ── Controls ── -->
 <div class="controls">
-  <button class="btn btn-pir" onclick="location.href='/set_status?status=PIR_Sensor'">PIR Sensor</button>
-  <button class="btn btn-backfill" id="btn-backfill" onclick="runBackfill(false)" title="Simulate burst+bg pipeline on old frames">Backfill old</button>
-  <span id="backfill-status" style="font-size:12px;color:#556;"></span>
-  <div style="display:flex;gap:4px;">
-    <button class="view-btn active" id="btn-sim-mode" onclick="applySimEspMode('sim')" title="Show server-simulated results" style="font-size:12px;padding:6px 11px;font-weight:700;">SIM</button>
-    <button class="view-btn"        id="btn-esp-mode" onclick="applySimEspMode('esp')" title="Show raw ESP firmware results"  style="font-size:12px;padding:6px 11px;font-weight:700;">ESP</button>
-  </div>
   <div class="view-toggle">
     <button class="view-btn" id="btn-tiles" onclick="toggleAlwaysTiles()" title="Always show tile overlay">&#9783;</button>
     <button class="view-btn active" id="btn-grid" onclick="setView('grid')" title="Grid view">⊞</button>
@@ -303,12 +290,6 @@
       <div class="row sim-badges">
         {{ render_key_badges(meta, spec, card_fields) }}
       </div>
-      {% if esp_meta %}
-      <div class="row esp-badges" style="display:none">
-        <span class="badge" style="background:#e67e22;color:#fff;font-size:9px;padding:1px 4px;">ESP</span>
-        {{ render_key_badges(esp_meta, spec, card_fields) }}
-      </div>
-      {% endif %}
     </div>
   </div>
 {% endfor %}
@@ -370,41 +351,17 @@ function submitFilters() {
   }
 })();
 
-// ── SIM/ESP mode ──────────────────────────────────────────────────────────
-let _cardMode = localStorage.getItem('bw_sim_mode') || 'sim';
-
-function applySimEspMode(mode) {
-  _cardMode = mode;
-  localStorage.setItem('bw_sim_mode', mode);
-  const btnSim = document.getElementById('btn-sim-mode');
-  const btnEsp = document.getElementById('btn-esp-mode');
-  if (btnSim) { mode === 'sim' ? btnSim.classList.add('active') : btnSim.classList.remove('active'); }
-  if (btnEsp) { mode === 'esp' ? btnEsp.classList.add('active') : btnEsp.classList.remove('active'); }
-  document.querySelectorAll('.sim-badges').forEach(el => { el.style.display = mode === 'sim' ? '' : 'none'; });
-  document.querySelectorAll('.esp-badges').forEach(el => { el.style.display = mode === 'esp' ? '' : 'none'; });
-  if (document.getElementById('photo-grid').classList.contains('always-tiles')) {
-    document.querySelectorAll('.card-img-wrap').forEach(wrap => {
-      const img = wrap.querySelector('img');
-      const canvas = wrap.querySelector('canvas');
-      if (img && canvas) drawCardTiles(img, canvas);
-    });
-  }
-}
-
 // ── Always-tiles toggle ───────────────────────────────────────────────────
 const TILE_COLS = 20, TILE_ROWS = 15;
 const DARK_DELTA = 20;
 
 function drawCardTiles(img, canvas) {
-  const useEsp = (_cardMode === 'esp');
-  const tilesAttr = useEsp ? 'data-tiles-esp' : 'data-tiles';
-  const tilesRaw = img.getAttribute(tilesAttr);
+  const tilesRaw = img.getAttribute('data-tiles');
   if (!tilesRaw || tilesRaw === 'null') return;
   let tiles; try { tiles = JSON.parse(tilesRaw); } catch(e) { return; }
-  const modelAttr = useEsp ? 'data-model-esp' : 'data-model';
-  const modelRaw = img.getAttribute(modelAttr);
+  const modelRaw = img.getAttribute('data-model');
   let model = null; try { model = modelRaw && modelRaw !== 'null' ? JSON.parse(modelRaw) : null; } catch(e) {}
-  const gm = parseFloat(img.getAttribute(useEsp ? 'data-gm-esp' : 'data-gm') || '128');
+  const gm = parseFloat(img.getAttribute('data-gm') || '128');
   const w = img.offsetWidth, h = img.offsetHeight;
   if (!w || !h) return;
   canvas.width = w; canvas.height = h;
@@ -463,7 +420,6 @@ function toggleAlwaysTiles() {
 }
 
 (function(){ if (localStorage.getItem('bw_always_tiles') === '1') applyAlwaysTiles(true); })();
-(function(){ applySimEspMode(_cardMode); })();
 
 function openPhoto(url, label, saved) {
   if (!url) return;
@@ -478,32 +434,7 @@ function closePhoto() { document.getElementById('lightbox').classList.remove('op
 document.getElementById('lightbox').addEventListener('click', function(e){ if (e.target===this) closePhoto(); });
 document.addEventListener('keydown', function(e){ if (e.key==='Escape') closePhoto(); });
 
-function runBackfill(force) {
-  const btn = document.getElementById('btn-backfill');
-  const status = document.getElementById('backfill-status');
-  btn.disabled = true;
-  status.textContent = 'Running…';
-  fetch('/admin/backfill', {method:'POST', headers:{'Content-Type':'application/json'},
-                            body: JSON.stringify({force: force})})
-    .then(r => r.json())
-    .then(() => pollBackfill())
-    .catch(e => { status.textContent = 'Error: ' + e; btn.disabled = false; });
-}
 
-function pollBackfill() {
-  fetch('/admin/backfill').then(r => r.json()).then(data => {
-    const status = document.getElementById('backfill-status');
-    const btn = document.getElementById('btn-backfill');
-    if (data.running) {
-      status.textContent = 'Running…';
-      setTimeout(pollBackfill, 1500);
-    } else {
-      const lines = (data.log || '').trim().split('\n');
-      status.textContent = lines[lines.length - 1] || 'Done';
-      btn.disabled = false;
-    }
-  });
-}
 
 // Save exact gallery URL so frame_detail Back button can return here
 function _attachGalleryReturn(root) {
@@ -538,13 +469,6 @@ function _loadNextPage() {
       _iLoading = false;
       _sentinel.textContent = _iPage < _iTotalPages ? '' : '— end —';
       if (_iPage >= _iTotalPages) _iObs.unobserve(_sentinel);
-      // Apply active SIM/ESP mode to newly added cards
-      newCards.forEach(c => {
-        const simB = c.querySelector('.sim-badges');
-        const espB = c.querySelector('.esp-badges');
-        if (simB) simB.style.display = _cardMode === 'sim' ? '' : 'none';
-        if (espB) espB.style.display = _cardMode === 'esp' ? '' : 'none';
-      });
       // Apply tile overlay to newly added cards if always-tiles is on
       if (grid.classList.contains('always-tiles')) {
         newCards.forEach(c => {

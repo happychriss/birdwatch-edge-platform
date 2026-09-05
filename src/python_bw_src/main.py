@@ -909,11 +909,7 @@ def frame_detail():
 
 # ─────────────────────────────── /validate ───────────────────────────────────
 
-_validate_results: list = []   # last run results held in-process (dev/admin use)
-_validate_running: bool = False
 
-_backfill_log: str = ''
-_backfill_running: bool = False
 
 
 # ─────────────────────────────── /frame/<id>/label ───────────────────────────
@@ -1029,93 +1025,10 @@ def mark_downloaded(frame_id: int):
     return jsonify({'id': frame_id, 'downloaded_at': meta['downloaded_at']}), 200
 
 
-@app.route('/admin/backfill', methods=['GET'])
-def backfill_status():
-    return jsonify({'running': _backfill_running, 'log': _backfill_log})
-
-
-@app.route('/admin/backfill', methods=['POST'])
-def backfill_run():
-    global _backfill_log, _backfill_running
-    if _backfill_running:
-        return jsonify({'status': 'already running'}), 409
-
-    force = (request.json or {}).get('force', False)
-
-    def _run():
-        global _backfill_log, _backfill_running
-        _backfill_running = True
-        try:
-            here = os.path.dirname(os.path.abspath(__file__))
-            cc_dir = os.path.join(here, '..', 'cloud-check')
-            venv_py = os.path.join(cc_dir, '.venv', 'bin', 'python')
-            if not os.path.exists(venv_py):
-                venv_py = 'python3'
-            script = os.path.join(cc_dir, 'backfill_meta.py')
-            args = [venv_py, script]
-            if force:
-                args.append('--force')
-            proc = subprocess.run(args, capture_output=True, text=True, timeout=600)
-            _backfill_log = proc.stdout
-            if proc.stderr:
-                _backfill_log += '\n--- stderr ---\n' + proc.stderr
-            if proc.returncode != 0:
-                _backfill_log = f'ERROR (exit {proc.returncode}):\n' + _backfill_log
-        except Exception as exc:
-            _backfill_log = f'Exception: {exc}'
-        finally:
-            _backfill_running = False
-
-    threading.Thread(target=_run, daemon=True).start()
-    return jsonify({'status': 'started'}), 202
-
-
-@app.route('/validate/run', methods=['POST'])
-def validate_run():
-    """Run validate.py via its own venv (cloud-check has numpy/Pillow/scipy).
-
-    validate.py is called as a subprocess; results are returned as JSON on stdout.
-    Runs in a background thread so the HTTP response returns immediately.
-    """
-    global _validate_results, _validate_running
-    if _validate_running:
-        return jsonify({'status': 'already running'}), 409
-
-    def _run():
-        global _validate_results, _validate_running
-        _validate_running = True
-        try:
-            here = os.path.dirname(os.path.abspath(__file__))
-            cc_dir = os.path.join(here, '..', 'cloud-check')
-            # Use the cloud-check venv python which has numpy/Pillow/scipy
-            venv_py = os.path.join(cc_dir, '.venv', 'bin', 'python')
-            if not os.path.exists(venv_py):
-                venv_py = 'python3'   # fallback: hope numpy is available
-            validate_script = os.path.join(cc_dir, 'validate.py')
-            config_path = os.path.join(cc_dir, 'validate_config.json')
-            proc = subprocess.run(
-                [venv_py, validate_script, config_path, '--json'],
-                capture_output=True, text=True, timeout=120,
-            )
-            if proc.returncode != 0:
-                _validate_results = [{'error': proc.stderr.strip() or 'validate.py exited with error'}]
-            else:
-                _validate_results = json.loads(proc.stdout)
-        except Exception as exc:
-            _validate_results = [{'error': str(exc)}]
-        finally:
-            _validate_running = False
-
-    threading.Thread(target=_run, daemon=True).start()
-    return jsonify({'status': 'started'}), 202
-
-
-@app.route('/validate')
-def validate_view():
-    return render_template('validate.html',
-                           results=_validate_results,
-                           running=_validate_running)
-
+# NOTE: /admin/backfill and /validate were removed along with the background
+# model.  They shelled out to backfill_meta.py and validate.py, which are now
+# retired: both replay a per-tile model the firmware no longer runs.  The
+# suppression rule is fitted offline instead, by cloud-check/presuppress_model.py.
 
 if __name__ == '__main__':
     app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024
